@@ -1,0 +1,103 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  linux-x64:
+    # Native Linux: the lockdown (seccomp, Landlock) can only be tested on a
+    # real kernel, not under emulation.
+    runs-on: ubuntu-24.04
+    timeout-minutes: 300
+    env:
+      V8_FROM_SOURCE: '1'
+      LIBCLANG_PATH: /usr/lib/llvm-21/lib
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Free disk space for the V8 build
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+          df -h /
+
+      - name: Install libclang 21, strace
+        run: |
+          wget -q https://apt.llvm.org/llvm.sh
+          chmod +x llvm.sh
+          sudo ./llvm.sh 21
+          sudo apt-get install -y -q libclang-21-dev libglib2.0-dev strace
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Fetch rusty_v8
+        run: scripts/fetch-rusty-v8.sh
+
+      - name: Restore V8 build
+        id: v8-cache
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            target
+            build/rusty_v8/third_party/rust-toolchain
+          key: v8-linux-x64-${{ hashFiles('scripts/fetch-rusty-v8.sh', 'Cargo.lock') }}
+          restore-keys: v8-linux-x64-
+
+      - name: Build worker (V8 from source, sandbox enabled)
+        run: |
+          scripts/build-v8.sh || { tail -100 build/logs/linux-x86_64.log; exit 1; }
+          cp target/release/isolane-worker "$RUNNER_TEMP/isolane-worker"
+
+      # Saved right after the build so a failing test doesn't discard it.
+      - name: Save V8 build
+        if: steps.v8-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            target
+            build/rusty_v8/third_party/rust-toolchain
+          key: v8-linux-x64-${{ hashFiles('scripts/fetch-rusty-v8.sh', 'Cargo.lock') }}
+
+      - name: V8 sandbox self-check
+        run: '"$RUNNER_TEMP/isolane-worker" --self-check'
+
+      - name: Build escape-test worker
+        # Same V8 build settings as above, so only the isolane crate rebuilds.
+        run: |
+          cargo build --release -p isolane-worker --features escape-tests
+          cp target/release/isolane-worker "$RUNNER_TEMP/isolane-escape-worker"
+
+      - name: Build TypeScript
+        run: |
+          npm ci
+          npx tsc
+
+      - name: Lockdown tests
+        env:
+          ISOLANE_WORKER: ${{ runner.temp }}/isolane-worker
+          ISOLANE_ESCAPE_WORKER: ${{ runner.temp }}/isolane-escape-worker
+        run: node --test --test-reporter=spec test/lockdown.test.mjs
+
+      - name: End-to-end tests (strict mode, lockdown on)
+        env:
+          ISOLANE_WORKER: ${{ runner.temp }}/isolane-worker
+          ISOLANE_STRICT: '1'
+        run: node --test --test-reporter=spec test/lanes.test.mjs
+
+      - name: Syscall audit
+        if: always()
+        run: |
+          scripts/syscall-audit.sh "$RUNNER_TEMP/isolane-worker" | tee syscall-audit.txt
+          { echo '### Syscalls after ready'; echo '```'; cat syscall-audit.txt; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: linux-x64
+          path: |
+            syscall-audit.txt
+            build/logs/*.log
+          if-no-files-found: ignore

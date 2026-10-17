@@ -1,0 +1,14 @@
+[workspace]
+resolver = "2"
+members = ["crates/worker"]
+# build/ holds the rusty_v8 checkout, which is its own workspace.
+exclude = ["build"]
+
+[workspace.package]
+version = "0.0.0"
+edition = "2021"
+license = "MIT"
+
+[profile.release]
+lto = true
+codegen-units = 1

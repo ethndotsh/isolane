@@ -1,0 +1,41 @@
+#!/usr/bin/env bash
+# Trace the worker across the test suite and list every syscall it makes
+# after sending `ready` (the point where seccomp applies), with counts.
+# Runs the worker with --no-lockdown so nothing is killed mid-trace.
+# Usage: scripts/syscall-audit.sh path/to/isolane-worker
+set -euo pipefail
+cd "$(dirname "$0")/.."
+worker=$(realpath "$1")
+out=$(mktemp -d)
+wrapper="$out/worker"
+# Workers start with an empty environment, so use absolute paths.
+cat >"$wrapper" <<WRAP
+#!/bin/sh
+mkdir -p "$out/\$\$"
+exec $(command -v strace) -f -ff -tt -qq -o "$out/\$\$/t" "$worker" --no-lockdown
+WRAP
+chmod +x "$wrapper"
+ISOLANE_WORKER="$wrapper" node --test test/lanes.test.mjs >"$out/tests.log" 2>&1 || true
+python3 - "$out" <<'PY'
+import collections, glob, os, re, sys
+root = sys.argv[1]
+counts = collections.Counter()
+line_re = re.compile(r'^(\d\d:\d\d:\d\d\.\d+) (?:<\.\.\. )?([a-z0-9_]+)[( ]')
+for proc in glob.glob(os.path.join(root, '*/')):
+    events = []
+    for f in glob.glob(os.path.join(proc, 't.*')):
+        for line in open(f, errors='replace'):
+            m = line_re.match(line)
+            if m:
+                events.append((m.group(1), m.group(2), line))
+    events.sort()
+    # The ready frame is the first write to fd 1.
+    ready = next((i for i, (_, name, line) in enumerate(events) if name == 'write' and line.split(' ', 1)[1].startswith('write(1,')), None)
+    if ready is None:
+        continue
+    for _, name, _ in events[ready + 1:]:
+        if name not in ('exited', 'killed', 'resumed'):
+            counts[name] += 1
+for name, n in sorted(counts.items(), key=lambda kv: -kv[1]):
+    print(f'{n:9d} {name}')
+PY

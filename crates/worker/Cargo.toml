@@ -1,0 +1,23 @@
+[package]
+name = "isolane-worker"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[features]
+# Test-only: `--escape-test <probe>` locks the worker down, then attempts a
+# forbidden operation (test/lockdown.test.mjs expects it to fail). Never
+# enabled in release artifacts.
+escape-tests = []
+
+[dependencies]
+# rusty_v8 built from source (V8_FROM_SOURCE=1): no upstream prebuilt has
+# the V8 sandbox enabled. The checkout lives in build/ (see scripts/).
+v8 = { path = "../../build/rusty_v8", features = ["v8_enable_sandbox"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["raw_value"] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+landlock = "0.4"
+libc = "0.2"
+seccompiler = "0.5"
