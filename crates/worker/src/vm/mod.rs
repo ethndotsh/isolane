@@ -185,6 +185,15 @@ fn vm_main(id: u64, config: VmConfig, rx: Receiver<VmMsg>, out: Output) {
     if let Some(max) = config.limits.heap_bytes {
         params = params.heap_limits(0, max as usize);
     }
+    // A web VM starts from the web platform's snapshot (built on first
+    // use), if there is one; other VMs never touch it.
+    let snapshot = if config.web { crate::web::snapshot() } else { None };
+    let from_snapshot = snapshot.is_some();
+    if let Some(blob) = snapshot {
+        params = params
+            .snapshot_blob(v8::StartupData::from(blob))
+            .external_references(std::borrow::Cow::Borrowed(crate::web::external_references()));
+    }
     let mut isolate = v8::Isolate::new(params);
     isolate.set_microtasks_policy(v8::MicrotasksPolicy::Explicit);
     isolate.set_allow_wasm_code_generation_callback(if config.wasm { allow_wasm } else { deny_wasm });
@@ -217,7 +226,7 @@ fn vm_main(id: u64, config: VmConfig, rx: Receiver<VmMsg>, out: Output) {
     let retire = |cause: String| fail(ErrorCode::IsolateRetired, cause);
     // Setup runs the embedder's `setup` shims: under the eval budget.
     bridge.deadline.set(watchdog.arm(timeout, cpu));
-    let created = new_context(&mut isolate, &config);
+    let created = new_context(&mut isolate, &config, from_snapshot);
     bridge.deadline.set(None);
     let fired = watchdog.disarm() != Fired::No || bridge.timed_out.take();
     if isolate.is_execution_terminating() || fired || oom.hit.load(Ordering::SeqCst) {

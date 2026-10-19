@@ -77,7 +77,13 @@ export class SpareWorker {
   readonly memoryBytes: number | undefined;
   handlers: WorkerHandlers | undefined;
 
-  constructor(workerPath: string, strict: boolean, memoryBytes: number | undefined, onExit: (s: SpareWorker) => void) {
+  constructor(
+    workerPath: string,
+    strict: boolean,
+    memoryBytes: number | undefined,
+    webSnapshot: boolean,
+    onExit: (s: SpareWorker) => void,
+  ) {
     this.memoryBytes = memoryBytes;
     this.proc = new WorkerProcess(
       workerPath,
@@ -90,6 +96,7 @@ export class SpareWorker {
       },
       strict,
       memoryBytes,
+      webSnapshot,
     );
   }
 }
@@ -162,6 +169,8 @@ export interface TenantWorkerOptions {
   /** The tenant's hooks (runtime, defaults, tenants(name)), for worker and limit events. */
   chain: HookChain;
   onGone: (worker: TenantWorker, exit: WorkerExit) => void;
+  /** Its first isolate uses the web platform: build its snapshot right away. */
+  webSnapshot: boolean;
   spare?: SpareWorker;
 }
 
@@ -207,7 +216,7 @@ export class TenantWorker {
       this.#proc = o.spare.proc;
       o.spare.handlers = handlers;
     } else {
-      this.#proc = new WorkerProcess(o.workerPath, handlers, o.strict, o.limits.workerMemoryBytes ?? undefined);
+      this.#proc = new WorkerProcess(o.workerPath, handlers, o.strict, o.limits.workerMemoryBytes ?? undefined, o.webSnapshot);
     }
     this.#proc.ready.then(
       () => this.#chain.emit('worker', { tenant: this.tenant, event: 'start', pid: this.#proc.pid }),

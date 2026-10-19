@@ -1,8 +1,11 @@
 // The web platform globals (WinterTC Minimum Common API, phases 1–3), defined
-// non-enumerable like Deno's 98_global_scope_shared.js. Most are lazy: the
-// first access loads the vendored script behind them, so a VM pays only
-// for what its code uses. Called once per context by the worker:
-//   (bootstrap) => undefined
+// non-enumerable like Deno's 98_global_scope_shared.js. Called once per
+// context by the worker:
+//   (bootstrap) => { configure(baseUrl), materialize() }
+// Most globals are lazy: the first access loads the vendored script behind
+// them. For the startup snapshot, materialize() loads them all up front, so
+// a snapshotted isolate starts with every API ready; configure() then sets
+// what's the isolate's own (its base URL, its timers, its time origin).
 (function (bootstrap) {
   "use strict";
   const { core, primordials } = bootstrap;
@@ -167,13 +170,16 @@
   // which the worker deletes before guest code runs. Without a policy,
   // fetch() rejects with a TypeError.
   let fetchTransport = null;
+  let fetchModule = null;
   ObjectDefineProperty(g, "__isolane_web_fetch", {
     __proto__: null,
     configurable: true,
     enumerable: false,
     writable: false,
     value(transport) {
-      if (fetchTransport === null) fetchTransport = transport;
+      if (fetchTransport !== null) return;
+      fetchTransport = transport;
+      if (fetchModule !== null) fetchModule.setTransport(transport);
     },
   });
   lazy("Headers", from(HEADERS_JS, "Headers"));
@@ -181,9 +187,9 @@
   lazy("Request", from(REQUEST_JS, "Request"));
   lazy("Response", from(RESPONSE_JS, "Response"));
   lazy("fetch", () => {
-    const module = load(FETCH_JS);
-    if (fetchTransport !== null) module.setTransport(fetchTransport);
-    return module.fetch;
+    fetchModule = load(FETCH_JS);
+    if (fetchTransport !== null) fetchModule.setTransport(fetchTransport);
+    return fetchModule.fetch;
   });
 
   lazy("structuredClone", from("ext:deno_web/02_structured_clone.js", "structuredClone"));
@@ -226,15 +232,13 @@
   define("navigator", ObjectFreeze({ __proto__: null, userAgent: "isolane" }));
   // `location`, a WorkerLocation, only with a base URL (`web.baseUrl`).
   // Read-only: guest code can't navigate anywhere.
-  if (core.baseUrl !== undefined) {
-    lazy("location", () => {
-      const url = new (load("ext:deno_web/00_url.js").URL)(core.baseUrl);
-      const fields = ["href", "origin", "protocol", "host", "hostname", "port", "pathname", "search", "hash"];
-      const loc = { __proto__: null };
-      for (const field of fields) loc[field] = url[field];
-      loc.toString = () => url.href;
-      return ObjectFreeze(loc);
-    });
+  function defineLocation(baseUrl) {
+    const url = new (load("ext:deno_web/00_url.js").URL)(baseUrl);
+    const fields = ["href", "origin", "protocol", "host", "hostname", "port", "pathname", "search", "hash"];
+    const loc = { __proto__: null };
+    for (const field of fields) loc[field] = url[field];
+    loc.toString = () => url.href;
+    define("location", ObjectFreeze(loc));
   }
 
   const INTEGER_ARRAYS = [
@@ -279,4 +283,39 @@
       },
     }),
   );
+
+  // Every lazy global, resolved now (for the snapshot). Accessing one
+  // replaces its accessor with the value; the EventTarget methods turn the
+  // global object into an EventTarget.
+  const LAZY = [
+    "URL", "URLSearchParams", "DOMException", "QuotaExceededError",
+    "Event", "EventTarget", "CustomEvent", "ErrorEvent", "PromiseRejectionEvent",
+    "AbortController", "AbortSignal", "atob", "btoa",
+    "TextEncoder", "TextDecoder", "TextEncoderStream", "TextDecoderStream",
+    "setTimeout", "setInterval", "clearTimeout", "clearInterval",
+    "ReadableStream", "ReadableStreamDefaultReader", "ReadableStreamBYOBReader", "ReadableStreamBYOBRequest",
+    "ReadableByteStreamController", "ReadableStreamDefaultController", "WritableStream",
+    "WritableStreamDefaultWriter", "WritableStreamDefaultController", "TransformStream",
+    "TransformStreamDefaultController", "ByteLengthQueuingStrategy", "CountQueuingStrategy",
+    "Blob", "File", "FileReader", "ProgressEvent", "CompressionStream", "DecompressionStream",
+    "Headers", "FormData", "Request", "Response", "fetch", "structuredClone",
+    "performance", "Performance", "PerformanceEntry", "PerformanceMark", "PerformanceMeasure",
+  ];
+  function materialize() {
+    for (const name of LAZY) void g[name];
+    eventModule();
+    void g.URL.createObjectURL;
+  }
+
+  return ObjectFreeze({
+    __proto__: null,
+    materialize,
+    configure(baseUrl) {
+      bootstrap.configure({ baseUrl });
+      if (baseUrl !== undefined) defineLocation(baseUrl);
+      // The time origin is when this isolate started, not when the snapshot
+      // was made.
+      if (perf) perf.setTimeOrigin();
+    },
+  });
 })

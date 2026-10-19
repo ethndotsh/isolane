@@ -4,12 +4,19 @@
 //! this module provides the native layer that JS calls: Deno's ops (same
 //! names and calling conventions) and a few helpers for runtime/core.js.
 //!
-//! Setup, per context: run primordials (capturing pristine intrinsics),
-//! build the `__bootstrap` object in runtime/core.js, then install the
-//! globals lazily from runtime/globals.js. Guest code never sees
-//! `__bootstrap`: vendored files get it as a function parameter.
+//! Setup: run primordials (capturing pristine intrinsics), build the
+//! `__bootstrap` object in runtime/core.js, then install the globals from
+//! runtime/globals.js. Guest code never sees `__bootstrap`: vendored files
+//! get it as a function parameter.
+//!
+//! That setup runs once per worker, into a V8 startup snapshot with every
+//! API already loaded (`snapshot`); each web VM is created from it and then
+//! configured with what's its own (`configure`). Without a snapshot (it
+//! failed to build), each VM runs the setup itself, lazily (`install`).
 
 mod base64;
+mod snapshot;
+pub use snapshot::{external_references, snapshot};
 mod clone;
 mod compression;
 mod encoding;
@@ -348,23 +355,21 @@ fn expose_time(scope: &mut v8::PinScope, buf: v8::Local<v8::Value>, d: std::time
     });
 }
 
-macro_rules! set_fns {
-    ($scope:ident, $obj:ident, { $($name:literal => $f:path),* $(,)? }) => {
-        $(
-            let key = v8::String::new($scope, $name).unwrap();
-            let func = v8::Function::builder($f).build($scope).expect("build web op");
-            $obj.set($scope, key.into(), func.into());
-        )*
+/// The native functions, as (name, callback): one list both builds the JS
+/// objects and registers every callback with V8 as an external reference
+/// (which a snapshot needs to restore them).
+macro_rules! natives {
+    ($($name:literal => $f:path),* $(,)?) => {
+        vec![$(($name, v8::MapFnTo::<v8::FunctionCallback>::map_fn_to($f))),*]
     };
 }
 
-fn native_object<'s>(scope: &mut v8::PinScope<'s, '_>) -> v8::Local<'s, v8::Object> {
-    let native = v8::Object::new(scope);
-    let key = v8::String::new(scope, "maxTimers").unwrap();
-    let max_timers = v8::Integer::new_from_unsigned(scope, crate::limits::get().timers);
-    native.set(scope, key.into(), max_timers.into());
-    set_fns!(scope, native, {
+type Natives = Vec<(&'static str, v8::FunctionCallback)>;
+
+fn native_fns() -> Natives {
+    natives!(
         "compileExt" => compile_ext,
+        "maxTimers" => max_timers,
         "isArrayBuffer" => is_array_buffer,
         "isAnyArrayBuffer" => is_any_array_buffer,
         "isSharedArrayBuffer" => is_shared_array_buffer,
@@ -391,13 +396,11 @@ fn native_object<'s>(scope: &mut v8::PinScope<'s, '_>) -> v8::Local<'s, v8::Obje
         "timerState" => timers::timer_state,
         "setTimerRunner" => timers::set_timer_runner,
         "log" => log,
-    });
-    native
+    )
 }
 
-fn ops_object<'s>(scope: &mut v8::PinScope<'s, '_>) -> v8::Local<'s, v8::Object> {
-    let ops = v8::Object::new(scope);
-    set_fns!(scope, ops, {
+fn op_fns() -> Natives {
+    natives!(
         "op_base64_decode" => base64::op_base64_decode,
         "op_base64_encode_from_buffer" => base64::op_base64_encode_from_buffer,
         "op_base64_atob" => base64::op_base64_atob,
@@ -416,8 +419,28 @@ fn ops_object<'s>(scope: &mut v8::PinScope<'s, '_>) -> v8::Local<'s, v8::Object>
         "op_encoding_encode_into_fallback" => encoding::op_encoding_encode_into_fallback,
         "op_now" => op_now,
         "op_time_origin" => op_time_origin,
-    });
-    ops
+    )
+}
+
+/// Every callback the web platform's objects hold.
+fn all_natives() -> impl Iterator<Item = v8::FunctionCallback> {
+    native_fns().into_iter().chain(op_fns()).map(|(_, f)| f)
+}
+
+fn object_of<'s>(scope: &mut v8::PinScope<'s, '_>, natives: Natives) -> v8::Local<'s, v8::Object> {
+    let obj = v8::Object::new(scope);
+    for (name, f) in natives {
+        let key = v8::String::new(scope, name).unwrap();
+        let func = v8::Function::builder_raw(f).build(scope).expect("build web native");
+        obj.set(scope, key.into(), func.into());
+    }
+    obj
+}
+
+/// native.maxTimers(): the VM's limits.timers (read per call: the JS that
+/// asks may be from a snapshot made for every VM).
+fn max_timers(scope: &mut v8::PinScope, _args: Args, mut rv: Rv) {
+    rv.set(v8::Integer::new_from_unsigned(scope, crate::limits::get().timers).into());
 }
 
 // ---- setup ----
@@ -439,9 +462,9 @@ fn call<'s>(
     f.call(scope, recv, args)
 }
 
-/// Install the web platform globals in the current context, before any
-/// guest code runs.
-pub fn install(scope: &mut v8::PinScope, global: v8::Local<v8::Object>, base_url: Option<&str>) -> Result<(), String> {
+/// Bootstrap the web platform in the current context: primordials,
+/// core.js, globals.js. Returns globals.js's `{ configure, materialize }`.
+fn bootstrap<'s>(scope: &mut v8::PinScope<'s, '_>, global: v8::Local<'s, v8::Object>) -> Result<v8::Local<'s, v8::Object>, String> {
     v8::tc_scope!(let tc, scope);
     let failed = |tc: &mut v8::PinnedRef<v8::TryCatch<v8::HandleScope>>, step: &str| {
         let msg = tc.exception().map(|e| e.to_rust_string_lossy(tc)).unwrap_or_else(|| "unknown error".into());
@@ -466,15 +489,8 @@ pub fn install(scope: &mut v8::PinScope, global: v8::Local<v8::Object>, base_url
         return Err("web platform setup failed: no primordials".into());
     };
 
-    let native = native_object(tc);
-    if let Some(url) = base_url {
-        // The supervisor checked it's an absolute http(s) URL.
-        let key = v8::String::new(tc, "baseUrl").unwrap();
-        let value = v8::String::new(tc, url).unwrap();
-        native.set(tc, key.into(), value.into());
-    }
-    let native = native.into();
-    let ops = ops_object(tc).into();
+    let native = object_of(tc, native_fns()).into();
+    let ops = object_of(tc, op_fns()).into();
     let Some(core) = run_script(tc, "isolane:core.js", CORE) else {
         return Err(failed(tc, "core.js"));
     };
@@ -484,8 +500,58 @@ pub fn install(scope: &mut v8::PinScope, global: v8::Local<v8::Object>, base_url
     let Some(globals) = run_script(tc, "isolane:globals.js", GLOBALS) else {
         return Err(failed(tc, "globals.js"));
     };
-    if call(tc, globals, &[bootstrap]).is_none() {
+    let Some(handle) = call(tc, globals, &[bootstrap]).and_then(|h| v8::Local::<v8::Object>::try_from(h).ok()) else {
         return Err(failed(tc, "globals.js"));
+    };
+    Ok(handle)
+}
+
+/// Call `handle[method](...args)`.
+fn call_method<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    handle: v8::Local<'s, v8::Object>,
+    method: &str,
+    args: &[v8::Local<'s, v8::Value>],
+) -> Result<(), String> {
+    v8::tc_scope!(let tc, scope);
+    let key = v8::String::new(tc, method).unwrap();
+    let ran = handle.get(tc, key.into()).and_then(|f| call(tc, f, args));
+    if ran.is_none() {
+        let msg = tc.exception().map(|e| e.to_rust_string_lossy(tc)).unwrap_or_else(|| "unknown error".into());
+        return Err(format!("web platform setup failed ({method}): {msg}"));
     }
     Ok(())
+}
+
+/// The VM's own web settings: its base URL (and `location`), its timers,
+/// its time origin.
+fn configure_with<'s>(scope: &mut v8::PinScope<'s, '_>, handle: v8::Local<'s, v8::Object>, base_url: Option<&str>) -> Result<(), String> {
+    let url = match base_url {
+        // The supervisor checked it's an absolute http(s) URL.
+        Some(url) => v8::String::new(scope, url).unwrap().into(),
+        None => v8::undefined(scope).into(),
+    };
+    call_method(scope, handle, "configure", &[url])
+}
+
+/// Install the web platform in a fresh context (no snapshot), lazily: each
+/// global loads its script on first use.
+pub fn install<'s>(scope: &mut v8::PinScope<'s, '_>, global: v8::Local<'s, v8::Object>, base_url: Option<&str>) -> Result<(), String> {
+    let handle = bootstrap(scope, global)?;
+    configure_with(scope, handle, base_url)
+}
+
+/// Where the snapshot keeps globals.js's handle for each VM to configure
+/// itself with; deleted before guest code runs.
+const SNAPSHOT_HANDLE: &str = "__isolane_web_setup";
+
+/// Configure a context created from the snapshot.
+pub fn configure<'s>(scope: &mut v8::PinScope<'s, '_>, global: v8::Local<'s, v8::Object>, base_url: Option<&str>) -> Result<(), String> {
+    let key = v8::String::new(scope, SNAPSHOT_HANDLE).unwrap();
+    let handle = global.get(scope, key.into()).and_then(|h| v8::Local::<v8::Object>::try_from(h).ok());
+    global.delete(scope, key.into());
+    let Some(handle) = handle else {
+        return Err("web platform setup failed: the snapshot has no setup handle".into());
+    };
+    configure_with(scope, handle, base_url)
 }
