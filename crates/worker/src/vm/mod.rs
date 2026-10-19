@@ -157,12 +157,13 @@ unsafe extern "C" fn near_heap_limit(data: *mut c_void, current: usize, _initial
 /// V8 calls it both when the heap reaches the isolate's limit and when the
 /// OS refuses V8 more memory (the worker's RLIMIT_DATA cap). Tell them apart
 /// by how much the isolate actually holds (heap plus the external memory,
-/// like ArrayBuffers, that V8 charges to it): near the heap limit means the
-/// heap limit; well under it means the worker ran out first.
+/// like ArrayBuffers, that V8 charges to it), against the heap limit as
+/// configured: at least half of it means the heap limit; well under it
+/// means the worker ran out first.
 fn memory_limit_hit(isolate: &mut v8::Isolate, heap_limit: usize) -> (&'static str, &'static str) {
     let stats = isolate.get_heap_statistics();
     let held = stats.used_heap_size() + stats.external_memory();
-    if held >= heap_limit / 4 * 3 {
+    if held >= heap_limit / 2 {
         ("heapBytes", "the isolate exceeded its heap limit (limits.heapBytes)")
     } else {
         ("workerMemoryBytes", "the tenant's worker ran out of memory (limits.workerMemoryBytes)")
@@ -223,8 +224,12 @@ fn vm_main(id: u64, config: VmConfig, rx: Receiver<VmMsg>, out: Output) {
     };
     let oom = Box::new(OomState { handle, hit: AtomicBool::new(false) });
     isolate.add_near_heap_limit_callback(near_heap_limit, &*oom as *const OomState as *mut c_void);
-    // The heap limit as configured, before the callback raises it.
-    let heap_limit = isolate.get_heap_statistics().heap_size_limit();
+    // The heap limit as configured (V8's own figure, which adds young
+    // generation space, only when none is).
+    let heap_limit = match config.limits.heap_bytes {
+        Some(bytes) => bytes as usize,
+        None => isolate.get_heap_statistics().heap_size_limit(),
+    };
 
     let bridge = Rc::new(Bridge {
         vm: id,
