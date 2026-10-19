@@ -36,6 +36,15 @@ unsafe extern "C" {
     #[cfg(not(feature = "dev-prebuilt"))]
     #[link_name = "_ZN2v82V827IsSandboxConfiguredSecurelyEv"]
     fn v8_is_sandbox_configured_securely() -> bool;
+
+    // v8::V8::SetFatalMemoryErrorCallback(), also not bound by rusty_v8.
+    // Process-wide: V8 calls it for out-of-memory failures that belong to
+    // no isolate (the sandbox's ArrayBuffer allocator), where an isolate's
+    // OOM handler never runs and V8 would otherwise abort with a trap.
+    #[link_name = "_ZN2v82V827SetFatalMemoryErrorCallbackEPFvPKcRKNS_10OOMDetailsEE"]
+    fn v8_set_fatal_memory_error_callback(
+        callback: unsafe extern "C" fn(*const std::ffi::c_char, &v8::OomDetails),
+    );
 }
 
 /// V8 flags for untrusted code.
@@ -91,6 +100,7 @@ fn init_v8() {
     vm::set_platform(platform.clone());
     v8::V8::initialize_platform(platform);
     v8::V8::initialize();
+    unsafe { v8_set_fatal_memory_error_callback(vm::out_of_memory) };
 }
 
 #[cfg(not(feature = "dev-prebuilt"))]

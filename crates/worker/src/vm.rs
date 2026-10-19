@@ -530,7 +530,7 @@ unsafe extern "C" fn allow_wasm(_: v8::Local<v8::Context>, _: v8::Local<v8::Stri
 /// V8 couldn't get memory (the worker's memory limit, not a VM's heap
 /// limit, which `near_heap_limit` handles). V8 can't continue; exit with a
 /// code the supervisor reports as a memory limit, not a crash.
-unsafe extern "C" fn out_of_memory(_location: *const std::ffi::c_char, _details: &v8::OomDetails) {
+pub unsafe extern "C" fn out_of_memory(_location: *const std::ffi::c_char, _details: &v8::OomDetails) {
     const MSG: &[u8] = b"isolane-worker: out of memory (worker memory limit)\n";
     #[cfg(target_os = "linux")]
     unsafe {
