@@ -611,6 +611,13 @@ export function connectBroker(policy: ConnectPolicy, denied: DenialReporter = ()
   let opening = 0;
   let nextId = 1;
   let disposed = false;
+  /** Ids of sockets dropped when their connection closed with nothing unread; the last 1,024. */
+  const forgotten = new Set<number>();
+  const forget = (id: number) => {
+    sockets.delete(id);
+    forgotten.add(id);
+    if (forgotten.size > 1024) forgotten.delete(forgotten.values().next().value as number);
+  };
 
   const get = (id: unknown) => {
     const s = typeof id === 'number' ? sockets.get(id) : undefined;
@@ -666,7 +673,7 @@ export function connectBroker(policy: ConnectPolicy, denied: DenialReporter = ()
       g.closed = true;
       // Nothing left for the guest to read: forget it now, so a closed
       // socket stops counting against connect.limits.connections.
-      if (!g.chunks.length && !g.error && !g.wake) sockets.delete(id);
+      if (!g.chunks.length && !g.error && !g.wake) forget(id);
       wake();
     });
     socket.setTimeout(idleTimeoutMs, () => socket.destroy(new Error('idle timeout')));
@@ -715,8 +722,8 @@ export function connectBroker(policy: ConnectPolicy, denied: DenialReporter = ()
   };
 
   const read = async (id: unknown): Promise<Buffer | null> => {
-    // A socket forgotten when its connection closed reads as ended.
-    if (typeof id === 'number' && id > 0 && id < nextId && !sockets.has(id)) return null;
+    // A socket forgotten when its connection closed reads as ended (once).
+    if (typeof id === 'number' && forgotten.delete(id)) return null;
     const g = get(id);
     if (g.wake) throw new Error('socket.read: another read is already waiting');
     while (g.chunks.length === 0 && !g.ended && !g.error) {
