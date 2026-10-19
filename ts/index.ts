@@ -6,6 +6,7 @@
 import { resolve as resolvePath } from 'node:path';
 
 import { capabilities, type FsPolicy, type NetworkPolicy, type SocketPolicy } from './capabilities.js';
+import { IsolaneError, invalidOption, isIsolaneErrorCode, type IsolaneErrorCode } from './errors.js';
 import {
   OOM_EXIT_CODE,
   WorkerProcess,
@@ -18,53 +19,8 @@ import {
 
 export type { IsolationInfo, LockdownLevel, LogLevel } from './worker.js';
 export type { FsPolicy, NetworkPolicy, SocketPolicy } from './capabilities.js';
-
-/**
- * Why an eval failed:
- * - `ERR_TIMEOUT`: `timeoutMs` elapsed. The VM stays usable.
- * - `ERR_GUEST_EXCEPTION`: the guest threw, or its result promise rejected.
- * - `ERR_MEMORY_LIMIT`: the VM exceeded `memoryLimitBytes` (it is retired),
- *   or the tenant's worker hit `workerMemoryLimitBytes` (it is restarted).
- * - `ERR_VM_TERMINATED`: an earlier eval retired this VM; create a new one.
- * - `ERR_VM_DISPOSED`: `dispose()` was called.
- * - `ERR_NOT_SERIALIZABLE`: the completion value isn't JSON-serializable.
- * - `ERR_UNSETTLED`: the result is a promise that can never settle.
- * - `ERR_WORKER_CRASHED`: the tenant's worker process died (possibly an
- *   exploit attempt; see `onSecurityEvent`).
- * - `ERR_INTERNAL`: an isolane bug or resource failure.
- */
-export type IsolaneErrorCode =
-  | 'ERR_TIMEOUT'
-  | 'ERR_GUEST_EXCEPTION'
-  | 'ERR_MEMORY_LIMIT'
-  | 'ERR_VM_TERMINATED'
-  | 'ERR_VM_DISPOSED'
-  | 'ERR_NOT_SERIALIZABLE'
-  | 'ERR_UNSETTLED'
-  | 'ERR_WORKER_CRASHED'
-  | 'ERR_INTERNAL';
-
-const KNOWN_CODES = new Set<string>([
-  'ERR_TIMEOUT',
-  'ERR_GUEST_EXCEPTION',
-  'ERR_MEMORY_LIMIT',
-  'ERR_VM_TERMINATED',
-  'ERR_VM_DISPOSED',
-  'ERR_NOT_SERIALIZABLE',
-  'ERR_UNSETTLED',
-  'ERR_WORKER_CRASHED',
-  'ERR_INTERNAL',
-]);
-
-export class IsolaneError extends Error {
-  readonly code: IsolaneErrorCode;
-
-  constructor(code: IsolaneErrorCode, message: string) {
-    super(message);
-    this.name = 'IsolaneError';
-    this.code = code;
-  }
-}
+export { IsolaneError } from './errors.js';
+export type { GuestErrorInfo, IsolaneErrorCode, IsolaneErrorKind } from './errors.js';
 
 /**
  * A host function callable from guest code. Arguments and the result cross
@@ -73,6 +29,17 @@ export class IsolaneError extends Error {
  */
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 export type HostFunction = (...args: any[]) => unknown;
+
+/**
+ * A host function the guest calls synchronously: `{ sync: true, fn }`. The
+ * guest gets the result (or the thrown error) directly instead of a
+ * Promise, and its isolate waits for the reply (counting against
+ * `timeoutMs`). `fn` itself may still be async.
+ */
+export interface SyncHostFunction {
+  sync: true;
+  fn: HostFunction;
+}
 
 /** A line of guest console output. */
 export interface LogEntry {
@@ -91,8 +58,11 @@ export interface IsolateOptions {
    * whole is capped by `workerMemoryLimitBytes`.)
    */
   memoryLimitBytes?: number;
-  /** Functions installed as guest globals, by name. */
-  hostFunctions?: Record<string, HostFunction>;
+  /**
+   * Functions installed as guest globals, by name. Async in the guest
+   * (they return a Promise) unless given as `{ sync: true, fn }`.
+   */
+  hostFunctions?: Record<string, HostFunction | SyncHostFunction>;
   /**
    * JSON values installed as guest globals before any code runs: the safe
    * way to pass inputs, instead of splicing them into the code string.
@@ -160,6 +130,7 @@ type ClockSpec = { mode: 'frozen' } | { mode: 'realtime' } | { mode: 'fixed'; fi
 interface VmSetup {
   clock: ClockSpec;
   hostFunctions: Record<string, HostFunction>;
+  syncHostFunctions: string[];
   prelude?: string;
   dispose(): void;
 }
@@ -168,11 +139,30 @@ interface VmSetup {
 function vmSetup(opts: RunOptions): VmSetup {
   const clock = clockSpec(opts.clock);
   if (opts.randomSeed !== undefined && !(Number.isSafeInteger(opts.randomSeed) && opts.randomSeed >= 0)) {
-    throw new TypeError('isolane: randomSeed must be an integer from 0 to 2^53 - 1');
+    throw invalidOption('randomSeed must be an integer from 0 to 2^53 - 1');
   }
-  const user = { ...(opts.hostFunctions ?? {}) };
-  const caps = capabilities(opts, user);
-  return { clock, hostFunctions: { ...user, ...caps.hostFunctions }, prelude: caps.prelude, dispose: caps.dispose };
+  const user: Record<string, HostFunction> = {};
+  const syncHostFunctions: string[] = [];
+  for (const [name, entry] of Object.entries(opts.hostFunctions ?? {})) {
+    if (typeof entry === 'function') user[name] = entry;
+    else if (entry && entry.sync === true && typeof entry.fn === 'function') {
+      user[name] = entry.fn;
+      syncHostFunctions.push(name);
+    } else throw invalidOption(`hostFunctions.${name} must be a function or { sync: true, fn }`);
+  }
+  let caps;
+  try {
+    caps = capabilities(opts, user);
+  } catch (err) {
+    throw err instanceof TypeError ? invalidOption((err as Error).message.replace(/^isolane: /, '')) : err;
+  }
+  return {
+    clock,
+    hostFunctions: { ...user, ...caps.hostFunctions },
+    syncHostFunctions,
+    prelude: caps.prelude,
+    dispose: caps.dispose,
+  };
 }
 
 function clockSpec(clock: RunOptions['clock']): ClockSpec {
@@ -181,7 +171,7 @@ function clockSpec(clock: RunOptions['clock']): ClockSpec {
   if (typeof clock === 'object' && clock !== null && Number.isFinite(clock.fixedMs)) {
     return { mode: 'fixed', fixedMs: clock.fixedMs };
   }
-  throw new TypeError(`isolane: clock must be 'frozen', 'realtime', or { fixedMs }`);
+  throw invalidOption(`clock must be 'frozen', 'realtime', or { fixedMs }`);
 }
 
 export interface SecurityEvent {
@@ -297,7 +287,8 @@ class TenantWorker {
       vm,
       timeoutMs: opts.timeoutMs,
       heapBytes: opts.memoryLimitBytes,
-      hostFunctions: Object.keys(setup.hostFunctions),
+      hostFunctions: Object.keys(setup.hostFunctions).filter((n) => !setup.syncHostFunctions.includes(n)),
+      syncHostFunctions: setup.syncHostFunctions,
       clock: setup.clock,
       randomSeed: opts.randomSeed,
       allowCodeGeneration: opts.allowCodeGeneration === true,
@@ -309,7 +300,7 @@ class TenantWorker {
   eval(vm: number, req: number, code: string): Promise<unknown> {
     return new Promise((resolve, reject) => {
       if (!this.#proc.alive) {
-        reject(new IsolaneError('ERR_WORKER_CRASHED', `worker for tenant ${this.tenant} is gone`));
+        reject(new IsolaneError('ERR_WORKER_CRASHED', `worker for tenant ${this.tenant} is gone`, { tenant: this.tenant }));
         return;
       }
       const pending: Pending = { resolve, reject };
@@ -362,8 +353,8 @@ class TenantWorker {
       clearTimeout(pending.timer);
       if (msg.ok) pending.resolve(msg.value);
       else {
-        const code = KNOWN_CODES.has(msg.code) ? (msg.code as IsolaneErrorCode) : 'ERR_INTERNAL';
-        pending.reject(new IsolaneError(code, msg.message));
+        const code = isIsolaneErrorCode(msg.code) ? msg.code : 'ERR_INTERNAL';
+        pending.reject(new IsolaneError(code, msg.message, { tenant: this.tenant, guest: msg.guest }));
       }
       this.#touch();
       return;
@@ -378,13 +369,19 @@ class TenantWorker {
       return;
     }
     // hostCall
-    const reply = (ok: boolean, value?: string, error?: string) => {
+    const reply = (ok: boolean, value?: string, err?: unknown) => {
       const frame: Record<string, unknown> = { t: 'hostReply', vm: msg.vm, call: msg.call, ok };
       if (value !== undefined) frame.value = value; // JSON text; absent = undefined
-      if (error !== undefined) frame.error = error;
+      if (!ok) {
+        frame.error = err instanceof Error ? err.message : String(err);
+        // The guest sees the same class (TypeError, ...) and Node-style code.
+        if (err instanceof Error && typeof err.name === 'string') frame.errorName = err.name;
+        const code = (err as { code?: unknown } | null)?.code;
+        if (typeof code === 'string') frame.errorCode = code;
+      }
       this.#proc.send(frame);
     };
-    const fail = (err: unknown) => reply(false, undefined, err instanceof Error ? err.message : String(err));
+    const fail = (err: unknown) => reply(false, undefined, err);
     const succeed = (result: unknown) => {
       let json: string | undefined;
       try {
@@ -420,8 +417,20 @@ class TenantWorker {
     clearTimeout(this.#idleTimer);
     for (const dispose of this.#disposers.values()) dispose();
     this.#disposers.clear();
-    const code: IsolaneErrorCode = isOutOfMemory(exit) ? 'ERR_MEMORY_LIMIT' : 'ERR_WORKER_CRASHED';
-    const err = new IsolaneError(code, `worker for tenant ${this.tenant} ${describeExit(exit)}`);
+    const code: IsolaneErrorCode = isOutOfMemory(exit)
+      ? 'ERR_MEMORY_LIMIT'
+      : exit.reason === 'unresponsive'
+        ? 'ERR_WORKER_UNRESPONSIVE'
+        : exit.reason === 'insufficient-isolation'
+          ? 'ERR_ISOLATION_UNAVAILABLE'
+          : exit.reason === 'killed'
+            ? 'ERR_RUNTIME_CLOSED'
+            : 'ERR_WORKER_CRASHED';
+    const err = new IsolaneError(code, `worker for tenant ${this.tenant} ${describeExit(exit)}`, {
+      tenant: this.tenant,
+      // A fresh worker has its full memory again.
+      retryable: code === 'ERR_MEMORY_LIMIT' ? true : undefined,
+    });
     for (const p of this.#requests.values()) {
       clearTimeout(p.timer);
       p.reject(err);
@@ -475,7 +484,7 @@ export class Runtime {
     this.#defaults = options.defaults;
     const limit = options.workerMemoryLimitBytes === undefined ? DEFAULT_WORKER_MEMORY_LIMIT : options.workerMemoryLimitBytes;
     if (limit !== null && !(Number.isSafeInteger(limit) && limit >= 64 * 1024 * 1024)) {
-      throw new TypeError('isolane: workerMemoryLimitBytes must be at least 64 MiB, or null');
+      throw invalidOption('workerMemoryLimitBytes must be at least 64 MiB, or null');
     }
     this.#memoryLimit = limit ?? undefined;
   }
@@ -485,7 +494,7 @@ export class Runtime {
    * `pool.tenant('acme', { timeoutMs: 1000 }).run('1 + 1')`.
    */
   tenant(name: string, defaults?: IsolateOptions): Tenant {
-    if (typeof name !== 'string' || name === '') throw new TypeError('isolane: tenant name is required');
+    if (typeof name !== 'string' || name === '') throw invalidOption('tenant name is required');
     return new Tenant(this, name, defaults);
   }
 
@@ -516,9 +525,9 @@ export class Runtime {
 
   /** Create a stateful VM on the tenant's worker. */
   createIsolate(options: RunOptions): Isolate {
-    if (this.#closed) throw new Error('isolane: pool is closed');
+    if (this.#closed) throw new IsolaneError('ERR_RUNTIME_CLOSED', 'isolane: the runtime is closed');
     if (typeof options?.tenant !== 'string' || options.tenant === '') {
-      throw new TypeError('isolane: options.tenant is required');
+      throw invalidOption('options.tenant is required');
     }
     const opts = mergeOptions(this.#defaults, options);
     const setup = vmSetup(opts);
@@ -618,9 +627,12 @@ export class Isolate {
 
   /** Evaluate code in this VM, preserving global state between calls. */
   async eval(code: string): Promise<unknown> {
-    if (this.#disposed) throw new IsolaneError('ERR_VM_DISPOSED', 'vm has been disposed');
+    if (this.#disposed) throw new IsolaneError('ERR_ISOLATE_DISPOSED', 'the isolate has been disposed');
     await this.#worker.ready.catch((err: Error) => {
-      throw new IsolaneError('ERR_WORKER_CRASHED', err.message);
+      const refused = /strict mode/.test(err.message);
+      throw new IsolaneError(refused ? 'ERR_ISOLATION_UNAVAILABLE' : 'ERR_WORKER_CRASHED', err.message, {
+        tenant: this.#worker.tenant,
+      });
     });
     return this.#worker.eval(this.#id, this.#nextReq(), code);
   }

@@ -50,6 +50,7 @@ pub fn advance() {
 }
 
 /// The platform's clock callback.
+#[cfg_attr(feature = "dev-prebuilt", allow(dead_code))]
 pub extern "C" fn platform_clock(real_ms: f64) -> f64 {
     NOW.with(|now| now.get()).unwrap_or(real_ms)
 }

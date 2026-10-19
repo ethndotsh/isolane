@@ -6,6 +6,8 @@
 import { spawn, type ChildProcessByStdio } from 'node:child_process';
 import type { Readable, Writable } from 'node:stream';
 
+import type { GuestErrorInfo } from './errors.js';
+
 /** Largest frame accepted from a worker (matches the worker's own cap). */
 export const MAX_FRAME = 64 << 20;
 
@@ -25,7 +27,7 @@ export interface IsolationInfo {
 export type WorkerMessage =
   | ({ t: 'ready' } & IsolationInfo)
   | { t: 'result'; req: number; ok: true; value: unknown }
-  | { t: 'result'; req: number; ok: false; code: string; message: string }
+  | { t: 'result'; req: number; ok: false; code: string; message: string; guest?: GuestErrorInfo }
   | { t: 'hostCall'; vm: number; call: number; name: string; args: unknown[] }
   | { t: 'log'; vm: number; level: LogLevel; message: string };
 
@@ -36,6 +38,20 @@ const LOG_LEVELS = new Set<string>(['log', 'info', 'debug', 'warn', 'error']);
 export const OOM_EXIT_CODE = 6;
 
 const isUint = (v: unknown): v is number => typeof v === 'number' && Number.isSafeInteger(v) && v >= 0;
+
+const optString = (v: unknown) => (typeof v === 'string' ? v : undefined);
+
+function parseGuestError(raw: unknown): GuestErrorInfo | undefined {
+  if (raw === null || typeof raw !== 'object') return undefined;
+  const g = raw as Record<string, unknown>;
+  if (typeof g.message !== 'string') return undefined;
+  const info: GuestErrorInfo = { message: g.message };
+  const name = optString(g.name);
+  const stack = optString(g.stack);
+  if (name !== undefined) info.name = name;
+  if (stack !== undefined) info.stack = stack;
+  return info;
+}
 
 /** Validate a decoded frame's shape; null if it isn't a message we accept. */
 export function parseWorkerMessage(raw: unknown): WorkerMessage | null {
@@ -57,9 +73,8 @@ export function parseWorkerMessage(raw: unknown): WorkerMessage | null {
     case 'result':
       if (!isUint(m.req) || typeof m.ok !== 'boolean') return null;
       if (m.ok) return { t: 'result', req: m.req, ok: true, value: m.value ?? null };
-      return typeof m.code === 'string' && typeof m.message === 'string'
-        ? { t: 'result', req: m.req, ok: false, code: m.code, message: m.message }
-        : null;
+      if (typeof m.code !== 'string' || typeof m.message !== 'string') return null;
+      return { t: 'result', req: m.req, ok: false, code: m.code, message: m.message, guest: parseGuestError(m.guest) };
     case 'hostCall':
       return isUint(m.vm) && isUint(m.call) && typeof m.name === 'string' && Array.isArray(m.args)
         ? { t: 'hostCall', vm: m.vm, call: m.call, name: m.name, args: m.args }

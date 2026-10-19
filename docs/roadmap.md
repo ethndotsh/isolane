@@ -64,7 +64,7 @@ safety posture, installable with `npm install`:
 | `fs`: brokered, confined to `root`, read-only by default, no symlink escapes, no host paths in errors | done |
 | `console` → `onLog` (per-eval byte budget) | done |
 | `globals`: inputs as data | done |
-| Sync host functions (opt-in; VM thread blocks on the reply under the deadline) | planned |
+| Sync host functions (`{ sync: true, fn }`; the isolate blocks on the reply under the deadline; other messages wait in a mailbox) | done |
 | Host functions get call context (tenant, VM, abort signal) | planned |
 | UDP sockets | idea |
 | KV / cache / queue capabilities as policies (Workers-style bindings) | idea |
@@ -93,11 +93,12 @@ older, unsupported V8 and brings tokio and its op layer into the worker.
 
 | Item | Status |
 |---|---|
-| Rename: `LanePool` → `Runtime`, `LaneVm` → `Isolate`, `LaneError` → `IsolaneError`; `runtime.tenant(name)` → `Tenant` | in progress |
+| Rename: `LanePool` → `Runtime`, `LaneVm` → `Isolate`, `LaneError` → `IsolaneError`; `runtime.tenant(name)` → `Tenant` | done |
 | `tenant()` handles, pool-wide `defaults`, merged options | done |
 | `using` on runtime and isolates | done |
-| Error taxonomy: one `IsolaneError` with `code`, `kind` (guest / limit / policy / infrastructure), `retryable`, `tenant`, `vm`; structured guest errors (name, message, stack); spec-shaped errors inside the guest (fetch denial → `TypeError` with `cause`; fs → Node-style `code`) | planned |
-| Codes to add: `ERR_POLICY_DENIED`, `ERR_HOST_FUNCTION`, `ERR_VM_RETIRED`, `ERR_WORKER_UNRESPONSIVE`, `ERR_ISOLATION_UNAVAILABLE`, `ERR_INVALID_OPTION`, `ERR_RUNTIME_CLOSED` | planned |
+| Error taxonomy: one `IsolaneError` with `code`, `kind` (guest / limit / usage / infrastructure), `retryable`, `tenant`, and `guest` (name, message, stack); spec-shaped errors inside the guest (every fetch failure a `TypeError`; fs errors with Node-style `code`; host-function errors keep their class and `code`) | done |
+| Codes: `ERR_ISOLATE_RETIRED`, `ERR_ISOLATE_DISPOSED`, `ERR_WORKER_UNRESPONSIVE`, `ERR_ISOLATION_UNAVAILABLE`, `ERR_INVALID_OPTION`, `ERR_RUNTIME_CLOSED` added. Policy denials and host-function failures surface inside the guest (as above), not as host-side codes | done |
+| `onPolicyDenied` event (audit log of refused fetch/connect/fs calls per tenant) | idea |
 | Resolve the worker binary automatically (per-platform optional package) instead of `ISOLANE_WORKER` | planned (with packaging) |
 | Typed host-function signatures; `vm.call(name, ...args)` for stateful VMs | idea |
 

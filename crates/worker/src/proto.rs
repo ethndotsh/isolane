@@ -19,6 +19,9 @@ pub enum In {
         timeout_ms: Option<u64>,
         #[serde(default)]
         host_functions: Vec<String>,
+        /// Host functions that return directly instead of a Promise.
+        #[serde(default)]
+        sync_host_functions: Vec<String>,
         #[serde(default)]
         clock: crate::clock::Mode,
         /// Seeds the isolate's entropy (Math.random, hash seeds).
@@ -48,14 +51,17 @@ pub enum In {
         /// a tagged enum, and a parsed Value would conflate null with absent.)
         value: Option<String>,
         error: Option<String>,
+        /// The error's class in the guest, and its `code` property.
+        error_name: Option<String>,
+        error_code: Option<String>,
     },
     Dispose {
         vm: u64,
     },
 }
 
-/// Why an eval failed. Mirrors clockwork's `LaneError` codes, plus
-/// `ERR_MEMORY_LIMIT`.
+/// Why an eval failed (`IsolaneError` codes; the supervisor adds its own
+/// for worker-level failures).
 #[derive(Clone, Copy, Serialize)]
 pub enum ErrorCode {
     #[serde(rename = "ERR_TIMEOUT")]
@@ -64,10 +70,10 @@ pub enum ErrorCode {
     GuestException,
     #[serde(rename = "ERR_MEMORY_LIMIT")]
     MemoryLimit,
-    #[serde(rename = "ERR_VM_TERMINATED")]
-    VmTerminated,
-    #[serde(rename = "ERR_VM_DISPOSED")]
-    VmDisposed,
+    #[serde(rename = "ERR_ISOLATE_RETIRED")]
+    IsolateRetired,
+    #[serde(rename = "ERR_ISOLATE_DISPOSED")]
+    IsolateDisposed,
     #[serde(rename = "ERR_NOT_SERIALIZABLE")]
     NotSerializable,
     #[serde(rename = "ERR_UNSETTLED")]
@@ -76,16 +82,30 @@ pub enum ErrorCode {
     Internal,
 }
 
+/// What the guest threw, for `ERR_GUEST_EXCEPTION`.
+#[derive(Clone, Serialize)]
+pub struct GuestError {
+    /// `error.name` when the guest threw an object with one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    /// `error.message`, or the thrown value as a string.
+    pub message: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stack: Option<String>,
+}
+
 #[derive(Clone)]
 pub struct Failure {
     pub code: ErrorCode,
     pub message: String,
+    pub guest: Option<GuestError>,
 }
 
 pub fn fail(code: ErrorCode, message: impl Into<String>) -> Failure {
     Failure {
         code,
         message: message.into(),
+        guest: None,
     }
 }
 
@@ -108,6 +128,8 @@ pub enum Out<'a> {
         code: Option<ErrorCode>,
         #[serde(skip_serializing_if = "Option::is_none")]
         message: Option<&'a str>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        guest: Option<&'a GuestError>,
     },
     /// A console call from guest code. One-way: no reply.
     Log {

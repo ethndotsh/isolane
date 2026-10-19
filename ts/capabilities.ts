@@ -226,7 +226,17 @@ export function networkBroker(policy: NetworkPolicy): HostFunction {
       req.end(body);
     });
 
+  // Every fetch failure reaches the guest as a TypeError, as the Fetch
+  // standard has it (with the reason in the message).
   return async (raw: unknown): Promise<FetchResponse> => {
+    try {
+      return await doFetch(raw);
+    } catch (err) {
+      throw err instanceof TypeError ? err : new TypeError((err as Error).message);
+    }
+  };
+
+  async function doFetch(raw: unknown): Promise<FetchResponse> {
     const r = parseFetchRequest(raw);
     if (policy.maxRequests !== undefined && requests >= policy.maxRequests) {
       throw new Error(`fetch: this VM has used its ${policy.maxRequests} requests`);
@@ -282,7 +292,7 @@ export function networkBroker(policy: NetworkPolicy): HostFunction {
         body: res.body.toString('base64'),
       };
     }
-  };
+  }
 }
 
 // ---- sockets ----
@@ -472,7 +482,15 @@ export interface FsPolicy {
   maxFileBytes?: number;
 }
 
-class FsError extends Error {}
+/** An fs failure as the guest sees it: a message naming the guest path and
+ * a Node-style `code`. */
+class FsError extends Error {
+  code: string;
+  constructor(message: string, code: string) {
+    super(message);
+    this.code = code;
+  }
+}
 
 /** Guest-facing messages name guest paths only, never host paths. */
 function fsFailure(op: string, path: string, err: unknown): FsError {
@@ -488,7 +506,7 @@ function fsFailure(op: string, path: string, err: unknown): FsError {
     EACCES: 'permission denied',
     EPERM: 'permission denied',
   };
-  return new FsError(`fs.${op} ${JSON.stringify(path)}: ${what[code ?? ''] ?? code ?? 'failed'}`);
+  return new FsError(`fs.${op} ${JSON.stringify(path)}: ${what[code ?? ''] ?? code ?? 'failed'}`, code ?? 'EIO');
 }
 
 export function fsBroker(policy: FsPolicy): HostFunction {
@@ -504,14 +522,14 @@ export function fsBroker(policy: FsPolicy): HostFunction {
   const resolveExisting = async (path: string) => {
     const r = await root();
     const real = await realpath(join(r, posix.normalize('/' + path)));
-    if (!inside(r, real)) throw new FsError(`fs: ${JSON.stringify(path)} is outside the root`);
+    if (!inside(r, real)) throw new FsError(`fs: ${JSON.stringify(path)} is outside the root`, 'EACCES');
     return real;
   };
   // For creating or removing an entry: its parent must resolve inside the
   // root, and the entry itself is never followed if it's a symlink.
   const resolveEntry = async (path: string) => {
     const guest = posix.normalize('/' + path);
-    if (guest === '/') throw new FsError('fs: the root itself cannot be replaced or removed');
+    if (guest === '/') throw new FsError('fs: the root itself cannot be replaced or removed', 'EPERM');
     const parent = await resolveExisting(posix.dirname(guest));
     return join(parent, posix.basename(guest));
   };
@@ -521,8 +539,8 @@ export function fsBroker(policy: FsPolicy): HostFunction {
       const fh = await open(await resolveExisting(path), fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW);
       try {
         const st = await fh.stat();
-        if (!st.isFile()) throw new FsError(`fs.readFile ${JSON.stringify(path)}: not a file`);
-        if (st.size > maxBytes) throw new FsError(`fs.readFile ${JSON.stringify(path)}: larger than ${maxBytes} bytes`);
+        if (!st.isFile()) throw new FsError(`fs.readFile ${JSON.stringify(path)}: not a file`, 'EISDIR');
+        if (st.size > maxBytes) throw new FsError(`fs.readFile ${JSON.stringify(path)}: larger than ${maxBytes} bytes`, 'EFBIG');
         return (await fh.readFile()).toString('base64');
       } finally {
         await fh.close();
@@ -544,9 +562,9 @@ export function fsBroker(policy: FsPolicy): HostFunction {
       }
     },
     async writeFile(path, data) {
-      if (typeof data !== 'string') throw new FsError('fs.writeFile: malformed data');
+      if (typeof data !== 'string') throw new FsError('fs.writeFile: malformed data', 'EINVAL');
       const bytes = Buffer.from(data, 'base64');
-      if (bytes.length > maxBytes) throw new FsError(`fs.writeFile ${JSON.stringify(path)}: larger than ${maxBytes} bytes`);
+      if (bytes.length > maxBytes) throw new FsError(`fs.writeFile ${JSON.stringify(path)}: larger than ${maxBytes} bytes`, 'EFBIG');
       const flags = fsConstants.O_WRONLY | fsConstants.O_CREAT | fsConstants.O_TRUNC | fsConstants.O_NOFOLLOW;
       const fh = await open(await resolveEntry(path), flags, 0o644);
       try {
@@ -580,16 +598,16 @@ export function fsBroker(policy: FsPolicy): HostFunction {
     async rm(path, recursive) {
       const entry = await resolveEntry(path);
       const st = await lstat(entry);
-      if (st.isDirectory() && recursive !== true) throw new FsError(`fs.rm ${JSON.stringify(path)}: is a directory`);
+      if (st.isDirectory() && recursive !== true) throw new FsError(`fs.rm ${JSON.stringify(path)}: is a directory`, 'EISDIR');
       await rm(entry, { recursive: recursive === true });
     },
   };
   const writes = new Set(['writeFile', 'mkdir', 'rm']);
 
   return async (op: unknown, path: unknown, arg: unknown) => {
-    if (typeof op !== 'string' || !Object.hasOwn(ops, op)) throw new FsError('fs: unknown operation');
-    if (typeof path !== 'string' || path.includes('\0')) throw new FsError(`fs.${op}: path must be a string`);
-    if (writes.has(op) && policy.write !== true) throw new FsError(`fs.${op}: the filesystem is read-only`);
+    if (typeof op !== 'string' || !Object.hasOwn(ops, op)) throw new FsError('fs: unknown operation', 'EINVAL');
+    if (typeof path !== 'string' || path.includes('\0')) throw new FsError(`fs.${op}: path must be a string`, 'EINVAL');
+    if (writes.has(op) && policy.write !== true) throw new FsError(`fs.${op}: the filesystem is read-only`, 'EROFS');
     try {
       return await ops[op](path, arg);
     } catch (err) {

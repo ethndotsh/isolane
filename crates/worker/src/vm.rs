@@ -15,7 +15,7 @@ use std::time::{Duration, Instant};
 use serde_json::value::RawValue;
 
 use crate::frame::Writer;
-use crate::proto::{fail, ErrorCode, Failure, Out};
+use crate::proto::{fail, ErrorCode, Failure, GuestError, Out};
 
 pub type Output = Arc<Writer<Stdout>>;
 
@@ -58,6 +58,8 @@ pub struct VmConfig {
     pub heap_bytes: Option<u64>,
     pub timeout: Option<Duration>,
     pub host_functions: Vec<String>,
+    /// Host functions that return their result directly instead of a Promise.
+    pub sync_host_functions: Vec<String>,
     pub clock: crate::clock::Mode,
     pub random_seed: Option<u64>,
     pub allow_code_generation: bool,
@@ -93,8 +95,60 @@ pub fn seeded_entropy(buf: &mut [u8]) -> bool {
 
 pub enum VmMsg {
     Eval { req: u64, code: String },
-    HostReply { call: u64, ok: bool, value: Option<String>, error: Option<String> },
+    HostReply { call: u64, reply: Reply },
     Dispose,
+}
+
+/// The supervisor's answer to a host call.
+pub struct Reply {
+    pub ok: bool,
+    /// JSON text; absent for `undefined`.
+    pub value: Option<String>,
+    pub error: Option<String>,
+    /// The error's class in the guest (`TypeError`, ...), and a Node-style
+    /// `code` property (`ENOENT`, ...).
+    pub error_name: Option<String>,
+    pub error_code: Option<String>,
+}
+
+/// A VM's incoming messages. A sync host call waits for its own reply and
+/// sets everything else aside here, in order: replies to async calls (and a
+/// dispose) to handle next, evals to run after the current one.
+struct Mailbox {
+    rx: Receiver<VmMsg>,
+    replies: RefCell<VecDeque<VmMsg>>,
+    later: RefCell<VecDeque<VmMsg>>,
+}
+
+impl Mailbox {
+    /// The next message during an eval: held replies first. Evals that
+    /// arrive are deferred.
+    fn during_eval(&self, timeout: Option<Duration>) -> Result<VmMsg, RecvTimeoutError> {
+        loop {
+            if let Some(m) = self.replies.borrow_mut().pop_front() {
+                return Ok(m);
+            }
+            let m = match timeout {
+                Some(t) => self.rx.recv_timeout(t)?,
+                None => self.rx.recv().map_err(|_| RecvTimeoutError::Disconnected)?,
+            };
+            match m {
+                eval @ VmMsg::Eval { .. } => self.later.borrow_mut().push_back(eval),
+                other => return Ok(other),
+            }
+        }
+    }
+
+    /// The next message between evals.
+    fn idle(&self) -> Option<VmMsg> {
+        if let Some(m) = self.replies.borrow_mut().pop_front() {
+            return Some(m);
+        }
+        if let Some(m) = self.later.borrow_mut().pop_front() {
+            return Some(m);
+        }
+        self.rx.recv().ok()
+    }
 }
 
 pub fn spawn(id: u64, config: VmConfig, rx: Receiver<VmMsg>, out: Output) -> std::io::Result<()> {
@@ -196,65 +250,126 @@ unsafe extern "C" fn near_heap_limit(data: *mut c_void, current: usize, _initial
 struct Bridge {
     vm: u64,
     out: Output,
+    mailbox: Mailbox,
     next_call: Cell<u64>,
     /// Console bytes left this eval.
     log_budget: Cell<usize>,
     pending: RefCell<HashMap<u64, v8::Global<v8::PromiseResolver>>>,
+    /// When the running eval or continuation must stop (a sync host call
+    /// waits no longer than this).
+    deadline: Cell<Option<Instant>>,
+    /// A sync host call gave up at the deadline. The guest code may finish
+    /// before the termination lands (or before the watchdog notices), so
+    /// this, not only the watchdog, makes the eval a timeout.
+    timed_out: Cell<bool>,
 }
 
-/// Guest-facing host function: serialize the arguments, send a `hostCall`,
-/// and return a Promise that the supervisor's reply settles.
-fn host_function(scope: &mut v8::PinScope, args: v8::FunctionCallbackArguments, mut rv: v8::ReturnValue<v8::Value>) {
+/// Serialize a host call's arguments and send it; returns the call id.
+/// None if the arguments can't be serialized (the exception is pending).
+fn send_host_call(scope: &mut v8::PinScope, args: &v8::FunctionCallbackArguments, bridge: &Bridge) -> Option<u64> {
     let name = args.data().to_rust_string_lossy(scope);
     let arr = v8::Array::new(scope, args.length());
     for i in 0..args.length() {
         arr.set_index(scope, i as u32, args.get(i));
     }
     // A throw here (BigInt, cycles) propagates to the guest caller.
-    let Some(json) = v8::json::stringify(scope, arr.into()) else { return };
-    let json = json.to_rust_string_lossy(scope);
-    let Some(resolver) = v8::PromiseResolver::new(scope) else { return };
-    let bridge = scope.get_slot::<Rc<Bridge>>().expect("bridge slot").clone();
+    let json = v8::json::stringify(scope, arr.into())?.to_rust_string_lossy(scope);
     let call = bridge.next_call.get();
     bridge.next_call.set(call + 1);
-    bridge.pending.borrow_mut().insert(call, v8::Global::new(scope, resolver));
     let args = RawValue::from_string(json).expect("V8 produced JSON");
     bridge.out.send(&Out::HostCall { vm: bridge.vm, call, name: &name, args: &args });
+    Some(call)
+}
+
+/// Guest-facing host function: send a `hostCall` and return a Promise that
+/// the supervisor's reply settles.
+fn host_function(scope: &mut v8::PinScope, args: v8::FunctionCallbackArguments, mut rv: v8::ReturnValue<v8::Value>) {
+    let bridge = scope.get_slot::<Rc<Bridge>>().expect("bridge slot").clone();
+    let Some(resolver) = v8::PromiseResolver::new(scope) else { return };
+    let Some(call) = send_host_call(scope, &args, &bridge) else { return };
+    bridge.pending.borrow_mut().insert(call, v8::Global::new(scope, resolver));
     rv.set(resolver.get_promise(scope).into());
 }
 
-fn apply_host_reply(
-    scope: &mut v8::PinScope,
-    call: u64,
-    ok: bool,
-    value: Option<String>,
-    error: Option<String>,
-) {
+/// Guest-facing sync host function: send a `hostCall`, then block this VM
+/// until its reply arrives (or the deadline passes) and return the result
+/// directly. Everything else that arrives meanwhile waits in the mailbox.
+fn sync_host_function(scope: &mut v8::PinScope, args: v8::FunctionCallbackArguments, mut rv: v8::ReturnValue<v8::Value>) {
+    let bridge = scope.get_slot::<Rc<Bridge>>().expect("bridge slot").clone();
+    let Some(call) = send_host_call(scope, &args, &bridge) else { return };
+    loop {
+        let left = bridge.deadline.get().map(|d| d.saturating_duration_since(Instant::now()));
+        if left == Some(Duration::ZERO) {
+            bridge.timed_out.set(true);
+            scope.terminate_execution();
+            return;
+        }
+        let msg = match left {
+            Some(l) => bridge.mailbox.rx.recv_timeout(l),
+            None => bridge.mailbox.rx.recv().map_err(|_| RecvTimeoutError::Disconnected),
+        };
+        match msg {
+            Ok(VmMsg::HostReply { call: c, reply }) if c == call => {
+                crate::clock::advance();
+                match settle(scope, reply) {
+                    Ok(v) => rv.set(v),
+                    Err(e) => {
+                        scope.throw_exception(e);
+                    }
+                }
+                return;
+            }
+            Ok(reply @ VmMsg::HostReply { .. }) => bridge.mailbox.replies.borrow_mut().push_back(reply),
+            Ok(eval @ VmMsg::Eval { .. }) => bridge.mailbox.later.borrow_mut().push_back(eval),
+            Ok(VmMsg::Dispose) | Err(RecvTimeoutError::Disconnected) => {
+                bridge.mailbox.replies.borrow_mut().push_back(VmMsg::Dispose);
+                scope.terminate_execution();
+                return;
+            }
+            Err(RecvTimeoutError::Timeout) => {}
+        }
+    }
+}
+
+/// A reply as the guest sees it: the parsed value, or the error to throw.
+fn settle<'s>(scope: &mut v8::PinScope<'s, '_>, reply: Reply) -> Result<v8::Local<'s, v8::Value>, v8::Local<'s, v8::Value>> {
+    if reply.ok {
+        let parsed = match &reply.value {
+            None => Some(v8::undefined(scope).into()),
+            Some(json) => v8::String::new(scope, json).and_then(|s| v8::json::parse(scope, s)),
+        };
+        return parsed.ok_or_else(|| {
+            let msg = v8::String::new(scope, "host function returned invalid JSON").unwrap();
+            v8::Exception::error(scope, msg)
+        });
+    }
+    let msg = v8::String::new(scope, reply.error.as_deref().unwrap_or("host function failed")).unwrap();
+    let e = match reply.error_name.as_deref() {
+        Some("TypeError") => v8::Exception::type_error(scope, msg),
+        Some("RangeError") => v8::Exception::range_error(scope, msg),
+        Some("SyntaxError") => v8::Exception::syntax_error(scope, msg),
+        _ => v8::Exception::error(scope, msg),
+    };
+    if let Ok(obj) = v8::Local::<v8::Object>::try_from(e) {
+        if let Some(code) = &reply.error_code {
+            let key = v8::String::new(scope, "code").unwrap();
+            let val = v8::String::new(scope, code).unwrap();
+            obj.set(scope, key.into(), val.into());
+        }
+    }
+    Err(e)
+}
+
+fn apply_host_reply(scope: &mut v8::PinScope, call: u64, reply: Reply) {
     let bridge = scope.get_slot::<Rc<Bridge>>().expect("bridge slot").clone();
     let Some(resolver) = bridge.pending.borrow_mut().remove(&call) else { return };
     // I/O completed: the guest's clock moves forward.
     crate::clock::advance();
     let resolver = v8::Local::new(scope, resolver);
-    if ok {
-        let parsed = match &value {
-            None => Some(v8::undefined(scope).into()),
-            Some(json) => v8::String::new(scope, json).and_then(|s| v8::json::parse(scope, s)),
-        };
-        match parsed {
-            Some(v) => {
-                resolver.resolve(scope, v);
-            }
-            None => {
-                let msg = v8::String::new(scope, "host function returned invalid JSON").unwrap();
-                let e = v8::Exception::error(scope, msg);
-                resolver.reject(scope, e);
-            }
-        }
-    } else {
-        let msg = v8::String::new(scope, error.as_deref().unwrap_or("host function failed")).unwrap();
-        let e = v8::Exception::error(scope, msg);
-        resolver.reject(scope, e);
-    }
+    match settle(scope, reply) {
+        Ok(v) => resolver.resolve(scope, v),
+        Err(e) => resolver.reject(scope, e),
+    };
 }
 
 // ---- console ----
@@ -368,12 +483,11 @@ fn new_context(isolate: &mut v8::Isolate, config: &VmConfig) -> Result<v8::Globa
         global.delete(scope, key.into());
     }
     install_console(scope, global);
-    for name in &config.host_functions {
+    let sync = config.sync_host_functions.iter().map(|n| (n, true));
+    for (name, is_sync) in config.host_functions.iter().map(|n| (n, false)).chain(sync) {
         let key = v8::String::new(scope, name).unwrap();
-        let func = v8::Function::builder(host_function)
-            .data(key.into())
-            .build(scope)
-            .expect("build host function");
+        let builder = if is_sync { v8::Function::builder(sync_host_function) } else { v8::Function::builder(host_function) };
+        let func = builder.data(key.into()).build(scope).expect("build host function");
         global.set(scope, key.into(), func.into());
     }
     if let Some(prelude) = &config.prelude {
@@ -410,6 +524,25 @@ fn describe(scope: &mut v8::PinScope, exception: v8::Local<v8::Value>) -> String
     exception.to_rust_string_lossy(scope)
 }
 
+/// `ERR_GUEST_EXCEPTION` for a thrown value: the legacy one-line message
+/// ("stack" or the value), plus name/message/stack as separate fields.
+fn guest_failure(scope: &mut v8::PinScope, exception: v8::Local<v8::Value>) -> Failure {
+    let mut f = fail(ErrorCode::GuestException, describe(scope, exception));
+    let get = |scope: &mut v8::PinScope, obj: v8::Local<v8::Object>, key: &str| {
+        let k = v8::String::new(scope, key).unwrap();
+        obj.get(scope, k.into()).filter(|v| v.is_string()).map(|v| v.to_rust_string_lossy(scope))
+    };
+    f.guest = Some(match v8::Local::<v8::Object>::try_from(exception) {
+        Ok(obj) => GuestError {
+            name: get(scope, obj, "name"),
+            message: get(scope, obj, "message").unwrap_or_else(|| exception.to_rust_string_lossy(scope)),
+            stack: get(scope, obj, "stack"),
+        },
+        Err(_) => GuestError { name: None, message: exception.to_rust_string_lossy(scope), stack: None },
+    });
+    f
+}
+
 fn to_json(scope: &mut v8::PinScope, value: v8::Local<v8::Value>) -> Result<String, Failure> {
     if value.is_undefined() {
         return Ok("null".into());
@@ -433,16 +566,15 @@ fn eval(
     isolate: &mut v8::Isolate,
     context: &v8::Global<v8::Context>,
     code: &str,
-    rx: &Receiver<VmMsg>,
-    backlog: &mut VecDeque<VmMsg>,
+    mailbox: &Mailbox,
     deadline: Option<Instant>,
 ) -> EvalEnd {
     v8::scope_with_context!(scope, isolate, context);
     v8::tc_scope!(let tc, scope);
 
-    let guest_error = |tc: &mut v8::PinnedRef<v8::TryCatch<v8::HandleScope>>| {
-        let msg = tc.exception().map(|e| describe(tc, e)).unwrap_or_else(|| "unknown error".into());
-        fail(ErrorCode::GuestException, msg)
+    let guest_error = |tc: &mut v8::PinnedRef<v8::TryCatch<v8::HandleScope>>| match tc.exception() {
+        Some(e) => guest_failure(tc, e),
+        None => fail(ErrorCode::GuestException, "unknown error"),
     };
 
     crate::clock::advance();
@@ -476,7 +608,7 @@ fn eval(
             }
             v8::PromiseState::Rejected => {
                 let e = promise.result(tc);
-                return EvalEnd::Done(Err(fail(ErrorCode::GuestException, describe(tc, e))));
+                return EvalEnd::Done(Err(guest_failure(tc, e)));
             }
             v8::PromiseState::Pending => {}
         }
@@ -502,21 +634,15 @@ fn eval(
             (true, None) => Some(BACKGROUND_POLL),
             (false, l) => l,
         };
-        let msg = match wait {
-            Some(w) => match rx.recv_timeout(w) {
-                Ok(m) => m,
-                Err(RecvTimeoutError::Timeout) => continue,
-                Err(RecvTimeoutError::Disconnected) => return EvalEnd::Disposed,
-            },
-            None => match rx.recv() {
-                Ok(m) => m,
-                Err(_) => return EvalEnd::Disposed,
-            },
+        let msg = match mailbox.during_eval(wait) {
+            Ok(m) => m,
+            Err(RecvTimeoutError::Timeout) => continue,
+            Err(RecvTimeoutError::Disconnected) => return EvalEnd::Disposed,
         };
         match msg {
-            VmMsg::HostReply { call, ok, value, error } => apply_host_reply(tc, call, ok, value, error),
+            VmMsg::HostReply { call, reply } => apply_host_reply(tc, call, reply),
             VmMsg::Dispose => return EvalEnd::Disposed,
-            eval @ VmMsg::Eval { .. } => backlog.push_back(eval),
+            VmMsg::Eval { .. } => unreachable!("deferred by the mailbox"),
         }
     }
 }
@@ -536,7 +662,7 @@ fn send_result(out: &Output, req: u64, result: Result<String, Failure>) {
     match result {
         Ok(json) => {
             let value = RawValue::from_string(json).expect("V8 produced JSON");
-            out.send(&Out::Result { req, ok: true, value: Some(&value), code: None, message: None });
+            out.send(&Out::Result { req, ok: true, value: Some(&value), code: None, message: None, guest: None });
         }
         Err(f) => out.send(&Out::Result {
             req,
@@ -544,6 +670,7 @@ fn send_result(out: &Output, req: u64, result: Result<String, Failure>) {
             value: None,
             code: Some(f.code),
             message: Some(&f.message),
+            guest: f.guest.as_ref(),
         }),
     }
 }
@@ -568,14 +695,17 @@ fn vm_main(id: u64, config: VmConfig, rx: Receiver<VmMsg>, out: Output) {
     let oom = Box::new(OomState { handle, hit: AtomicBool::new(false) });
     isolate.add_near_heap_limit_callback(near_heap_limit, &*oom as *const OomState as *mut c_void);
 
-    isolate.set_slot(Rc::new(Bridge {
+    let bridge = Rc::new(Bridge {
         vm: id,
         out: out.clone(),
+        mailbox: Mailbox { rx, replies: RefCell::new(VecDeque::new()), later: RefCell::new(VecDeque::new()) },
         next_call: Cell::new(1),
         log_budget: Cell::new(LOG_BUDGET),
         pending: RefCell::new(HashMap::new()),
-    }));
-    let mut backlog: VecDeque<VmMsg> = VecDeque::new();
+        deadline: Cell::new(None),
+        timed_out: Cell::new(false),
+    });
+    isolate.set_slot(bridge.clone());
     // Set once the VM can't safely run again (it hit its heap limit, or its
     // setup failed: then it keeps a bare context and refuses every eval).
     let mut retired: Option<String> = None;
@@ -590,24 +720,21 @@ fn vm_main(id: u64, config: VmConfig, rx: Receiver<VmMsg>, out: Output) {
     };
 
     loop {
-        let msg = match backlog.pop_front() {
-            Some(m) => m,
-            None => match rx.recv() {
-                Ok(m) => m,
-                Err(_) => break,
-            },
-        };
+        let Some(msg) = bridge.mailbox.idle() else { break };
         match msg {
             VmMsg::Dispose => break,
             VmMsg::Eval { req, code } => {
                 if let Some(cause) = &retired {
-                    send_result(&out, req, Err(fail(ErrorCode::VmTerminated, cause.clone())));
+                    send_result(&out, req, Err(fail(ErrorCode::IsolateRetired, cause.clone())));
                     continue;
                 }
                 let deadline = config.timeout.map(|t| watchdog.arm(t));
-                let end = eval(&mut isolate, &context, &code, &rx, &mut backlog, deadline);
+                bridge.deadline.set(deadline);
+                bridge.timed_out.set(false);
+                let end = eval(&mut isolate, &context, &code, &bridge.mailbox, deadline);
                 pump_tasks(&isolate);
-                let fired = watchdog.disarm();
+                bridge.deadline.set(None);
+                let fired = watchdog.disarm() | bridge.timed_out.take();
                 if isolate.is_execution_terminating() || fired || oom.hit.load(Ordering::SeqCst) {
                     isolate.cancel_terminate_execution();
                 }
@@ -627,24 +754,24 @@ fn vm_main(id: u64, config: VmConfig, rx: Receiver<VmMsg>, out: Output) {
                 };
                 send_result(&out, req, result);
             }
-            VmMsg::HostReply { call, ok, value, error } => {
+            VmMsg::HostReply { call, reply } => {
                 // A reply after its eval finished: the continuation it wakes
                 // runs under the same budget as an eval.
                 if retired.is_some() {
                     continue;
                 }
-                if let Some(t) = config.timeout {
-                    watchdog.arm(t);
-                }
+                bridge.deadline.set(config.timeout.map(|t| watchdog.arm(t)));
+                bridge.timed_out.set(false);
                 {
                     v8::scope_with_context!(scope, &mut isolate, &context);
-                    apply_host_reply(scope, call, ok, value, error);
+                    apply_host_reply(scope, call, reply);
                     scope.perform_microtask_checkpoint();
                     while pump_tasks(scope) {
                         scope.perform_microtask_checkpoint();
                     }
                 }
-                let fired = watchdog.disarm();
+                bridge.deadline.set(None);
+                let fired = watchdog.disarm() | bridge.timed_out.take();
                 if isolate.is_execution_terminating() || fired || oom.hit.load(Ordering::SeqCst) {
                     isolate.cancel_terminate_execution();
                 }

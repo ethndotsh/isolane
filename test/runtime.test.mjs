@@ -99,7 +99,7 @@ test('the heap limit retires the vm', async () => {
     vm.eval('const a = []; for (;;) a.push({ x: "y".repeat(1000) + Math.random() })'),
     code('ERR_MEMORY_LIMIT'),
   );
-  await assert.rejects(vm.eval('1'), code('ERR_VM_TERMINATED'));
+  await assert.rejects(vm.eval('1'), code('ERR_ISOLATE_RETIRED'));
   vm.dispose();
   assert.equal(await pool.run('"worker survives"', T), 'worker survives');
 });
@@ -126,11 +126,11 @@ test('disposed vms reject', async () => {
   const vm = pool.createIsolate(T);
   await vm.eval('1');
   vm.dispose();
-  await assert.rejects(vm.eval('2'), code('ERR_VM_DISPOSED'));
+  await assert.rejects(vm.eval('2'), code('ERR_ISOLATE_DISPOSED'));
 });
 
 test('a tenant is required', () => {
-  assert.throws(() => pool.createIsolate({}), TypeError);
+  assert.throws(() => pool.createIsolate({}), code('ERR_INVALID_OPTION'));
 });
 
 // ---- hardening ----
@@ -199,7 +199,7 @@ test('clock: realtime and fixed', async () => {
   assert.equal(await vm.eval('Date.now()'), 1e12);
   assert.equal(await vm.eval('wait().then(() => new Date().toISOString())'), new Date(1e12).toISOString());
   vm.dispose();
-  assert.throws(() => pool.createIsolate({ ...T, clock: 'sometimes' }), TypeError);
+  assert.throws(() => pool.createIsolate({ ...T, clock: 'sometimes' }), code('ERR_INVALID_OPTION'));
 });
 
 test('randomSeed makes Math.random reproducible', async () => {
@@ -212,7 +212,7 @@ test('randomSeed makes Math.random reproducible', async () => {
   assert.deepEqual(a, b);
   assert.notDeepEqual(a, c);
   assert.notDeepEqual(d, e);
-  assert.throws(() => pool.createIsolate({ ...T, randomSeed: -1 }), TypeError);
+  assert.throws(() => pool.createIsolate({ ...T, randomSeed: -1 }), code('ERR_INVALID_OPTION'));
 });
 
 test('allowCodeGeneration opts in to eval and new Function', async () => {
@@ -336,6 +336,72 @@ test('host functions on a stateful vm', async () => {
   vm.dispose();
 });
 
+test('sync host functions return directly', async () => {
+  const hostFunctions = {
+    add: { sync: true, fn: (a, b) => a + b },
+    later: { sync: true, fn: async (x) => new Promise((r) => setTimeout(() => r(x * 2), 20)) },
+    deny: {
+      sync: true,
+      fn: () => {
+        throw Object.assign(new TypeError('nope'), { code: 'E_NOPE' });
+      },
+    },
+    slow: { sync: true, fn: () => new Promise(() => {}) },
+    echo: async (x) => x,
+  };
+  const opts = { ...T, hostFunctions };
+  assert.equal(await pool.run('add(2, 3) + 1', opts), 6);
+  assert.equal(await pool.run('later(21)', opts), 42);
+  assert.deepEqual(
+    await pool.run('try { deny() } catch (e) { [e instanceof TypeError, e.message, e.code] }', opts),
+    [true, 'nope', 'E_NOPE'],
+  );
+  // Async replies that arrive while a sync call waits are kept and delivered.
+  assert.deepEqual(await pool.run('(async () => { const p = echo(1); const s = later(2); return [await p, s]; })()', opts), [1, 4]);
+  await assert.rejects(pool.run('slow()', { ...opts, timeoutMs: 150 }), code('ERR_TIMEOUT'));
+  assert.throws(() => pool.createIsolate({ ...T, hostFunctions: { bad: { sync: 'yes' } } }), code('ERR_INVALID_OPTION'));
+});
+
+test('errors carry kind, retryability, tenant, and what the guest threw', async () => {
+  const err = await pool.run('class MyError extends Error { name = "MyError" }; throw new MyError("bad thing")', T).catch((e) => e);
+  assert.ok(err instanceof IsolaneError);
+  assert.equal(err.code, 'ERR_GUEST_EXCEPTION');
+  assert.equal(err.kind, 'guest');
+  assert.equal(err.retryable, false);
+  assert.equal(err.tenant, 'acme');
+  assert.equal(err.guest.name, 'MyError');
+  assert.equal(err.guest.message, 'bad thing');
+  assert.match(err.guest.stack, /MyError: bad thing/);
+  const thrown = await pool.run('throw 42', T).catch((e) => e);
+  assert.deepEqual(thrown.guest, { message: '42' });
+  const timeout = await pool.run('for (;;) {}', { ...T, timeoutMs: 50 }).catch((e) => e);
+  assert.deepEqual([timeout.code, timeout.kind], ['ERR_TIMEOUT', 'limit']);
+  const usage = (() => {
+    try {
+      pool.createIsolate({ ...T, clock: 1 });
+    } catch (e) {
+      return e;
+    }
+  })();
+  assert.deepEqual([usage.code, usage.kind], ['ERR_INVALID_OPTION', 'usage']);
+});
+
+test('policy errors inside the guest are spec-shaped', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'isolane-errs-'));
+  assert.deepEqual(
+    await pool.run('fs.readFile("/missing").catch((e) => [e.code, e.message])', { ...T, fs: { root: dir } }),
+    ['ENOENT', 'fs.readFile "/missing": no such file or directory'],
+  );
+  assert.equal(await pool.run('fs.writeFile("/x", "y").catch((e) => e.code)', { ...T, fs: { root: dir } }), 'EROFS');
+  assert.deepEqual(
+    await pool.run('fetch("https://not-allowed.example/").catch((e) => [e instanceof TypeError, /not allowed/.test(e.message)])', {
+      ...T,
+      network: { allow: ['api.example.com'] },
+    }),
+    [true, true],
+  );
+});
+
 test('a slow host function counts against the timeout', async () => {
   const hostFunctions = { slow: () => new Promise((r) => setTimeout(() => r(1), 1000)) };
   const started = Date.now();
@@ -437,7 +503,7 @@ test('a worker that stops answering is killed after its timeout', async () => {
     onSecurityEvent: (e) => events.push(e),
   });
   const started = Date.now();
-  await assert.rejects(silent.run('1', { tenant: 't', timeoutMs: 100 }), code('ERR_WORKER_CRASHED'));
+  await assert.rejects(silent.run('1', { tenant: 't', timeoutMs: 100 }), code('ERR_WORKER_UNRESPONSIVE'));
   assert.ok(Date.now() - started < 3000);
   assert.equal(events[0]?.kind, 'worker-unresponsive');
   silent.close();
