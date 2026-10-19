@@ -171,6 +171,21 @@ randomUUID 100%. Remaining failures, by cause:
 | `vm.call(name, ...args)` for stateful isolates (call an exported/global function with schema-checked args) | idea |
 | **Deployments with user-defined entrypoints** (Workers-style, customizable): `tenant.deploy(code, { entrypoints: ['fetch', 'scheduled', 'onMessage', ...] })` evaluates the module once (its "cold start": top-level code, user-defined init), then `deployment.invoke(name, ...args)` calls an exported handler in a warm isolate. Host-defined handler names and argument shapes (`fetch(request, env, ctx)` is just one preset); warm-isolate pool per deployment with `minWarm`/`maxIsolates`/`idleMs`; `isolation: 'per-invoke' \| 'reuse'` (reuse keeps module state between invocations, like Workers); cold-start hooks (`onColdStart`); V8 code cache per deployment so re-creating an isolate skips parsing | planned |
 
+### API v2 (from `docs/api-review.md`)
+
+| Item | Status |
+|---|---|
+| One layered config (`defaults` → `tenants(name)` → call), grouped by meaning, no shorthands | planned |
+| Uniform naming (units as suffixes, capabilities named for guest APIs, one word per idea; full rename table in the review) | planned |
+| Host functions: one definition form (`hostFunction({ args, returns, handler, sync })`), namespaces, a call context (`tenant`, isolate, `signal`, `log`) | planned |
+| One hook system: `before*`/`after*` interceptors and `on*` events at every level, plus `runtime.on()`; host calls, evals, logs, limits, policy denials, security events, worker lifecycle | planned |
+| `Tenant` handle owns tenant operations (`usage`, `resetUsage`, `release`, `isolate()`); `close()` everywhere | planned |
+| One `ERR_LIMIT` code with `err.limit` for every limit | planned |
+| Split `index.ts` (config, host, worker pool, runtime) and `vm.rs` (watchdog, mailbox, host calls, console, eval); one per-isolate state record; one config-resolution pipeline | planned |
+| Protocol: version field checked at `ready`; `create` grouped like the public config | planned |
+| Delete the minimal fetch/base64/UTF-8 prelude once the web platform is always on | planned |
+| Split the end-to-end tests by area | planned |
+
 ## 5. Performance
 
 Measured against isolated-vm (Linux x64 under Rosetta; re-measure natively):
