@@ -1,0 +1,13 @@
+{
+  "name": "isolane-example-serverless",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "platform": "node platform.mjs",
+    "deploy": "node deployer.mjs"
+  },
+  "dependencies": {
+    "isolane": "file:../..",
+    "ws": "^8.18.0"
+  }
+}

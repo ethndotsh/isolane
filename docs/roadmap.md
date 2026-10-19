@@ -164,7 +164,8 @@ Linux 2-core $0.006/min, Linux arm64 2-core $0.005/min, macOS $0.062/min.
 
 | Item | Status |
 |---|---|
-| Serverless platform: deploy guest code; invocations over HTTP; one tenant per deployer; **host functions served by the deployer** (the platform calls them over a WebSocket RPC connection the deployer keeps open), so a deployer ships code and keeps their own backend logic | planned |
+| Serverless platform (`examples/serverless`): deployers connect over a WebSocket, deploy guest code, and serve its host functions from their own process; each app is a tenant, each request a fresh isolate; console streams back. ~2.4 ms per warm request including two remote host calls (dev build, macOS) | done |
+| Serverless example, next: `export default { fetch(request) }` handlers with spec Request/Response (after WinterTC phase 3); warm isolates; deployer auth; deploy persistence | planned |
 
 ## 9. What we're borrowing
 
