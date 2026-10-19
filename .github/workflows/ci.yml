@@ -87,6 +87,7 @@ jobs:
         run: |
           npm ci
           npx tsc
+          npm run typecheck
 
       - name: Lockdown tests
         env:

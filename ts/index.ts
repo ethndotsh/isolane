@@ -7,6 +7,7 @@ import { resolve as resolvePath } from 'node:path';
 
 import { capabilities, type FsPolicy, type NetworkPolicy, type SocketPolicy } from './capabilities.js';
 import { IsolaneError, invalidOption, isIsolaneErrorCode, type IsolaneErrorCode } from './errors.js';
+import { checkResult, describeIssues, isStandardSchema, validate, type StandardSchemaV1 } from './schema.js';
 import {
   guestLimits,
   resolveLimits,
@@ -31,6 +32,7 @@ export type { IsolationInfo, LockdownLevel, LogLevel } from './worker.js';
 export type { FsPolicy, NetworkPolicy, SocketPolicy } from './capabilities.js';
 export { IsolaneError } from './errors.js';
 export { DEFAULT_LIMITS } from './limits.js';
+export type { StandardSchemaV1 } from './schema.js';
 export type { IsolateLimits, Limits, RuntimeLimits, TenantLimits } from './limits.js';
 export type { GuestErrorInfo, IsolaneErrorCode, IsolaneErrorKind } from './errors.js';
 
@@ -52,6 +54,91 @@ export interface SyncHostFunction {
   sync: true;
   fn: HostFunction;
 }
+
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+type AnySchema = StandardSchemaV1<any, any>;
+type ArgsOf<A> = A extends readonly AnySchema[]
+  ? { -readonly [K in keyof A]: A[K] extends AnySchema ? StandardSchemaV1.InferOutput<A[K]> : never }
+  : A extends AnySchema
+    ? StandardSchemaV1.InferOutput<A> extends readonly unknown[]
+      ? StandardSchemaV1.InferOutput<A>
+      : never
+    : // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      any[];
+type ReturnOf<R> = R extends AnySchema ? StandardSchemaV1.InferInput<R> : unknown;
+type Awaitable<T> = T | Promise<T>;
+/** What `run`/`eval` resolve to: the schema's output, or any JSON value. */
+type ResultOf<S> = S extends AnySchema ? StandardSchemaV1.InferOutput<S> : unknown;
+
+/**
+ * A host function with schemas (Standard Schema: Zod, Valibot, ArkType,
+ * ...). Arguments come from untrusted guest code: they're validated before
+ * `fn` runs, and `fn` gets the schemas' output (so transforms and defaults
+ * apply). The guest gets a TypeError (code `ERR_INVALID_ARGUMENTS`) listing
+ * the issues instead. A result that fails its schema is an error in the
+ * host function itself: the guest gets an Error (code
+ * `ERR_INVALID_HOST_RESULT`), and nothing of the bad value.
+ *
+ *   getUser: hostFunction({ args: [z.number().int()], result: User, fn: (id) => db.users.get(id) })
+ */
+export interface HostFunctionDefinition<A extends readonly AnySchema[] | AnySchema | undefined = undefined, R extends AnySchema | undefined = undefined> {
+  fn: (...args: ArgsOf<A>) => Awaitable<ReturnOf<R>>;
+  /** One schema per positional argument, or one schema for the whole argument list. */
+  args?: A;
+  result?: R;
+  /** Call synchronously from the guest (see SyncHostFunction). */
+  sync?: boolean;
+}
+
+/** Define a host function with schemas, with its parameter types inferred from them. */
+export function hostFunction<const A extends readonly AnySchema[] | AnySchema | undefined = undefined, R extends AnySchema | undefined = undefined>(
+  definition: HostFunctionDefinition<A, R>,
+): HostFunctionDefinition<A, R> {
+  return definition;
+}
+
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+type HostFunctionEntry = HostFunction | SyncHostFunction | HostFunctionDefinition<any, any>;
+
+/** Wrap a definition's `fn` so its arguments and result are validated. */
+function validated(name: string, def: HostFunctionDefinition<readonly AnySchema[] | AnySchema | undefined, AnySchema | undefined>): HostFunction {
+  const { fn, args, result } = def;
+  if (args === undefined && result === undefined) return fn as HostFunction;
+  return async (...raw: unknown[]) => {
+    let input: unknown[] = raw;
+    if (Array.isArray(args)) {
+      input = [];
+      const problems: string[] = [];
+      for (let i = 0; i < Math.max(args.length, raw.length); i++) {
+        if (i >= args.length) {
+          problems.push(`args.${i}: unexpected argument (takes ${args.length})`);
+          continue;
+        }
+        const r = await validate(args[i], raw[i]);
+        if (r.ok) input.push(r.value);
+        else problems.push(describeIssues(r.issues, `args.${i}`));
+      }
+      if (problems.length) throw invalidArguments(name, problems.join('; '));
+    } else if (args !== undefined) {
+      const r = await validate(args as AnySchema, raw);
+      if (!r.ok) throw invalidArguments(name, describeIssues(r.issues, 'args'));
+      if (!Array.isArray(r.value)) throw invalidArguments(name, 'the args schema must produce an array');
+      input = r.value;
+    }
+    const value = await (fn as HostFunction)(...input);
+    if (result === undefined) return value;
+    const r = await validate(result, value);
+    if (!r.ok) {
+      throw Object.assign(new Error(`host function ${name} returned a value that doesn't match its result schema`), {
+        code: 'ERR_INVALID_HOST_RESULT',
+      });
+    }
+    return r.value;
+  };
+}
+
+const invalidArguments = (name: string, issues: string) =>
+  Object.assign(new TypeError(`${name}: invalid arguments: ${issues}`), { code: 'ERR_INVALID_ARGUMENTS' });
 
 /**
  * What a tenant has used, cumulatively, since the runtime started (or its
@@ -105,7 +192,7 @@ export interface IsolateOptions {
    * Functions installed as guest globals, by name. Async in the guest
    * (they return a Promise) unless given as `{ sync: true, fn }`.
    */
-  hostFunctions?: Record<string, HostFunction | SyncHostFunction>;
+  hostFunctions?: Record<string, HostFunctionEntry>;
   /**
    * JSON values installed as guest globals before any code runs: the safe
    * way to pass inputs, instead of splicing them into the code string.
@@ -221,11 +308,19 @@ function vmSetup(opts: RunOptions): VmSetup {
   const user: Record<string, HostFunction> = {};
   const syncHostFunctions: string[] = [];
   for (const [name, entry] of Object.entries(opts.hostFunctions ?? {})) {
-    if (typeof entry === 'function') user[name] = entry;
-    else if (entry && entry.sync === true && typeof entry.fn === 'function') {
-      user[name] = entry.fn;
-      syncHostFunctions.push(name);
-    } else throw invalidOption(`hostFunctions.${name} must be a function or { sync: true, fn }`);
+    if (typeof entry === 'function') {
+      user[name] = entry;
+      continue;
+    }
+    const def = entry as HostFunctionDefinition<readonly AnySchema[] | AnySchema | undefined, AnySchema | undefined> | null;
+    const argsOk =
+      def?.args === undefined || isStandardSchema(def.args) || (Array.isArray(def.args) && def.args.every(isStandardSchema));
+    const resultOk = def?.result === undefined || isStandardSchema(def.result);
+    if (!def || typeof def.fn !== 'function' || !argsOk || !resultOk || (def.sync !== undefined && typeof def.sync !== 'boolean')) {
+      throw invalidOption(`hostFunctions.${name} must be a function or { fn, sync?, args?, result? } with Standard Schemas`);
+    }
+    user[name] = validated(name, def);
+    if (def.sync) syncHostFunctions.push(name);
   }
   let caps;
   try {
@@ -777,10 +872,18 @@ export class Runtime {
   }
 
   /** Evaluate `code` in a fresh VM on the tenant's worker. */
-  async run(code: string, options: RunOptions): Promise<unknown> {
-    const vm = this.createIsolate(options);
+  /**
+   * Evaluate `code` in a fresh isolate on the tenant's worker. With
+   * `result` (a Standard Schema), the completion value is validated and
+   * typed: `ERR_INVALID_RESULT` if it doesn't match.
+   */
+  async run<S extends AnySchema | undefined = undefined>(code: string, options: RunOptions & { result?: S }): Promise<ResultOf<S>> {
+    const { result, ...rest } = options;
+    if (result !== undefined && !isStandardSchema(result)) throw invalidOption('result must be a Standard Schema');
+    const vm = this.createIsolate(rest);
     try {
-      return await vm._evalLast(code);
+      const value = await vm._evalLast(code);
+      return (result ? await checkResult(result, value, options.tenant) : value) as ResultOf<S>;
     } finally {
       vm.dispose();
     }
@@ -923,8 +1026,9 @@ export class Tenant {
   }
 
   /** Evaluate `code` in a fresh VM. */
-  run(code: string, options?: IsolateOptions): Promise<unknown> {
-    return this.#pool.run(code, this.#options(options));
+  run<S extends AnySchema | undefined = undefined>(code: string, options?: IsolateOptions & { result?: S }): Promise<ResultOf<S>> {
+    const { result, ...rest } = options ?? {};
+    return this.#pool.run(code, { ...this.#options(rest), result: result as S });
   }
 
   /** Create a stateful VM. */
@@ -952,9 +1056,13 @@ export class Isolate {
   }
 
   /** Evaluate code in this VM, preserving global state between calls. */
-  async eval(code: string): Promise<unknown> {
+  /** Evaluate code, keeping global state between calls. `result`: validate and type the completion value. */
+  async eval<S extends AnySchema | undefined = undefined>(code: string, options?: { result?: S }): Promise<ResultOf<S>> {
+    const schema = options?.result;
+    if (schema !== undefined && !isStandardSchema(schema)) throw invalidOption('result must be a Standard Schema');
     await this.#ready();
-    return this.#worker.eval(this.#id, this.#nextReq(), code);
+    const value = await this.#worker.eval(this.#id, this.#nextReq(), code);
+    return (schema ? await checkResult(schema, value, this.#worker.tenant) : value) as ResultOf<S>;
   }
 
   async #ready(): Promise<void> {

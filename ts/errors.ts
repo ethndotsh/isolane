@@ -8,6 +8,8 @@
  * - `ERR_GUEST_EXCEPTION`: it threw, or its result promise rejected. See `guest`.
  * - `ERR_UNSETTLED`: its result is a promise that can never settle.
  * - `ERR_NOT_SERIALIZABLE`: its completion value isn't JSON-serializable.
+ * - `ERR_INVALID_RESULT`: its completion value doesn't match the `result`
+ *   schema. See `issues`.
  *
  * limit (a budget ran out):
  * - `ERR_TIMEOUT`: `timeoutMs` elapsed. The isolate stays usable.
@@ -41,6 +43,7 @@ export type IsolaneErrorCode =
   | 'ERR_GUEST_EXCEPTION'
   | 'ERR_UNSETTLED'
   | 'ERR_NOT_SERIALIZABLE'
+  | 'ERR_INVALID_RESULT'
   | 'ERR_TIMEOUT'
   | 'ERR_CPU_LIMIT'
   | 'ERR_MEMORY_LIMIT'
@@ -61,6 +64,7 @@ const KINDS: Record<IsolaneErrorCode, IsolaneErrorKind> = {
   ERR_GUEST_EXCEPTION: 'guest',
   ERR_UNSETTLED: 'guest',
   ERR_NOT_SERIALIZABLE: 'guest',
+  ERR_INVALID_RESULT: 'guest',
   ERR_TIMEOUT: 'limit',
   ERR_CPU_LIMIT: 'limit',
   ERR_MEMORY_LIMIT: 'limit',
@@ -113,6 +117,8 @@ export class IsolaneError extends Error {
   readonly guest?: GuestErrorInfo;
   /** For `ERR_RESOURCE_LIMIT`: which limit was hit. */
   readonly limit?: string;
+  /** For `ERR_INVALID_RESULT`: the schema's issues (Standard Schema). */
+  readonly issues?: ReadonlyArray<{ readonly message: string; readonly path?: ReadonlyArray<unknown> }>;
 
   constructor(code: IsolaneErrorCode, message: string, details: IsolaneErrorDetails = {}) {
     super(message, details.cause === undefined ? undefined : { cause: details.cause });

@@ -6,7 +6,8 @@ import { chmodSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { createServer } from 'node:http';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { Runtime, IsolaneError, DEFAULT_LIMITS } from '../dist/index.js';
+import { Runtime, IsolaneError, DEFAULT_LIMITS, hostFunction } from '../dist/index.js';
+import { z } from 'zod';
 
 // ISOLANE_STRICT=1 runs everything under strict mode (CI on native Linux).
 const pool = new Runtime({ strict: process.env.ISOLANE_STRICT === '1' });
@@ -418,6 +419,44 @@ test('policy errors inside the guest are spec-shaped', async () => {
     }),
     [true, true],
   );
+});
+
+test('host function schemas validate guest arguments and host results', async () => {
+  const seen = [];
+  const hostFunctions = {
+    getUser: hostFunction({
+      args: [z.number().int().positive(), z.string().default('basic')],
+      result: z.object({ id: z.number(), plan: z.string() }),
+      fn: (id, plan) => (seen.push([id, plan]), { id, plan }),
+    }),
+    sum: hostFunction({ args: z.array(z.number()), fn: (...xs) => xs.reduce((a, b) => a + b, 0) }),
+    liar: hostFunction({ result: z.string(), fn: () => 42 }),
+    now: hostFunction({ sync: true, args: [], result: z.number(), fn: () => 7 }),
+  };
+  const opts = { ...T, hostFunctions };
+  assert.deepEqual(await pool.run('getUser(1)', opts), { id: 1, plan: 'basic' }); // default applied
+  assert.deepEqual(await pool.run('sum(1, 2, 3)', opts), 6);
+  assert.equal(await pool.run('now() + 1', opts), 8);
+  const bad = await pool.run('getUser(-1.5, 3).catch((e) => [e instanceof TypeError, e.code, e.message])', opts);
+  assert.deepEqual(bad.slice(0, 2), [true, 'ERR_INVALID_ARGUMENTS']);
+  assert.match(bad[2], /getUser: invalid arguments: args\.0: .*; args\.1: /);
+  assert.deepEqual(seen, [[1, 'basic']]); // fn never ran for bad input
+  assert.match(await pool.run('getUser(1, "x", "extra").catch((e) => e.message)', opts), /args\.2: unexpected argument/);
+  assert.deepEqual(await pool.run('liar().catch((e) => [e.code, e.message.includes("42")])', opts), ['ERR_INVALID_HOST_RESULT', false]);
+  assert.throws(() => pool.createIsolate({ ...T, hostFunctions: { x: { fn: () => 1, args: [1] } } }), code('ERR_INVALID_OPTION'));
+});
+
+test('result schemas validate and type what an eval returns', async () => {
+  const Total = z.object({ total: z.number() });
+  assert.deepEqual(await pool.run('({ total: 3, extra: true })', { ...T, result: Total }), { total: 3 }); // zod strips
+  const err = await pool.run('({ total: "3" })', { ...T, result: Total }).catch((e) => e);
+  assert.deepEqual([err.code, err.kind], ['ERR_INVALID_RESULT', 'guest']);
+  assert.equal(err.issues[0].path[0], 'total');
+  const vm = pool.tenant('acme').createIsolate();
+  assert.equal(await vm.eval('21 * 2', { result: z.number() }), 42);
+  await assert.rejects(vm.eval('"no"', { result: z.number() }), code('ERR_INVALID_RESULT'));
+  vm.dispose();
+  assert.equal(await pool.tenant('acme').run('[1, 2].length', { result: z.literal(2) }), 2);
 });
 
 test('a slow host function counts against the timeout', async () => {

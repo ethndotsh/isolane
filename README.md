@@ -31,6 +31,29 @@ await vm.eval('globalThis.count = 0');
 await vm.eval('++count'); // 1
 ```
 
+### Schemas
+
+Host-function arguments come from untrusted guest code, so they can be
+validated before your function runs, with any [Standard
+Schema](https://standardschema.dev) library (Zod, Valibot, ArkType, ...).
+Parameter types are inferred from the schemas.
+
+```ts
+import { hostFunction } from 'isolane';
+import { z } from 'zod';
+
+const getUser = hostFunction({
+  args: [z.number().int().positive()],
+  result: User,                       // checked too: a bad value never reaches the guest
+  fn: (id) => db.users.find(id),      // id: number
+});
+const order = await acme.run('placeOrder()', { hostFunctions: { getUser }, result: Order }); // typed as Order
+```
+
+Bad arguments reach the guest as a `TypeError` (`code: 'ERR_INVALID_ARGUMENTS'`)
+listing the issues; a result that fails its schema fails the run with
+`ERR_INVALID_RESULT` (`err.issues`).
+
 ### What guest code can reach
 
 By default, only ECMAScript. There is no network, no files, no `eval`, no
