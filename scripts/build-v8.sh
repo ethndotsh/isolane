@@ -31,6 +31,9 @@ if [ "$os" = linux ] && [ -z "${LIBCLANG_PATH:-}" ]; then
   # apt-get install libclang-21-dev
   if [ -d /usr/lib/llvm-21/lib ]; then
     export LIBCLANG_PATH=/usr/lib/llvm-21/lib
+    # Make bindgen use clang 21's builtin headers too, not another
+    # installed clang's.
+    export CLANG_PATH="${CLANG_PATH:-/usr/lib/llvm-21/bin/clang}"
   else
     echo "building V8 on Linux needs libclang 21 (apt.llvm.org: llvm.sh 21, then libclang-21-dev)" >&2
     exit 1

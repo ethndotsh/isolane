@@ -14,6 +14,9 @@ jobs:
     env:
       V8_FROM_SOURCE: '1'
       LIBCLANG_PATH: /usr/lib/llvm-21/lib
+      # The runner image also has clang 16-18; without this, bindgen takes
+      # /usr/bin/clang's builtin headers, which don't match libclang 21.
+      CLANG_PATH: /usr/lib/llvm-21/bin/clang
     steps:
       - uses: actions/checkout@v4
 
@@ -51,9 +54,10 @@ jobs:
           scripts/build-v8.sh || { tail -100 build/logs/linux-x86_64.log; exit 1; }
           cp target/release/isolane-worker "$RUNNER_TEMP/isolane-worker"
 
-      # Saved right after the build so a failing test doesn't discard it.
+      # Saved right after the build, even when the build fails (a failure
+      # in the final steps still leaves hours of compiled V8 worth keeping).
       - name: Save V8 build
-        if: steps.v8-cache.outputs.cache-hit != 'true'
+        if: always() && steps.v8-cache.outputs.cache-hit != 'true'
         uses: actions/cache/save@v4
         with:
           path: |
