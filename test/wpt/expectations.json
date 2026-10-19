@@ -83,11 +83,11 @@
     },
     "encoding-edge": {
       "category": "bug",
-      "reason": "encoding_rs differs from the Encoding standard for EUC-JP's state after a fatal streaming error (roadmap: encoding conformance)."
+      "reason": "After a fatal streaming error, the Encoding Standard keeps the byte that ended a malformed sequence when the decoder had to look at it (EUC-JP's JIS0212 case: the ASCII byte is \"restored to the queue\") and drops the rest of the input. encoding_rs's fatal API reports the error the same way in both cases (the byte is left unread either way), so the op can't tell them apart without per-encoding rules. Deno's op is the same; an upstream encoding_rs API that says whether the byte was examined would fix it."
     },
     "url-crate": {
       "category": "bug",
-      "reason": "The `url` crate lags the newest URL-standard changes (spaces before ?/# in opaque paths, file URLs with Windows drive letters and backslashes, xn-- hosts, some setters) (roadmap: url crate)."
+      "reason": "The `url` crate (as in Deno) lags the newest URL-standard changes: spaces before ?/# in opaque paths, file URLs with Windows drive letters and backslashes, xn-- hosts, blob: origins, some setters. ada (Node's parser) gets all of these right (WPT's urltestdata 896/896 vs 831, setters 277/278 vs 255) but is 1.1 MB of C++ parsing guest strings outside the V8 sandbox, so it stays unadopted for now (roadmap: URL parser)."
     },
     "event-attrs": {
       "category": "bug",
