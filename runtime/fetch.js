@@ -29,8 +29,9 @@ const {
   StringPrototypeCharCodeAt,
   StringPrototypeIndexOf,
   StringPrototypeSlice,
-  StringPrototypeTrim,
+  StringPrototypeReplace,
   TypedArrayPrototypeGetSymbolToStringTag,
+  TypedArrayPrototypeSlice,
   TypeError,
   Uint8Array,
 } = primordials;
@@ -55,7 +56,7 @@ const {
 } = core.loadExtScript("ext:deno_fetch/23_response.js");
 const abortSignal = core.loadExtScript("ext:deno_web/03_abort_signal.js");
 const { forgivingBase64Decode } = core.loadExtScript("ext:deno_web/00_infra.js");
-const { parseMimeType } = core.loadExtScript("ext:deno_web/01_mimesniff.js");
+const { parseMimeType, serializeMimeType } = core.loadExtScript("ext:deno_web/01_mimesniff.js");
 
 // https://fetch.spec.whatwg.org/#bad-port, as in Deno's 26_fetch.js.
 const BAD_PORTS = {
@@ -130,33 +131,39 @@ function bodyStream(id, terminator) {
   return stream;
 }
 
-/** Percent-decode an ASCII string to bytes (URL's percent-decode). */
+const isHexDigit = (b) => (b >= 0x30 && b <= 0x39) || (b >= 0x41 && b <= 0x46) || (b >= 0x61 && b <= 0x66);
+const hexValue = (b) => (b <= 0x39 ? b - 0x30 : (b | 0x20) - 0x57);
+
+/** https://url.spec.whatwg.org/#string-percent-decode: UTF-8 encode the
+ * string, then percent-decode the bytes. Returns exactly the decoded bytes. */
 function percentDecode(input) {
-  const out = new Uint8Array(input.length);
+  const bytes = core.encode(input);
+  const out = new Uint8Array(bytes.length);
   let n = 0;
-  for (let i = 0; i < input.length; i++) {
-    const c = StringPrototypeCharCodeAt(input, i);
-    if (c === 0x25 && i + 2 < input.length && RegExpPrototypeExec(/^[0-9a-fA-F]{2}$/, StringPrototypeSlice(input, i + 1, i + 3)) !== null) {
-      out[n++] = NumberParseInt(StringPrototypeSlice(input, i + 1, i + 3), 16);
+  for (let i = 0; i < bytes.length; i++) {
+    const b = bytes[i];
+    if (b === 0x25 && i + 2 < bytes.length && isHexDigit(bytes[i + 1]) && isHexDigit(bytes[i + 2])) {
+      out[n++] = hexValue(bytes[i + 1]) * 16 + hexValue(bytes[i + 2]);
       i += 2;
     } else {
-      out[n++] = c & 0xff;
+      out[n++] = b;
     }
   }
-  return new Uint8Array(out.buffer, 0, n);
+  return TypedArrayPrototypeSlice(out, 0, n);
 }
 
-/** https://fetch.spec.whatwg.org/#data-url-processor (the MIME type is
- * passed through as written, without the spec's full parsing). */
+/** https://fetch.spec.whatwg.org/#data-url-processor */
 function fetchDataUrl(url, req) {
   // Any method: a data: URL's response doesn't depend on it. The fragment
   // isn't part of the data.
   const href = url.hash === "" ? url.href : StringPrototypeSlice(url.href, 0, url.href.length - url.hash.length);
   const comma = StringPrototypeIndexOf(href, ",");
   if (comma === -1) return networkError("invalid data: URL");
-  let mime = StringPrototypeTrim(StringPrototypeSlice(href, 5, comma));
+  // Strip leading and trailing ASCII whitespace.
+  let mime = StringPrototypeReplace(StringPrototypeSlice(href, 5, comma), /^[\t\n\f\r ]+|[\t\n\f\r ]+$/g, "");
   let bytes = percentDecode(StringPrototypeSlice(href, comma + 1));
-  const base64 = RegExpPrototypeExec(/;\s*base64$/i, mime);
+  // ";", then any spaces, then "base64" (ASCII case-insensitive), at the end.
+  const base64 = RegExpPrototypeExec(/;[ ]*base64$/i, mime);
   if (base64 !== null) {
     mime = StringPrototypeSlice(mime, 0, base64.index);
     let text = "";
@@ -167,10 +174,12 @@ function fetchDataUrl(url, req) {
       return networkError("invalid data: URL");
     }
   }
-  if (mime === "" || mime[0] === ";") mime = "text/plain" + (mime === "" ? ";charset=US-ASCII" : mime);
+  if (mime[0] === ";") mime = "text/plain" + mime;
+  const parsed = parseMimeType(mime);
+  const contentType = parsed === null ? "text/plain;charset=US-ASCII" : serializeMimeType(parsed);
   processUrlList(req.urlList, req.urlListProcessed);
   return {
-    headerList: [["content-type", mime]],
+    headerList: [["content-type", contentType]],
     status: 200,
     statusMessage: "OK",
     // Main fetch drops the body of a HEAD response.

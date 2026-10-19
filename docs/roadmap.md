@@ -229,6 +229,7 @@ environment 49, bug 177. Under wptserve, the fixes below took the run from
 | — | WPT expectations file (every allowed failure listed with a reason: by-design / browser-only / environment / bug) and per-subtest gating in CI and the soak; `--update` rewrites it from a run, keeping reasons | done |
 | — | Run WPT's own server (wptserve) for the gate so tests that need its Python handlers run | done |
 | — | Optional `web: { baseUrl }` (like Deno's `--location`) so relative Request/fetch URLs resolve and `location` exists | done |
+| — | MIME parser: Deno's vendored `01_mimesniff.js` drops a parameter with an empty quoted value (`a=""`), which the MIME Sniffing standard keeps (1 WPT subtest, `mime-empty-quoted-param`) | planned |
 | — | Fix or upstream the `url` crate's lag on newest URL-spec edge cases: WPT bug `url-crate` (112 subtests) | planned |
 | — | Compression conformance: smaller output for tiny repetitive inputs, detect truncated deflate input. WPT bug `compression-format` (4) | planned |
 | — | Encoding conformance: EUC-JP state after a fatal streaming error (`encoding_rs`). WPT bug `encoding-edge` (1) | planned |

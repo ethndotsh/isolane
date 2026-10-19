@@ -282,7 +282,13 @@ const files = [];
 const seen = new Set();
 for (const d of DIRS) {
   const p = join(root, d);
-  if (!existsSync(p)) continue;
+  // A directory that's missing (an old sparse checkout) or has no tests
+  // would otherwise pass vacuously: nothing run, nothing failed.
+  if (!existsSync(p)) {
+    console.error(`WPT directory ${d} is missing from ${root}; remove the checkout to re-fetch it`);
+    process.exit(2);
+  }
+  const before = files.length;
   (function walk(f) {
     if (statSync(f).isDirectory()) for (const n of readdirSync(f).sort()) walk(join(f, n));
     else if (f.endsWith('.any.js') && !seen.has(f)) {
@@ -290,6 +296,10 @@ for (const d of DIRS) {
       files.push(relative(root, f).split('\\').join('/'));
     }
   })(p);
+  if (files.length === before && !seen.has(p)) {
+    console.error(`WPT directory ${d} has no .any.js tests in ${root}; check the sparse checkout`);
+    process.exit(2);
+  }
 }
 const dirOf = (rel) => DIRS.find((d) => rel.startsWith(d)) ?? posix.dirname(rel);
 
