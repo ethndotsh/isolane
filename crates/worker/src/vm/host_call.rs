@@ -173,7 +173,9 @@ fn new_u8array<'s>(scope: &mut v8::PinScope<'s, '_>, data: &[u8]) -> v8::Local<'
 }
 
 /// Put byte values into a parsed host reply at their paths. A path the
-/// value doesn't have is ignored (the supervisor built both).
+/// value doesn't have is ignored (the supervisor built both). Only own
+/// properties are followed and set, so no path reaches a prototype
+/// (`constructor.prototype.x`, `__proto__`) or runs a setter.
 fn place_bytes<'s>(
     scope: &mut v8::PinScope<'s, '_>,
     mut value: v8::Local<'s, v8::Value>,
@@ -185,31 +187,26 @@ fn place_bytes<'s>(
             value = u8s;
             continue;
         };
-        let mut holder = value;
-        let key = |scope: &mut v8::PinScope<'s, '_>, seg: &PathSegment| -> v8::Local<'s, v8::Value> {
+        let key = |scope: &mut v8::PinScope<'s, '_>, seg: &PathSegment| -> v8::Local<'s, v8::Name> {
             match seg {
-                PathSegment::Index(i) => v8::Integer::new_from_unsigned(scope, *i).into(),
+                PathSegment::Index(i) => v8::String::new(scope, &i.to_string()).unwrap().into(),
                 PathSegment::Key(k) => v8::String::new(scope, k).unwrap().into(),
             }
         };
-        let mut ok = true;
+        let mut holder = Some(value);
         for seg in parents {
-            let Ok(obj) = v8::Local::<v8::Object>::try_from(holder) else {
-                ok = false;
-                break;
-            };
+            let Some(obj) = holder.and_then(|h| v8::Local::<v8::Object>::try_from(h).ok()) else { break };
             let k = key(scope, seg);
-            match obj.get(scope, k) {
-                Some(v) => holder = v,
-                None => {
-                    ok = false;
-                    break;
-                }
-            }
+            holder = match obj.has_own_property(scope, k) {
+                Some(true) => obj.get(scope, k.into()),
+                _ => None,
+            };
         }
-        if let (true, Ok(obj)) = (ok, v8::Local::<v8::Object>::try_from(holder)) {
+        if let Some(obj) = holder.and_then(|h| v8::Local::<v8::Object>::try_from(h).ok()) {
             let k = key(scope, last);
-            obj.set(scope, k, u8s);
+            if obj.has_own_property(scope, k) == Some(true) {
+                obj.create_data_property(scope, k, u8s);
+            }
         }
     }
     value

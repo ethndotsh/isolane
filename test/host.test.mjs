@@ -48,6 +48,16 @@ test('bytes cross host calls as bytes, both ways', async () => {
     [true, [1, 2, 3, 4], true, [7], 'x', [5, 6]],
   );
   assert.deepEqual(seen, [[true, [1, 2], [3, 4], { n: 1 }]]);
+  // Byte values under keys like __proto__ and constructor land on the
+  // reply's own properties, never on a prototype.
+  const tricky = () => JSON.parse('{"__proto__": {"x": 0}, "constructor": {"prototype": {"y": 0}}}', (k, v) => (k === 'x' || k === 'y' ? new Uint8Array([1]) : v));
+  assert.deepEqual(
+    await pool.run(
+      `tricky().then((r) => [Object.getPrototypeOf(r) === Object.prototype, r.__proto__.x instanceof Uint8Array, r.constructor.prototype.y instanceof Uint8Array, 'x' in {}, 'y' in Object.prototype])`,
+      { ...T, host: { tricky } },
+    ),
+    [true, true, true, false, false],
+  );
   assert.equal(await pool.run('big().then((b) => b.length + b[100])', { ...T, host }), (3 << 20) + 1);
   assert.deepEqual(await pool.run('[...whole(new Uint8Array([9, 8]))]', { ...T, host }), [9, 8]);
   // Empty byte arguments still travel as bytes (an empty request body, from WPT).
