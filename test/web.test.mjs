@@ -121,6 +121,8 @@ test('structuredClone', async () => {
   );
   assert.equal(await run('try { structuredClone(() => 1) } catch (e) { e.name }'), 'DataCloneError');
   assert.equal(await run('try { structuredClone(Symbol()) } catch (e) { e.name }'), 'DataCloneError');
+  // Platform objects aren't cloneable, even nested.
+  assert.equal(await run('try { structuredClone({ u: new URL("https://a.b") }) } catch (e) { e.name }'), 'DataCloneError');
 });
 
 test('performance', async () => {
