@@ -4,6 +4,8 @@
 # Minimum Common Web Platform API on top of a small native layer; isolane
 # provides that layer itself (crates/worker/src/web/ and runtime/core.js)
 # instead of deno_core, so it keeps its own V8, lockdown, and clock.
+# isolane's few fixes to them are patches/deno-*.patch, applied after
+# copying (each says why; prefer fixing things in runtime/*.js instead).
 # Re-run after changing DENO_COMMIT or FILES; review the diff like code.
 set -euo pipefail
 cd "$(dirname "$0")/.."
@@ -25,6 +27,7 @@ FILES=(
   ext/web/08_text_encoding.js
   ext/web/09_file.js
   ext/web/10_filereader.js
+  ext/web/13_message_port.js
   ext/web/14_compression.js
   ext/web/15_performance.js
   ext/fetch/20_headers.js
@@ -42,6 +45,9 @@ rm -rf runtime/deno
 for f in LICENSE.md "${FILES[@]}"; do
   mkdir -p "runtime/deno/$(dirname "$f")"
   cp "$tmp/deno/$f" "runtime/deno/$f"
+done
+for patch in patches/deno-*.patch; do
+  [ -e "$patch" ] && git apply "$patch"
 done
 echo "$DENO_COMMIT" >runtime/deno/COMMIT
 echo "vendored ${#FILES[@]} files from denoland/deno@${DENO_COMMIT:0:12}"

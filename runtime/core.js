@@ -13,6 +13,8 @@
     ArrayPrototypeMap,
     ArrayPrototypePop,
     ArrayPrototypePush,
+    ArrayPrototypeSlice,
+    Error,
     ErrorPrototype,
     FinalizationRegistry,
     FinalizationRegistryPrototypeRegister,
@@ -201,6 +203,13 @@
     report();
     return timer;
   }
+  // A task for the event loop (a 0 ms timer outside HTML's timer nesting,
+  // so tasks that queue tasks are never clamped to 4 ms).
+  function queueTask(callback) {
+    const timer = createTimer(callback, 0, undefined, false, true);
+    timer.level = 0;
+    return timer;
+  }
   function cancelTimer(timer) {
     if (!timer || timer.destroyed) return;
     retire(timer);
@@ -313,6 +322,140 @@
     },
   };
 
+  // ---- message ports ----
+  // Deno's op_message_port_* for 13_message_port.js, inside one isolate (a
+  // guest has nothing else to talk to): a port is its id, an entangled
+  // peer's id, and a queue of messages (serialized, with their transferred
+  // ArrayBuffers and ports). Each delivery is a task, one message at a
+  // time, as in HTML's port message queue; one task at a time serves every
+  // port with a receive waiting and something to deliver. A port that's
+  // never closed keeps its queue until the isolate ends.
+  const ports = new SafeMap();
+  let nextPortId = 1;
+  const ready = []; // ports with a waiting receive and a message (or a closed peer)
+  let readyHead = 0;
+  let delivering = false;
+
+  class Interrupted extends Error {
+    constructor(msg, options) {
+      super(msg, options);
+      this.name = "Interrupted";
+    }
+  }
+  class BadResource extends Error {
+    constructor(msg, options) {
+      super(msg, options);
+      this.name = "BadResource";
+    }
+  }
+
+  function getPort(id) {
+    const port = MapPrototypeGet(ports, id);
+    if (port === undefined) throw new BadResource("Bad resource ID");
+    return port;
+  }
+  function deliverable(port) {
+    return port.waiter !== null && (port.head < port.queue.length || port.peer === null);
+  }
+  function markReady(port) {
+    if (port.queued || !deliverable(port)) return;
+    port.queued = true;
+    ArrayPrototypePush(ready, port);
+    if (!delivering) {
+      delivering = true;
+      queueTask(deliver);
+    }
+  }
+  function takeMessage(port) {
+    if (port.head >= port.queue.length) return null;
+    const message = port.queue[port.head];
+    port.queue[port.head++] = undefined;
+    if (port.head > 64 && port.head * 2 > port.queue.length) {
+      port.queue = ArrayPrototypeSlice(port.queue, port.head);
+      port.head = 0;
+    }
+    return message;
+  }
+  function deliver() {
+    delivering = false;
+    const port = ready[readyHead];
+    ready[readyHead++] = undefined;
+    if (readyHead === ready.length) {
+      ready.length = 0;
+      readyHead = 0;
+    }
+    port.queued = false;
+    if (deliverable(port)) {
+      const waiter = port.waiter;
+      port.waiter = null;
+      waiter.resolve(takeMessage(port)); // null: the peer is gone
+    }
+    if (readyHead < ready.length) {
+      delivering = true;
+      queueTask(deliver);
+    }
+  }
+  function postMessage(id, data) {
+    const port = getPort(id);
+    if (port.peer === null) return; // the other end is closed
+    const peer = MapPrototypeGet(ports, port.peer);
+    ArrayPrototypePush(peer.queue, data);
+    markReady(peer);
+  }
+  function newPort(id, peer) {
+    MapPrototypeSet(ports, id, { __proto__: null, peer, queue: [], head: 0, waiter: null, queued: false });
+  }
+  const portOps = {
+    op_message_port_create_entangled() {
+      const a = nextPortId++;
+      const b = nextPortId++;
+      newPort(a, b);
+      newPort(b, a);
+      return [a, b];
+    },
+    op_message_port_post_message: postMessage,
+    op_message_port_post_message_raw: postMessage,
+    op_message_port_recv_message(id) {
+      return new Promise((resolve, reject) => {
+        const port = getPort(id);
+        if (port.waiter !== null) throw new TypeError("a receive is already waiting");
+        port.waiter = { __proto__: null, resolve, reject };
+        markReady(port);
+      });
+    },
+    op_message_port_recv_message_sync(id) {
+      return takeMessage(getPort(id));
+    },
+  };
+  // A port being transferred: its old MessagePort object's receive loop
+  // ends (deno_core moves the resource to a new id, which interrupts it).
+  function releasePort(id) {
+    const port = MapPrototypeGet(ports, id);
+    if (port !== undefined && port.waiter !== null) {
+      const waiter = port.waiter;
+      port.waiter = null;
+      waiter.reject(new Interrupted("operation canceled"));
+    }
+    return id;
+  }
+  // core.close(id): only ports are resources here. A waiting receive is
+  // interrupted; the peer sees the end once it has read what was sent.
+  function closePort(id) {
+    const port = MapPrototypeGet(ports, id);
+    if (port === undefined) return;
+    MapPrototypeDelete(ports, id);
+    if (port.waiter !== null) {
+      const waiter = port.waiter;
+      port.waiter = null;
+      waiter.reject(new Interrupted("operation canceled"));
+    }
+    const peer = port.peer === null ? undefined : MapPrototypeGet(ports, port.peer);
+    if (peer !== undefined) {
+      peer.peer = null;
+      markReady(peer);
+    }
+  }
+
   // FileReader's readAsBinaryString.
   function op_encode_binary_string(bytes) {
     let out = "";
@@ -348,7 +491,7 @@
   // guest abandons mid-stream frees its decoder when collected.
   const decoders = new FinalizationRegistry((id) => native.freeDecoder(id));
   const ops = ObjectFreeze(
-    ObjectAssign(ObjectCreate(null), rawOps, blobOps, compressionOps, { op_encode_binary_string, op_defer }, {
+    ObjectAssign(ObjectCreate(null), rawOps, blobOps, compressionOps, portOps, { op_encode_binary_string, op_defer }, {
       // (No op_http_new_response_native_headers / op_http_drop_response_native:
       // 23_response.js skips Deno.serve's native responses when they're absent.)
       op_encoding_new_decoder(label, fatal, ignoreBOM) {
@@ -364,16 +507,11 @@
   );
 
   // Scripts outside phase 1 that the vendored code only touches lazily:
-  // inspection for Deno's console, and from MessagePort's script only
-  // markNotSerializable (a brand structuredClone refuses, see web/clone.rs).
+  // inspection for Deno's console.
   const stubs = {
     __proto__: null,
     "ext:deno_web/01_console.js": ObjectFreeze({
       createFilteredInspectProxy: ({ object }) => object,
-    }),
-    "ext:deno_web/13_message_port.js": ObjectFreeze({
-      markNotSerializable: native.markNotSerializable,
-      MessagePortPrototype: ObjectFreeze(ObjectCreate(null)),
     }),
     // The location is the isolate's base URL (`web.baseUrl`), if it has one:
     // relative URLs in Request/Response.redirect resolve against it, and
@@ -383,21 +521,49 @@
     "ext:deno_fetch/22_http_client.js": ObjectFreeze({ HttpClientPrototype: ObjectFreeze(ObjectCreate(null)) }),
   };
 
+  // Changes to what a vendored script exports. 13_message_port.js marks
+  // platform objects not serializable with a symbol only structuredClone's
+  // top level checks; also brand them for V8's serializer (web/clone.rs),
+  // which refuses them at any depth.
+  const adapters = {
+    __proto__: null,
+    "ext:deno_web/13_message_port.js"(exports) {
+      const { markNotSerializable } = exports;
+      exports.markNotSerializable = (target) => {
+        markNotSerializable(target);
+        native.markNotSerializable(target);
+      };
+      return exports;
+    },
+  };
+
   const loaded = new SafeMap();
   let bootstrap;
   function loadExtScript(specifier) {
     if (MapPrototypeHas(loaded, specifier)) return MapPrototypeGet(loaded, specifier);
-    const exports = stubs[specifier] ?? native.compileExt(specifier)(bootstrap);
+    let exports = stubs[specifier] ?? native.compileExt(specifier)(bootstrap);
+    if (adapters[specifier]) exports = adapters[specifier](exports);
     MapPrototypeSet(loaded, specifier, exports);
     return exports;
   }
 
   // structuredClone of platform objects (Blob, File): their hostObjectBrand
   // method describes them, and these rebuild them (see web/clone.rs).
+  // Transferable ones (MessagePort, streams) have a send and a receive.
   const cloneableDeserializers = { __proto__: null };
+  const transferableResources = { __proto__: null };
+  const notTransferable = ObjectFreeze({
+    __proto__: null,
+    send() {
+      const { DOMException } = loadExtScript("ext:deno_web/01_dom_exception.js");
+      throw new DOMException("Value not transferable", "DataCloneError");
+    },
+    receive() {
+      throw new TypeError("Value not transferable");
+    },
+  });
   const hostObjectBrand = SymbolFor("Deno.core.hostObject");
 
-  const BadResourcePrototype = ObjectFreeze({ __proto__: null });
   // An http(s) base URL's origin is its scheme, host, and port: the part
   // before the path. (core.js runs before URL exists.)
   const blobOrigin = () => (baseUrl && RegExpPrototypeExec(/^https?:\/\/[^/?#]+/i, baseUrl)?.[0]) || "null";
@@ -437,18 +603,34 @@
     encode: native.encode,
     decode: native.decode,
     structuredClone: (value) => native.structuredClone(value, hostObjectBrand, cloneableDeserializers),
+    serialize: (value, options, errorCallback) =>
+      native.serialize(value, hostObjectBrand, options?.hostObjects, options?.transferredArrayBuffers, errorCallback),
+    deserialize: (buffer, options) =>
+      native.deserialize(buffer, hostObjectBrand, options?.hostObjects, options?.transferredArrayBuffers, options?.deserializers),
     hostObjectBrand,
     registerCloneableResource(name, deserialize) {
       cloneableDeserializers[name] = deserialize;
     },
-    // Transfer (postMessage, structuredClone's transfer list) isn't
-    // supported: there is nothing to transfer to.
-    registerTransferableResource() {},
+    getCloneableDeserializers: () => cloneableDeserializers,
+    registerTransferableResource(name, send, receive) {
+      const sendPort = name === "MessagePort" ? (port) => releasePort(send(port)) : send;
+      transferableResources[name] = ObjectFreeze({ __proto__: null, send: sendPort, receive });
+    },
+    // A platform object in a transfer list that isn't transferable (a Blob)
+    // fails with a DataCloneError, as HTML has it, not a TypeError from
+    // reading `send` of undefined.
+    getTransferableResource: (name) => transferableResources[name] ?? notTransferable,
+    close: closePort,
+    // Ports' receives don't keep an eval waiting (a message is a task, and
+    // tasks do), so there is nothing to ref or unref.
+    refOpPromise() {},
+    unrefOpPromise() {},
+    InterruptedPrototype: Interrupted.prototype,
     destructureError,
-    // deno_core's error for a closed resource. isolane has no resources, so
-    // nothing is ever one, but the vendored body and stream code checks for
-    // it when a read fails (and must not throw while checking).
-    BadResourcePrototype: BadResourcePrototype,
+    // deno_core's error for a closed resource. The only resources here are
+    // message ports; the vendored body and stream code checks for it when a
+    // read fails.
+    BadResourcePrototype: BadResource.prototype,
     reportUnhandledException: native.reportUnhandledException,
     print(message, isError) {
       native.log(isError ? "error" : "log", String(message));

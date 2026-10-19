@@ -164,12 +164,16 @@ function processBlobParts(parts, endings) {
   let size = 0;
   for (let i = 0; i < parts.length; ++i) {
     const element = parts[i];
+    // A detached buffer holds no bytes (WebIDL: "get a copy of the bytes
+    // held by the buffer source"); a view onto one can't be constructed.
     if (isArrayBuffer(element)) {
-      const chunk = new Uint8Array(ArrayBufferPrototypeSlice(element, 0));
+      const chunk = ArrayBufferPrototypeGetByteLength(element) === 0
+        ? new Uint8Array(0)
+        : new Uint8Array(ArrayBufferPrototypeSlice(element, 0));
       ArrayPrototypePush(processedParts, BlobReference.fromUint8Array(chunk));
       size += ArrayBufferPrototypeGetByteLength(element);
     } else if (isTypedArray(element)) {
-      const chunk = new Uint8Array(
+      const chunk = TypedArrayPrototypeGetByteLength(element) === 0 ? new Uint8Array(0) : new Uint8Array(
         TypedArrayPrototypeGetBuffer(/** @type {Uint8Array} */ (element)),
         TypedArrayPrototypeGetByteOffset(/** @type {Uint8Array} */ (element)),
         TypedArrayPrototypeGetByteLength(/** @type {Uint8Array} */ (element)),

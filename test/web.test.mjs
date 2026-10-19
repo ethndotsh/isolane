@@ -28,6 +28,7 @@ test('the globals exist and are non-enumerable', async () => {
     'TransformStream', 'ByteLengthQueuingStrategy', 'CountQueuingStrategy', 'ReadableStreamBYOBReader',
     'Blob', 'File', 'FileReader', 'TextEncoderStream', 'TextDecoderStream', 'CompressionStream',
     'DecompressionStream', 'Headers', 'Request', 'Response', 'FormData', 'fetch',
+    'MessageChannel', 'MessagePort', 'MessageEvent',
   ];
   const types = await run(`${JSON.stringify(names)}.map((n) => typeof globalThis[n])`);
   assert.ok(types.every((t) => t !== 'undefined'), JSON.stringify(Object.fromEntries(names.map((n, i) => [n, types[i]]))));
@@ -152,6 +153,76 @@ test('structuredClone', async () => {
   assert.equal(await run('try { structuredClone(Symbol()) } catch (e) { e.name }'), 'DataCloneError');
   // Platform objects aren't cloneable, even nested.
   assert.equal(await run('try { structuredClone({ u: new URL("https://a.b") }) } catch (e) { e.name }'), 'DataCloneError');
+});
+
+test('structuredClone transfers ArrayBuffers and keeps resizable ones resizable', async () => {
+  assert.deepEqual(
+    await run(`const b = new ArrayBuffer(8, { maxByteLength: 16 });
+      new Uint8Array(b)[0] = 7;
+      const c = structuredClone({ b }, { transfer: [b] }).b;
+      const kept = structuredClone(new ArrayBuffer(2, { maxByteLength: 4 }));
+      [b.detached, b.byteLength, c.byteLength, c.resizable, c.maxByteLength, new Uint8Array(c)[0], kept.maxByteLength]`),
+    [true, 0, 8, true, 16, 7, 4],
+  );
+  const name = (code) => run(`try { ${code}; 'no error' } catch (e) { e.name }`);
+  // A detached buffer, a non-transferable platform object, and a view out
+  // of bounds of its (shrunk) buffer can't be cloned.
+  assert.equal(await name('const b = new ArrayBuffer(1); structuredClone(b, { transfer: [b] }); structuredClone(b, { transfer: [b] })'), 'DataCloneError');
+  assert.equal(await name('const b = new Blob(); structuredClone(b, { transfer: [b] })'), 'DataCloneError');
+  assert.equal(await name('const b = new ArrayBuffer(8, { maxByteLength: 8 }); const v = new Uint8Array(b, 4, 4); b.resize(2); structuredClone(v)'), 'DataCloneError');
+  // A failed transfer detaches nothing.
+  assert.deepEqual(await run('const b = new ArrayBuffer(1); try { structuredClone([b, () => 1], { transfer: [b] }) } catch {} [b.detached, b.byteLength]'), [false, 1]);
+});
+
+test('MessageChannel: each message is a task, in order, and ports transfer', async () => {
+  assert.deepEqual(
+    await run(`(async () => {
+      const { port1, port2 } = new MessageChannel();
+      const seen = [];
+      const done = new Promise((resolve) => {
+        port2.onmessage = (e) => {
+          seen.push(e.data);
+          queueMicrotask(() => seen.push('micro'));
+          if (e.data === 3) resolve();
+        };
+      });
+      port1.postMessage(1); port1.postMessage(2); port1.postMessage(3);
+      seen.push('sync');
+      await done;
+      // Transfer a port: messages to it arrive where it went.
+      const other = new MessageChannel();
+      const arrived = new Promise((resolve) => (other.port2.onmessage = (e) => resolve(e.ports[0])));
+      other.port1.postMessage('here', [port2]);
+      const moved = await arrived;
+      const got = new Promise((resolve) => (moved.onmessage = (e) => resolve(e.data)));
+      port1.postMessage('to the moved port');
+      const text = await got;
+      const buf = new Uint8Array([1, 2]).buffer;
+      const ab = new Promise((resolve) => (moved.onmessage = (e) => resolve(e.data.byteLength)));
+      port1.postMessage(buf, [buf]);
+      return [seen, text, buf.byteLength, await ab];
+    })()`),
+    [['sync', 1, 'micro', 2, 'micro', 3, 'micro'], 'to the moved port', 0, 2],
+  );
+});
+
+test('MessageChannel: close stops delivery, and a listening port never holds an eval', async () => {
+  assert.deepEqual(
+    await run(`(async () => {
+      const { port1, port2 } = new MessageChannel();
+      let got = 0;
+      port2.onmessage = () => got++;
+      port1.postMessage(1);
+      await new Promise((r) => setTimeout(r, 5));
+      port2.close();
+      port1.postMessage(2);
+      await new Promise((r) => setTimeout(r, 5));
+      return got;
+    })()`),
+    1,
+  );
+  assert.equal(await run('new MessageChannel().port1.onmessage = () => {}; "returned"'), 'returned');
+  await assert.rejects(run('new MessagePort()'), (e) => e.guest?.name === 'TypeError');
 });
 
 test('performance', async () => {

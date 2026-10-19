@@ -57,6 +57,10 @@
       "category": "browser-only",
       "reason": "RequestInit's `window` only means something with a browsing context."
     },
+    "no-canvas": {
+      "category": "browser-only",
+      "reason": "OffscreenCanvas and ImageBitmap are browser graphics APIs, not part of WinterTC's minimum common API (nor in Deno or workerd)."
+    },
     "no-tls": {
       "category": "environment",
       "reason": "The WPT server here runs without TLS, so https URLs don't connect."
@@ -76,10 +80,6 @@
     "wpt-proxy": {
       "category": "environment",
       "reason": "Uses WPT's proxy for a fake host (bad-port.wpt), which this harness doesn't run; the fetch policy also refuses that host."
-    },
-    "message-channel": {
-      "category": "bug",
-      "reason": "No MessageChannel/MessagePort (or structuredClone transfer), so tests that use one to detach buffers fail (roadmap: MessageChannel and transfer)."
     },
     "decompression-trailing": {
       "category": "bug",
@@ -120,28 +120,9 @@
     "streams-edge": {
       "category": "bug",
       "reason": "Streams edge cases from Deno's vendored implementation: enqueue() calling the write algorithm synchronously, enqueue after detaching a BYOB buffer, byobRequest after a patched then(), a transformer.cancel() error race (roadmap: streams conformance)."
-    },
-    "structured-clone-edge": {
-      "category": "bug",
-      "reason": "structuredClone doesn't keep a resizable ArrayBuffer's maxByteLength or reject out-of-bounds views (roadmap: structured clone)."
     }
   },
   "files": {
-    "FileAPI/blob/Blob-constructor-detached-buffer.any.js": {
-      "why": "message-channel",
-      "subtests": {
-        "Blob from a detached ArrayBufferView should be empty": "FAIL",
-        "Blob from a detached ArrayBufferView with offset should be empty": "FAIL",
-        "Blob from a detached ArrayBuffer should be empty": "FAIL",
-        "Blob from a detached ArrayBufferView mixed with string, detached part ignored": "FAIL"
-      }
-    },
-    "FileAPI/blob/Blob-constructor.any.js": {
-      "why": "message-channel",
-      "subtests": {
-        "Passing a FrozenArray as the blobParts array should work (FrozenArray<MessagePort>).": "FAIL"
-      }
-    },
     "FileAPI/url/url-with-xhr.any.js": {
       "why": "no-xhr",
       "subtests": {
@@ -225,227 +206,62 @@
       }
     },
     "encoding/encodeInto.any.js": {
+      "why": "no-shared-memory",
       "subtests": {
-        "encodeInto() into SharedArrayBuffer with Hi and destination length 0, offset 0, filler 0": {
-          "status": "FAIL",
-          "why": "no-shared-memory"
-        },
-        "encodeInto() into SharedArrayBuffer with Hi and destination length 0, offset 4, filler 0": {
-          "status": "FAIL",
-          "why": "no-shared-memory"
-        },
-        "encodeInto() into SharedArrayBuffer with Hi and destination length 0, offset 0, filler 128": {
-          "status": "FAIL",
-          "why": "no-shared-memory"
-        },
-        "encodeInto() into SharedArrayBuffer with Hi and destination length 0, offset 4, filler 128": {
-          "status": "FAIL",
-          "why": "no-shared-memory"
-        },
-        "encodeInto() into SharedArrayBuffer with Hi and destination length 0, offset 0, filler random": {
-          "status": "FAIL",
-          "why": "no-shared-memory"
-        },
-        "encodeInto() into SharedArrayBuffer with Hi and destination length 0, offset 4, filler random": {
-          "status": "FAIL",
-          "why": "no-shared-memory"
-        },
-        "encodeInto() into SharedArrayBuffer with A and destination length 10, offset 0, filler 0": {
-          "status": "FAIL",
-          "why": "no-shared-memory"
-        },
-        "encodeInto() into SharedArrayBuffer with A and destination length 10, offset 4, filler 0": {
-          "status": "FAIL",
-          "why": "no-shared-memory"
-        },
-        "encodeInto() into SharedArrayBuffer with A and destination length 10, offset 0, filler 128": {
-          "status": "FAIL",
-          "why": "no-shared-memory"
-        },
-        "encodeInto() into SharedArrayBuffer with A and destination length 10, offset 4, filler 128": {
-          "status": "FAIL",
-          "why": "no-shared-memory"
-        },
-        "encodeInto() into SharedArrayBuffer with A and destination length 10, offset 0, filler random": {
-          "status": "FAIL",
-          "why": "no-shared-memory"
-        },
-        "encodeInto() into SharedArrayBuffer with A and destination length 10, offset 4, filler random": {
-          "status": "FAIL",
-          "why": "no-shared-memory"
-        },
-        "encodeInto() into SharedArrayBuffer with 𝌆 and destination length 4, offset 0, filler 0": {
-          "status": "FAIL",
-          "why": "no-shared-memory"
-        },
-        "encodeInto() into SharedArrayBuffer with 𝌆 and destination length 4, offset 4, filler 0": {
-          "status": "FAIL",
-          "why": "no-shared-memory"
-        },
-        "encodeInto() into SharedArrayBuffer with 𝌆 and destination length 4, offset 0, filler 128": {
-          "status": "FAIL",
-          "why": "no-shared-memory"
-        },
-        "encodeInto() into SharedArrayBuffer with 𝌆 and destination length 4, offset 4, filler 128": {
-          "status": "FAIL",
-          "why": "no-shared-memory"
-        },
-        "encodeInto() into SharedArrayBuffer with 𝌆 and destination length 4, offset 0, filler random": {
-          "status": "FAIL",
-          "why": "no-shared-memory"
-        },
-        "encodeInto() into SharedArrayBuffer with 𝌆 and destination length 4, offset 4, filler random": {
-          "status": "FAIL",
-          "why": "no-shared-memory"
-        },
-        "encodeInto() into SharedArrayBuffer with 𝌆A and destination length 3, offset 0, filler 0": {
-          "status": "FAIL",
-          "why": "no-shared-memory"
-        },
-        "encodeInto() into SharedArrayBuffer with 𝌆A and destination length 3, offset 4, filler 0": {
-          "status": "FAIL",
-          "why": "no-shared-memory"
-        },
-        "encodeInto() into SharedArrayBuffer with 𝌆A and destination length 3, offset 0, filler 128": {
-          "status": "FAIL",
-          "why": "no-shared-memory"
-        },
-        "encodeInto() into SharedArrayBuffer with 𝌆A and destination length 3, offset 4, filler 128": {
-          "status": "FAIL",
-          "why": "no-shared-memory"
-        },
-        "encodeInto() into SharedArrayBuffer with 𝌆A and destination length 3, offset 0, filler random": {
-          "status": "FAIL",
-          "why": "no-shared-memory"
-        },
-        "encodeInto() into SharedArrayBuffer with 𝌆A and destination length 3, offset 4, filler random": {
-          "status": "FAIL",
-          "why": "no-shared-memory"
-        },
-        "encodeInto() into SharedArrayBuffer with U+d834AU+df06A¥Hi and destination length 10, offset 0, filler 0": {
-          "status": "FAIL",
-          "why": "no-shared-memory"
-        },
-        "encodeInto() into SharedArrayBuffer with U+d834AU+df06A¥Hi and destination length 10, offset 4, filler 0": {
-          "status": "FAIL",
-          "why": "no-shared-memory"
-        },
-        "encodeInto() into SharedArrayBuffer with U+d834AU+df06A¥Hi and destination length 10, offset 0, filler 128": {
-          "status": "FAIL",
-          "why": "no-shared-memory"
-        },
-        "encodeInto() into SharedArrayBuffer with U+d834AU+df06A¥Hi and destination length 10, offset 4, filler 128": {
-          "status": "FAIL",
-          "why": "no-shared-memory"
-        },
-        "encodeInto() into SharedArrayBuffer with U+d834AU+df06A¥Hi and destination length 10, offset 0, filler random": {
-          "status": "FAIL",
-          "why": "no-shared-memory"
-        },
-        "encodeInto() into SharedArrayBuffer with U+d834AU+df06A¥Hi and destination length 10, offset 4, filler random": {
-          "status": "FAIL",
-          "why": "no-shared-memory"
-        },
-        "encodeInto() into SharedArrayBuffer with AU+df06 and destination length 4, offset 0, filler 0": {
-          "status": "FAIL",
-          "why": "no-shared-memory"
-        },
-        "encodeInto() into SharedArrayBuffer with AU+df06 and destination length 4, offset 4, filler 0": {
-          "status": "FAIL",
-          "why": "no-shared-memory"
-        },
-        "encodeInto() into SharedArrayBuffer with AU+df06 and destination length 4, offset 0, filler 128": {
-          "status": "FAIL",
-          "why": "no-shared-memory"
-        },
-        "encodeInto() into SharedArrayBuffer with AU+df06 and destination length 4, offset 4, filler 128": {
-          "status": "FAIL",
-          "why": "no-shared-memory"
-        },
-        "encodeInto() into SharedArrayBuffer with AU+df06 and destination length 4, offset 0, filler random": {
-          "status": "FAIL",
-          "why": "no-shared-memory"
-        },
-        "encodeInto() into SharedArrayBuffer with AU+df06 and destination length 4, offset 4, filler random": {
-          "status": "FAIL",
-          "why": "no-shared-memory"
-        },
-        "encodeInto() into SharedArrayBuffer with ¥¥ and destination length 4, offset 0, filler 0": {
-          "status": "FAIL",
-          "why": "no-shared-memory"
-        },
-        "encodeInto() into SharedArrayBuffer with ¥¥ and destination length 4, offset 4, filler 0": {
-          "status": "FAIL",
-          "why": "no-shared-memory"
-        },
-        "encodeInto() into SharedArrayBuffer with ¥¥ and destination length 4, offset 0, filler 128": {
-          "status": "FAIL",
-          "why": "no-shared-memory"
-        },
-        "encodeInto() into SharedArrayBuffer with ¥¥ and destination length 4, offset 4, filler 128": {
-          "status": "FAIL",
-          "why": "no-shared-memory"
-        },
-        "encodeInto() into SharedArrayBuffer with ¥¥ and destination length 4, offset 0, filler random": {
-          "status": "FAIL",
-          "why": "no-shared-memory"
-        },
-        "encodeInto() into SharedArrayBuffer with ¥¥ and destination length 4, offset 4, filler random": {
-          "status": "FAIL",
-          "why": "no-shared-memory"
-        },
-        "Invalid encodeInto() destination: DataView, backed by: SharedArrayBuffer": {
-          "status": "FAIL",
-          "why": "no-shared-memory"
-        },
-        "Invalid encodeInto() destination: Int8Array, backed by: SharedArrayBuffer": {
-          "status": "FAIL",
-          "why": "no-shared-memory"
-        },
-        "Invalid encodeInto() destination: Int16Array, backed by: SharedArrayBuffer": {
-          "status": "FAIL",
-          "why": "no-shared-memory"
-        },
-        "Invalid encodeInto() destination: Int32Array, backed by: SharedArrayBuffer": {
-          "status": "FAIL",
-          "why": "no-shared-memory"
-        },
-        "Invalid encodeInto() destination: Uint16Array, backed by: SharedArrayBuffer": {
-          "status": "FAIL",
-          "why": "no-shared-memory"
-        },
-        "Invalid encodeInto() destination: Uint32Array, backed by: SharedArrayBuffer": {
-          "status": "FAIL",
-          "why": "no-shared-memory"
-        },
-        "Invalid encodeInto() destination: Uint8ClampedArray, backed by: SharedArrayBuffer": {
-          "status": "FAIL",
-          "why": "no-shared-memory"
-        },
-        "Invalid encodeInto() destination: BigInt64Array, backed by: SharedArrayBuffer": {
-          "status": "FAIL",
-          "why": "no-shared-memory"
-        },
-        "Invalid encodeInto() destination: BigUint64Array, backed by: SharedArrayBuffer": {
-          "status": "FAIL",
-          "why": "no-shared-memory"
-        },
-        "Invalid encodeInto() destination: Float16Array, backed by: SharedArrayBuffer": {
-          "status": "FAIL",
-          "why": "no-shared-memory"
-        },
-        "Invalid encodeInto() destination: Float32Array, backed by: SharedArrayBuffer": {
-          "status": "FAIL",
-          "why": "no-shared-memory"
-        },
-        "Invalid encodeInto() destination: Float64Array, backed by: SharedArrayBuffer": {
-          "status": "FAIL",
-          "why": "no-shared-memory"
-        },
-        "encodeInto() and a detached output buffer": {
-          "status": "FAIL",
-          "why": "message-channel"
-        }
+        "encodeInto() into SharedArrayBuffer with Hi and destination length 0, offset 0, filler 0": "FAIL",
+        "encodeInto() into SharedArrayBuffer with Hi and destination length 0, offset 4, filler 0": "FAIL",
+        "encodeInto() into SharedArrayBuffer with Hi and destination length 0, offset 0, filler 128": "FAIL",
+        "encodeInto() into SharedArrayBuffer with Hi and destination length 0, offset 4, filler 128": "FAIL",
+        "encodeInto() into SharedArrayBuffer with Hi and destination length 0, offset 0, filler random": "FAIL",
+        "encodeInto() into SharedArrayBuffer with Hi and destination length 0, offset 4, filler random": "FAIL",
+        "encodeInto() into SharedArrayBuffer with A and destination length 10, offset 0, filler 0": "FAIL",
+        "encodeInto() into SharedArrayBuffer with A and destination length 10, offset 4, filler 0": "FAIL",
+        "encodeInto() into SharedArrayBuffer with A and destination length 10, offset 0, filler 128": "FAIL",
+        "encodeInto() into SharedArrayBuffer with A and destination length 10, offset 4, filler 128": "FAIL",
+        "encodeInto() into SharedArrayBuffer with A and destination length 10, offset 0, filler random": "FAIL",
+        "encodeInto() into SharedArrayBuffer with A and destination length 10, offset 4, filler random": "FAIL",
+        "encodeInto() into SharedArrayBuffer with 𝌆 and destination length 4, offset 0, filler 0": "FAIL",
+        "encodeInto() into SharedArrayBuffer with 𝌆 and destination length 4, offset 4, filler 0": "FAIL",
+        "encodeInto() into SharedArrayBuffer with 𝌆 and destination length 4, offset 0, filler 128": "FAIL",
+        "encodeInto() into SharedArrayBuffer with 𝌆 and destination length 4, offset 4, filler 128": "FAIL",
+        "encodeInto() into SharedArrayBuffer with 𝌆 and destination length 4, offset 0, filler random": "FAIL",
+        "encodeInto() into SharedArrayBuffer with 𝌆 and destination length 4, offset 4, filler random": "FAIL",
+        "encodeInto() into SharedArrayBuffer with 𝌆A and destination length 3, offset 0, filler 0": "FAIL",
+        "encodeInto() into SharedArrayBuffer with 𝌆A and destination length 3, offset 4, filler 0": "FAIL",
+        "encodeInto() into SharedArrayBuffer with 𝌆A and destination length 3, offset 0, filler 128": "FAIL",
+        "encodeInto() into SharedArrayBuffer with 𝌆A and destination length 3, offset 4, filler 128": "FAIL",
+        "encodeInto() into SharedArrayBuffer with 𝌆A and destination length 3, offset 0, filler random": "FAIL",
+        "encodeInto() into SharedArrayBuffer with 𝌆A and destination length 3, offset 4, filler random": "FAIL",
+        "encodeInto() into SharedArrayBuffer with U+d834AU+df06A¥Hi and destination length 10, offset 0, filler 0": "FAIL",
+        "encodeInto() into SharedArrayBuffer with U+d834AU+df06A¥Hi and destination length 10, offset 4, filler 0": "FAIL",
+        "encodeInto() into SharedArrayBuffer with U+d834AU+df06A¥Hi and destination length 10, offset 0, filler 128": "FAIL",
+        "encodeInto() into SharedArrayBuffer with U+d834AU+df06A¥Hi and destination length 10, offset 4, filler 128": "FAIL",
+        "encodeInto() into SharedArrayBuffer with U+d834AU+df06A¥Hi and destination length 10, offset 0, filler random": "FAIL",
+        "encodeInto() into SharedArrayBuffer with U+d834AU+df06A¥Hi and destination length 10, offset 4, filler random": "FAIL",
+        "encodeInto() into SharedArrayBuffer with AU+df06 and destination length 4, offset 0, filler 0": "FAIL",
+        "encodeInto() into SharedArrayBuffer with AU+df06 and destination length 4, offset 4, filler 0": "FAIL",
+        "encodeInto() into SharedArrayBuffer with AU+df06 and destination length 4, offset 0, filler 128": "FAIL",
+        "encodeInto() into SharedArrayBuffer with AU+df06 and destination length 4, offset 4, filler 128": "FAIL",
+        "encodeInto() into SharedArrayBuffer with AU+df06 and destination length 4, offset 0, filler random": "FAIL",
+        "encodeInto() into SharedArrayBuffer with AU+df06 and destination length 4, offset 4, filler random": "FAIL",
+        "encodeInto() into SharedArrayBuffer with ¥¥ and destination length 4, offset 0, filler 0": "FAIL",
+        "encodeInto() into SharedArrayBuffer with ¥¥ and destination length 4, offset 4, filler 0": "FAIL",
+        "encodeInto() into SharedArrayBuffer with ¥¥ and destination length 4, offset 0, filler 128": "FAIL",
+        "encodeInto() into SharedArrayBuffer with ¥¥ and destination length 4, offset 4, filler 128": "FAIL",
+        "encodeInto() into SharedArrayBuffer with ¥¥ and destination length 4, offset 0, filler random": "FAIL",
+        "encodeInto() into SharedArrayBuffer with ¥¥ and destination length 4, offset 4, filler random": "FAIL",
+        "Invalid encodeInto() destination: DataView, backed by: SharedArrayBuffer": "FAIL",
+        "Invalid encodeInto() destination: Int8Array, backed by: SharedArrayBuffer": "FAIL",
+        "Invalid encodeInto() destination: Int16Array, backed by: SharedArrayBuffer": "FAIL",
+        "Invalid encodeInto() destination: Int32Array, backed by: SharedArrayBuffer": "FAIL",
+        "Invalid encodeInto() destination: Uint16Array, backed by: SharedArrayBuffer": "FAIL",
+        "Invalid encodeInto() destination: Uint32Array, backed by: SharedArrayBuffer": "FAIL",
+        "Invalid encodeInto() destination: Uint8ClampedArray, backed by: SharedArrayBuffer": "FAIL",
+        "Invalid encodeInto() destination: BigInt64Array, backed by: SharedArrayBuffer": "FAIL",
+        "Invalid encodeInto() destination: BigUint64Array, backed by: SharedArrayBuffer": "FAIL",
+        "Invalid encodeInto() destination: Float16Array, backed by: SharedArrayBuffer": "FAIL",
+        "Invalid encodeInto() destination: Float32Array, backed by: SharedArrayBuffer": "FAIL",
+        "Invalid encodeInto() destination: Float64Array, backed by: SharedArrayBuffer": "FAIL"
       }
     },
     "encoding/idlharness.any.js": {
@@ -1467,77 +1283,17 @@
     },
     "html/webappapis/structured-clone/structured-clone.any.js": {
       "subtests": {
-        "Resizable ArrayBuffer": {
-          "status": "FAIL",
-          "why": "structured-clone-edge"
-        },
         "Growable SharedArrayBuffer": {
           "status": "FAIL",
           "why": "no-shared-memory"
         },
-        "Serializing OOB TypedArray throws": {
-          "status": "FAIL",
-          "why": "structured-clone-edge"
-        },
-        "Serializing OOB DataView throws": {
-          "status": "FAIL",
-          "why": "structured-clone-edge"
-        },
-        "ArrayBuffer": {
-          "status": "FAIL",
-          "why": "structured-clone-edge"
-        },
-        "MessagePort": {
-          "status": "FAIL",
-          "why": "message-channel"
-        },
         "ImageBitmap": {
           "status": "FAIL",
-          "why": "structured-clone-edge"
+          "why": "no-canvas"
         },
         "OffscreenCanvas": {
           "status": "FAIL",
-          "why": "structured-clone-edge"
-        },
-        "A detached ArrayBuffer cannot be transferred": {
-          "status": "FAIL",
-          "why": "structured-clone-edge"
-        },
-        "A detached platform object cannot be transferred": {
-          "status": "FAIL",
-          "why": "message-channel"
-        },
-        "Transferring a non-transferable platform object fails": {
-          "status": "FAIL",
-          "why": "structured-clone-edge"
-        },
-        "An object whose interface is deleted from the global object must still be received": {
-          "status": "FAIL",
-          "why": "message-channel"
-        },
-        "A subclass instance will be received as its closest transferable superclass": {
-          "status": "PRECONDITION_FAILED",
-          "why": "structured-clone-edge"
-        },
-        "Resizable ArrayBuffer is transferable": {
-          "status": "FAIL",
-          "why": "structured-clone-edge"
-        },
-        "Length-tracking TypedArray is transferable": {
-          "status": "FAIL",
-          "why": "structured-clone-edge"
-        },
-        "Length-tracking DataView is transferable": {
-          "status": "FAIL",
-          "why": "structured-clone-edge"
-        },
-        "Transferring OOB TypedArray throws": {
-          "status": "FAIL",
-          "why": "structured-clone-edge"
-        },
-        "Transferring OOB DataView throws": {
-          "status": "FAIL",
-          "why": "structured-clone-edge"
+          "why": "no-canvas"
         }
       }
     },
@@ -1551,12 +1307,6 @@
       "why": "streams-edge",
       "subtests": {
         "enqueue() must not synchronously call write algorithm": "FAIL"
-      }
-    },
-    "streams/readable-byte-streams/enqueue-with-detached-buffer.any.js": {
-      "why": "streams-edge",
-      "subtests": {
-        "enqueue after detaching byobRequest.view.buffer should throw": "FAIL"
       }
     },
     "streams/readable-byte-streams/non-transferable-buffers.any.js": {
@@ -1575,7 +1325,7 @@
       }
     },
     "streams/readable-streams/owning-type-message-port.tentative.any.js": {
-      "why": "message-channel",
+      "why": "tentative-owning-streams",
       "subtests": {
         "Transferred MessageChannel works as expected": "FAIL",
         "Second branch of owning ReadableStream tee should end up into errors with transfer only values": "FAIL"

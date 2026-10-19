@@ -192,7 +192,13 @@
     return fetchModule.fetch;
   });
 
-  lazy("structuredClone", from("ext:deno_web/02_structured_clone.js", "structuredClone"));
+  // structuredClone and MessageChannel: Deno's 13_message_port.js, within
+  // the isolate (see runtime/core.js).
+  const MESSAGE_PORT_JS = "ext:deno_web/13_message_port.js";
+  lazy("structuredClone", from(MESSAGE_PORT_JS, "structuredClone"));
+  lazy("MessageChannel", from(MESSAGE_PORT_JS, "MessageChannel"));
+  lazy("MessagePort", from(MESSAGE_PORT_JS, "MessagePort"));
+  lazy("MessageEvent", () => eventModule().MessageEvent);
   let perf;
   const performanceModule = () => {
     if (!perf) {
@@ -299,6 +305,7 @@
     "TransformStreamDefaultController", "ByteLengthQueuingStrategy", "CountQueuingStrategy",
     "Blob", "File", "FileReader", "ProgressEvent", "CompressionStream", "DecompressionStream",
     "Headers", "FormData", "Request", "Response", "fetch", "structuredClone",
+    "MessageChannel", "MessagePort", "MessageEvent",
     "performance", "Performance", "PerformanceEntry", "PerformanceMark", "PerformanceMeasure",
   ];
   function materialize() {
