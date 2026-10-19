@@ -21,13 +21,18 @@ returns the tenant's handle:
 | Method | |
 |---|---|
 | `run(code, config?)` | Evaluate in a fresh isolate, then close it |
-| `isolate(config?)` | A stateful isolate: `eval(code)` keeps globals between calls |
+| `isolate(config?)` | A stateful isolate: `eval(code, options?)` keeps globals between calls |
 | `usage()` / `resetUsage()` | Evals, failures, CPU ms, host calls, log bytes, peak memory, security events |
 | `release()` | Lift a quarantine early |
 | `stop()` | Stop the tenant's worker and its isolates |
 
 `runtime.run(code, { tenant, ... })` is the one-liner. Isolates, tenants'
 workers, and the runtime all `close()`, and work with `using`.
+
+Besides the configuration, `run` and `eval` take two options for the one
+call: `returns` (a Standard Schema the result must match; it types the
+result) and `filename` (the code's name in stack traces, default
+`<tenant>/eval-<n>.js`, where n counts the isolate's evals from 1).
 
 ```js
 using vm = runtime.tenant('acme').isolate();
@@ -324,6 +329,7 @@ hooks run.
 | `beforeHostCall` / `afterHostCall` | interceptor | can `deny()` (`ERR_DENIED`) or replace the arguments / result |
 | `beforeEval` / `afterEval` | interceptor | can `deny()` or replace the code / result |
 | `onLog` | event | guest `console` output (up to `limits.logBytes` per eval) |
+| `onGuestError` | event | an exception in a timer or task, or a promise rejected with no handler (see [Errors](#errors)) |
 | `onLimit` | event | any limit hit |
 | `onPolicyDenial` | event | a `fetch`, `connect`, or `fs` refusal (including a name that resolves only to private addresses) |
 | `onSecurityEvent` | event | a worker crash, protocol violation, or unresponsive worker |
@@ -429,11 +435,88 @@ Every failure is an `IsolaneError` with `code`, `kind`, `retryable`, and
 
 | Kind | Codes |
 |---|---|
-| `guest` | `ERR_GUEST_EXCEPTION` (see `err.guest`: `name`, `message`, `stack`), `ERR_UNSETTLED`, `ERR_NOT_SERIALIZABLE`, `ERR_INVALID_RETURN` |
+| `guest` | `ERR_GUEST_EXCEPTION` (see `err.guest`), `ERR_UNSETTLED`, `ERR_NOT_SERIALIZABLE`, `ERR_INVALID_RETURN` |
 | `limit` | `ERR_LIMIT` (see `err.limit`), `ERR_ISOLATE_RETIRED` |
 | `usage` | `ERR_INVALID_CONFIG`, `ERR_ISOLATE_CLOSED`, `ERR_RUNTIME_CLOSED`, `ERR_DENIED`, `ERR_SHIM` |
 | `security` | `ERR_TENANT_QUARANTINED` |
 | `infrastructure` | `ERR_WORKER_CRASHED`, `ERR_WORKER_UNRESPONSIVE`, `ERR_WORKER_INCOMPATIBLE`, `ERR_ISOLATION_UNAVAILABLE`, `ERR_INTERNAL` |
+
+### What the guest threw
+
+`err.guest` describes the thrown value:
+
+| Field | |
+|---|---|
+| `name`, `message` | `error.name` and `error.message` (or the value as a string) |
+| `stack` | `error.stack`, without isolane's own frames |
+| `frames` | the stack parsed: `[{ function, file, line, column, async? }]`, innermost first |
+| `location` | for code that didn't compile: `{ file, line, column, sourceLine }` |
+| `cause` | `error.cause`, described the same way (8 deep at most) |
+| `errors` | an AggregateError's errors (16 at most) |
+| `properties` | the error's own enumerable properties whose values are JSON, like `code` (16 at most, 4 KiB each) |
+
+```js
+try {
+  await acme.run(code, { filename: 'src/orders.js', host: { db } });
+} catch (err) {
+  err.guest;
+  // {
+  //   name: 'Error', message: 'order 7 not found',
+  //   stack: 'Error: order 7 not found\n    at db.getOrder (<host>)\n    at load (src/orders.js:4:22)\n    at src/orders.js:9:1',
+  //   frames: [
+  //     { function: 'db.getOrder', file: '<host>', line: null, column: null },
+  //     { function: 'load', file: 'src/orders.js', line: 4, column: 22 },
+  //     { function: null, file: 'src/orders.js', line: 9, column: 1 },
+  //   ],
+  //   properties: { code: 'ENOTFOUND' },
+  // }
+}
+```
+
+- **Scripts are named.** Each eval's code is `filename` (default
+  `<tenant>/eval-<n>.js`); shims are `shim:<level>.<phase>.<n>` or their
+  own `filename`.
+- **A SyntaxError says where.** Code that didn't compile has no stack
+  frames, so `err.guest.location` has the place, and `stack` reads like
+  Node's: `src/bad.js:2`, the line, a caret under the column, then the
+  error. Long lines show a window around the column.
+- **A failed host call points at the guest's line.** The guest gets an
+  error of the host error's class (`TypeError`, ...) with its message and
+  `code`, and a stack from where the guest made the call, under a frame
+  for the function (`at db.getOrder (<host>)`), for sync and async
+  functions alike. The host's own stack never reaches the guest:
+  `afterHostCall` and the `hostCall` event get the host error itself.
+- **isolane's own frames are left out** of `err.guest.stack` and `frames`:
+  the web platform's scripts (`ext:...`, Deno's code) and isolane's
+  (`isolane:...`). Guest code's own `error.stack` keeps them (as Deno's
+  does), and `Error.prepareStackTrace` and `Error.captureStackTrace` work
+  as in V8: a custom `prepareStackTrace` string is reported as is.
+- **Everything is bounded**: each text 64 KiB (8 KiB inside causes and
+  errors), 32 errors described in all. Reading the error runs guest code
+  (getters, Proxy traps) under the eval's limits; one that throws is
+  skipped.
+
+### Errors nothing handled
+
+An exception thrown by a timer or task callback, and a promise rejected
+with no handler by the time its task's microtasks have run, don't fail an
+eval (an eval fails only with its own result). They're reported instead,
+as in a browser or Workers:
+
+- with the web platform, an `unhandledrejection` event on the global
+  object first (`event.preventDefault()` handles it), and an `error`
+  event for exceptions (as `reportError` dispatches);
+- then the guest's console (`onLog`): `Uncaught …` or
+  `Uncaught (in promise) …`;
+- and `onGuestError` (`runtime.on('guestError')`) with `{ tenant,
+  isolate, kind: 'exception' | 'rejection', error }`, `error` shaped like
+  `err.guest`.
+
+Both count against the eval's console budget (`limits.logBytes`), and the
+event's texts are cut at `limits.logLineBytes`; what doesn't fit is
+dropped. This applies to work between evals too (a stateful isolate's
+`setInterval`). A rejection that gets its handler in a later task is still
+reported, as browsers do.
 
 ## Isolation and strict mode
 

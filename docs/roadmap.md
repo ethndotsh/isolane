@@ -343,17 +343,20 @@ Result: see "After the Deno-gaps pass" under the WPT gate below (99.0% of applic
 
 ### Errors and stack traces
 
-Checked on the dev build (October 2026): a guest throw gives a correct stack but with `<anonymous>` as the file; a SyntaxError has no location at all; a host function that throws gives the guest an Error whose stack has **no guest frames** (it's created when the reply arrives, not at the call site); `cause` chains are dropped.
+Checked on the dev build (October 2026), before this work: a guest throw gave a correct stack but with `<anonymous>` as the file; a SyntaxError had no location at all; a host function that threw gave the guest an Error whose stack had **no guest frames** (it was created when the reply arrived, not at the call site); `cause` chains were dropped; unhandled rejections were silently ignored.
 
 | Item | Status |
 |---|---|
-| Name every script (`ScriptOrigin`): `filename` option per run/eval (default `tenant/eval-N.js`), module paths for multi-file deployments, so frames read `at handler (src/index.ts:12:5)` | planned |
-| SyntaxError (and every compile error) location: line, column, and the source line with a caret, from V8's `Message`, in `err.guest.location` and the formatted stack | planned |
-| Host-call attribution: capture the guest's stack at the call site and use it for the rejection or throw, so a failing host call points at the guest line that made it (`at load (src/db.ts:4:22)`), with the host function's name and Node-style `code` | planned |
-| Structured errors end to end: `cause` chains (and `AggregateError.errors`), own enumerable props like `code`, parsed frames (`err.guest.frames: [{ function, file, line, column }]`) next to the raw stack; host-side errors in host functions surface to hooks (`afterHostCall`) with their full host stack, while the guest only ever sees the message, name, and code | planned |
+| Name every script (`ScriptOrigin`): a `filename` option per `run`/`eval` (default `<tenant>/eval-<n>.js`, n counting the isolate's evals), so frames read `at handler (src/index.js:12:5)`; the prelude and wasm guard are `isolane:prelude.js` and `isolane:wasm-guard.js`; `beforeEval`/`afterEval` see the filename | done |
+| Module paths as filenames for multi-file deployments | planned (with deployments) |
+| SyntaxError (and every compile error of the eval's code) location: line, column, and the source line (a window around the column for long lines) in `err.guest.location`, and Node's format in `err.guest.stack` (`file:line`, the line, a caret, the error) | done |
+| Host-call attribution: an Error made at the call site (V8 captures the frames, formats them only on failure), so a failing host call's error reads `at db.getUser (<host>)` then the guest frames, for async and sync calls; the class, message, and `code` cross, never the host's stack (hooks get the host error) | done |
+| Structured errors end to end: `cause` chains (8 deep), `AggregateError.errors` (16), own enumerable JSON `properties` (16, 4 KiB each), parsed `frames` (`{ function, file, line, column, async? }`) next to the stack; every text bounded (64 KiB, 8 KiB nested, 32 errors in all); read under TryCatch, so hostile getters and Proxy traps are skipped | done |
+| Hide isolane's own runtime frames (`ext:`/`isolane:`) from `err.guest.stack`, `frames`, and `Uncaught` log lines; the guest's own `error.stack` keeps them (as Deno's does), and `Error.prepareStackTrace`/`captureStackTrace` are untouched | done |
+| An option to keep isolane's frames in `err.guest` (a raw stack), if debugging the runtime from the host side ever needs it | idea |
+| Errors from timers and tasks, and unhandled rejections (V8's promise-reject callback, reported once a task's microtasks have run, unless handled by then or by an `unhandledrejection` listener's `preventDefault()`): the guest's console (`Uncaught …`) and a structured `onGuestError` event (`runtime.on('guestError')`), within `limits.logBytes`; they don't fail the eval | done |
+| `onerror` / `onunhandledrejection` handler attributes on the global object (`addEventListener` works today) | planned |
 | Source-map support for transformed TypeScript/JSX and bundles: map frames back to original files before reporting (in the worker) | planned (with TS transform / bundling) |
-| Hide or mark isolane's own runtime frames (`ext:`/`isolane:` scripts) in guest stacks, like Deno marks `ext:` frames | planned |
-| Errors from timers and unhandled rejections outside an eval: surface as structured `onGuestError` events (not only console output) | planned |
 
 ### Bundles, npm, and shims
 

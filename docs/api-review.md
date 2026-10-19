@@ -145,7 +145,7 @@ rules below fix that, and every public name follows them.
    with the targets named for what they list (`hosts`, `root`).
 4. **Hooks**: `before<Thing>` and `after<Thing>` can intercept; `on<Thing>`
    only observes. `<Thing>` is the same noun everywhere: `HostCall`, `Eval`,
-   `Log`, `Limit`, `PolicyDenial`, `SecurityEvent`, `Worker`. Event names for
+   `Log`, `GuestError`, `Limit`, `PolicyDenial`, `SecurityEvent`, `Worker`. Event names for
    `runtime.on()` are the same nouns, lowercased: `'hostCall'`, `'eval'`, ...
 5. **Every closable thing has `close()`** and `[Symbol.dispose]`
    (`Runtime`, `Isolate`, and a deployment, later). There's no `dispose()`.
@@ -284,7 +284,8 @@ differences:
 - **The `create` frame** groups `limits`, `time`, `random`, and `functions`
   (`[{ path, sync }]`, called by index), but keeps `eval`, `wasm`, and
   `web` as top-level fields named as in the config, rather than an `allow`
-  group. `ready` carries `protocol: 2`; a worker without it is refused with
+  group. `ready` carries the protocol version (3 since `guestError`
+  frames); a worker without it is refused with
   `ERR_WORKER_INCOMPATIBLE` (not treated as a security event).
 - **Old names fail loudly.** Every renamed option is an `ERR_INVALID_CONFIG`
   that names its replacement (`hostFunctions is not a config field; use
@@ -299,3 +300,12 @@ Two additions beyond the review, decided while it landed:
   and `after` each eval), each as its own script, with `ERR_SHIM` for their
   failures. `setup` and `before` are scripts and aren't awaited; `after` is
   an async function body that can replace the result. See the README.
+
+Later additions (errors and stack traces, October 2026):
+
+- **`filename`** is an option of one call, next to `returns`
+  (`isolate.eval(code, { filename, returns })`, `run(code, { tenant,
+  filename, ... })`): it isn't configuration, so it doesn't layer.
+- **`onGuestError`** (`runtime.on('guestError')`) follows rule 4: the noun
+  is `GuestError`, as in `err.guest` and `GuestErrorInfo`; `kind` says
+  `exception` or `rejection`, as `SecurityEvent.kind` does.

@@ -133,13 +133,16 @@ const runtime = new Runtime({
 
 Every failure is an `IsolaneError` with a `code` and a `kind` (`guest`,
 `limit`, `usage`, `security`, `infrastructure`). Guest exceptions carry the
-guest's `name`, `message`, and `stack`.
+guest's `name`, `message`, and `stack`, parsed `frames` in named scripts,
+`cause` chains, and a SyntaxError's location; a failed host call's points
+at the guest line that made it. Errors nothing handled (in timers,
+unhandled rejections) arrive as `onGuestError` events.
 
 ```js
 try {
   await acme.run(code);
 } catch (err) {
-  if (err.kind === 'guest') console.log(err.guest.stack);
+  if (err.kind === 'guest') console.log(err.guest.stack, err.guest.frames[0]); // { function, file, line, column }
   if (err.code === 'ERR_LIMIT') console.log('hit', err.limit);
 }
 ```
