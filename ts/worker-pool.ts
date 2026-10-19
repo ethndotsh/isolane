@@ -102,10 +102,38 @@ interface Pending {
 }
 
 /** A host call in flight: its abort signal, made only if the function asks for it. */
-interface Call {
-  controller?: AbortController;
+/** One host call in flight, and its handler's context: `signal` is made on first use (most functions never ask). */
+class Call implements HostContext {
+  readonly tenant: string;
+  readonly isolate: number;
+  #chain: HookChain;
+  #controller?: AbortController;
   /** Set when the call was abandoned before anything asked for the signal. */
-  abandoned?: Error;
+  #abandoned?: Error;
+
+  constructor(tenant: string, isolate: number, chain: HookChain) {
+    this.tenant = tenant;
+    this.isolate = isolate;
+    this.#chain = chain;
+  }
+
+  get signal(): AbortSignal {
+    if (!this.#controller) {
+      this.#controller = new AbortController();
+      if (this.#abandoned) this.#controller.abort(this.#abandoned);
+    }
+    return this.#controller.signal;
+  }
+
+  // A bound function, so `({ log }) => log('info', ...)` works.
+  readonly log = (level: LogLevel, ...args: unknown[]): void => {
+    this.#chain.emit('log', { tenant: this.tenant, isolate: this.isolate, level, message: formatArgs(args), source: 'host' });
+  };
+
+  abandon(reason: Error): void {
+    this.#abandoned = reason;
+    this.#controller?.abort(reason);
+  }
 }
 
 /** One isolate's state on its tenant's worker. */
@@ -303,8 +331,7 @@ export class TenantWorker {
   /** Nobody waits for these calls any more: abort their signals. */
   #abandonCalls(state: IsolateState, reason: Error): void {
     for (const call of state.calls.values()) {
-      call.abandoned = reason;
-      call.controller?.abort(reason);
+      call.abandon(reason);
     }
     state.calls.clear();
   }
@@ -409,9 +436,8 @@ export class TenantWorker {
       }
       reply(true, split.json, undefined, split.parts);
     };
-    const call: Call = {};
-    state.calls.set(msg.call, call);
-    const ctx = this.#context(state, call);
+    const ctx = new Call(this.tenant, state.id, state.chain);
+    state.calls.set(msg.call, ctx);
     // The fast path: isolane's own brokers, and functions nothing intercepts.
     if (entry.internal || !state.chain.observesHostCalls) {
       let result: unknown;
@@ -450,25 +476,6 @@ export class TenantWorker {
     const after = await state.chain.afterHostCall(outcome);
     if (error !== undefined) throw error;
     return after;
-  }
-
-  /** The call context: `signal` is made on first use (most functions never ask). */
-  #context(state: IsolateState, call: Call): HostContext {
-    const tenant = this.tenant;
-    return {
-      tenant,
-      isolate: state.id,
-      get signal() {
-        if (!call.controller) {
-          call.controller = new AbortController();
-          if (call.abandoned) call.controller.abort(call.abandoned);
-        }
-        return call.controller.signal;
-      },
-      log(level: LogLevel, ...args: unknown[]) {
-        state.chain.emit('log', { tenant, isolate: state.id, level, message: formatArgs(args), source: 'host' });
-      },
-    };
   }
 
   #onExit(exit: WorkerExit): void {
