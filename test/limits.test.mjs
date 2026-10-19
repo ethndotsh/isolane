@@ -50,7 +50,12 @@ test('the worker memory limit bounds memory outside the heap', { skip: process.p
     hooks: { onSecurityEvent: (e) => events.push(e) },
   });
   const bomb = 'const keep = []; for (;;) keep.push(new Uint8Array(16 << 20).fill(1));';
-  const err = await capped.run(bomb, { ...T, limits: { timeoutMs: 20000 } }).catch((e) => e);
+  // With default limits, the isolate's heap limit (which V8 charges
+  // ArrayBuffer memory to) stops it first.
+  const byHeap = await capped.run(bomb, { ...T, limits: { timeoutMs: 20000 } }).catch((e) => e);
+  assert.ok(limit('heapBytes')(byHeap) || limit('workerMemoryBytes')(byHeap), `${byHeap.code} ${byHeap.limit}: ${byHeap.message}`);
+  // With a heap limit above the worker's cap, the worker's cap does.
+  const err = await capped.run(bomb, { ...T, limits: { timeoutMs: 20000, heapBytes: 1 << 30 } }).catch((e) => e);
   assert.ok(
     limit('workerMemoryBytes')(err) || (err.code === 'ERR_GUEST_EXCEPTION' && /allocation failed/i.test(err.message)),
     `${err.code}: ${err.message} | worker stderr: ${events.map((e) => e.detail).join(' / ')}`,
