@@ -130,11 +130,46 @@ address actually connected to, and every redirect hop is re-checked.
 ### `connect`
 
 ```js
-connect: { hosts: ['db.example.com:5432', '*.cache.example:*'], privateNetworks: false, limits: { connections: 8, connectMs: 10_000, idleMs: 60_000 } }
+connect: { hosts: ['db.example.com:5432', '*.cache.example:*'], privateNetworks: false, ca: undefined, limits: { connections: 8, connectMs: 10_000, idleMs: 60_000 } }
 ```
 
-The guest calls `connect('db.example.com:5432', { secureTransport: 'on' })`
-and gets `{ read, write, close }`. The same address rules as `fetch` apply.
+`connect()` is the
+[Sockets API](https://developers.cloudflare.com/workers/runtime-apis/tcp-sockets/)
+of Cloudflare Workers, so it needs `web: true` (its sockets are streams):
+
+```js
+const socket = connect('db.example.com:5432', { secureTransport: 'starttls' });
+const writer = socket.writable.getWriter();
+const reader = socket.readable.getReader();
+await writer.write(sslRequest);
+await reader.read(); // the server agrees
+writer.releaseLock();
+reader.releaseLock();
+const secure = socket.startTls(); // the same connection, now TLS
+```
+
+- `connect(address, options)` takes `'host:port'`, `'[v6]:port'`, or
+  `{ hostname, port }`, and returns a `Socket` at once. A malformed address
+  throws; a refused or failed connection rejects `socket.opened` and
+  `socket.closed`.
+- `secureTransport`: `'off'` (default), `'on'` (TLS from the start), or
+  `'starttls'` (plain until `startTls()`, which returns the upgraded socket;
+  the old one is done). `allowHalfOpen: true` keeps the writable side open
+  after the peer ends its side.
+- `socket.readable` is a byte stream (BYOB readers work); `socket.writable`
+  takes bytes. `opened` resolves with `{ remoteAddress }`. `close()` closes
+  both directions and resolves with `closed`.
+
+TLS checks the server's certificate against Node's default roots, or
+against `ca` (PEM text, or a list) for a private CA such as a cloud
+database's. `startTls()` checks it against the hostname you connected to,
+or `expectedServerHostname`, and refuses to upgrade if the server sent bytes
+the guest hasn't read (they could have been injected before the
+handshake). The same address rules as `fetch` apply, to every connection.
+
+Libraries written for Workers' `cloudflare:sockets` work: the tests run
+postgres.js's Workers build against Postgres, bundled with `cloudflare:sockets`
+aliased to the global `connect` (guest code can't import modules yet).
 
 ### `fs`
 

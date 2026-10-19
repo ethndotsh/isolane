@@ -47,7 +47,7 @@ See [docs/design.md](docs/design.md) for the threat model.
 | `globals` | none | JSON data as globals |
 | `web` | off | The web platform: `URL`, `fetch`, streams, timers, `crypto`, ... ([WinterTC](https://wintertc.org) Minimum Common API) |
 | `fetch` | off | HTTP(S) to the hosts you list |
-| `connect` | off | TCP/TLS sockets to the `host:port`s you list |
+| `connect` | off | TCP/TLS sockets (Workers' `connect()`, with `web`) to the `host:port`s you list |
 | `fs` | off | Files under one directory, read-only unless you allow writes |
 | `eval` | off | `eval` and `new Function` |
 | `wasm` | off | WebAssembly |

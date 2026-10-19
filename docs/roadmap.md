@@ -29,7 +29,7 @@ Agreed October 2026:
 2. **The rest of the web platform**:
    - `crypto.subtle`;
    - `URLPattern` (the last missing Minimum Common API global; Deno's `01_urlpattern.js` on the `urlpattern` crate);
-   - `connect()` as the Sockets API (Cloudflare's, also a WinterTC draft): a `Socket` with `readable`/`writable` streams, `opened`/`closed`, `startTls()`, and `secureTransport: 'off' | 'on' | 'starttls'`. Today it's `{ read, write, close }` with no STARTTLS. Goal: postgres.js's `cf` build talks to Postgres from a guest. That also needs `crypto.subtle` for SCRAM-SHA-256, plus, until ES modules land, a bundle that aliases `cloudflare:sockets`, `node:events` and `node:buffer`. Add a Postgres end-to-end test in CI;
+   - ~~`connect()` as the Sockets API~~ done: see section 2. Left: switch the Postgres test to SCRAM-SHA-256 auth once `crypto.subtle` lands (it runs with `trust` auth today);
    - the web snapshot built into the binary and a pool of pre-created web isolates, so `web` can default to on;
    - fair CPU accounting for timers;
    - test262;
@@ -93,6 +93,11 @@ Agreed October 2026:
 | `allowWebAssembly` (async compile works: foreground tasks pumped) | done |
 | `network`: brokered `fetch` (allowlist or function, DNS-pinned private-address blocking, redirects re-checked, limits) | done |
 | `sockets`: brokered `connect()` (host:port patterns, TLS, connection/idle limits) | done |
+| `connect()` is the Sockets API (Cloudflare's, also a WinterTC draft): a `Socket` with `readable` (a byte stream, read from the broker only when the guest reads) and `writable` streams, `opened`/`closed`, `close()`, `allowHalfOpen`, and `startTls()` for `secureTransport: 'starttls'`. The broker upgrades the same connection with node:tls (the policy checks are unchanged) and refuses to upgrade over unread bytes (STARTTLS injection). `connect.ca` for private CAs. Needs `web: true`. postgres.js's Workers build runs from a guest (bundled with esbuild; `test/postgres.test.mjs`, a Postgres service in CI) | done |
+| Sockets API, next: the `cloudflare:sockets` module (`import { connect } from 'cloudflare:sockets'`) once ES modules land, so postgres.js and friends need no alias | planned (with ES modules) |
+| Sockets API, next: a bytes limit per socket and per isolate (`connect.limits.bytes`), counted both ways in the broker | planned |
+| Sockets API, next: `SocketInfo.localAddress` (left out: it would show the guest the host's own address) and `socket.closed` without a reader (today a peer's close or error is seen when the guest reads) | idea |
+| A Postgres TLS (`sslmode=require`, STARTTLS) end-to-end test, with a Postgres configured for SSL and `connect.ca` | planned |
 | `fs`: brokered, confined to `root`, read-only by default, no symlink escapes, no host paths in errors | done |
 | `console` → `onLog` (per-eval byte budget) | done |
 | `globals`: inputs as data | done |
