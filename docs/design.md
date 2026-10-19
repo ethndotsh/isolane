@@ -55,10 +55,10 @@ to attempt Spectre-style side channels.
 |---|---|---|
 | Read/modify another tenant's data or code | Process per tenant (default) | Isolate per VM; V8 sandbox |
 | Read the host app's secrets (DB credentials, tokens) | Guest never runs in the app process | Workers inherit no env vars or fds; IPC carries only framed JSON |
-| Escape to the machine (files, network, other processes) | seccomp allowlist in every worker | Landlock (no filesystem); namespaces where the host allows them |
+| Escape to the machine (files, network, other processes) | seccomp allowlist in every worker | Landlock (no filesystem); namespaces where the host allows them (planned) |
 | Side-channel reads (Spectre) | Separate processes per tenant; frozen clocks; no shared memory or threads | Quarantine on crashes |
-| Denial of service | Per-isolate heap limit; CPU and wall-clock budgets via `TerminateExecution` | Per-worker rlimits; cgroups where available; worker count caps |
-| Persist after compromise | Workers recycled on a schedule | Crash = quarantine the tenant + replace the worker |
+| Denial of service | Per-isolate heap limit; CPU and wall-clock budgets via `TerminateExecution` | Per-worker rlimits; worker count caps; cgroups where available (planned) |
+| Persist after compromise | Workers recycled on a schedule (planned: today a worker lives until it idles out, crashes, or is stopped) | Crash = quarantine the tenant + replace the worker |
 
 **Trusted:** the isolane library running in the application's Node process,
 and the kernel (minimized by seccomp). **Untrusted:** everything inside a
@@ -73,10 +73,10 @@ code, the worker is treated as potentially compromised.
 │ isolane library                      │◀───────▶│ worker: tenant A                      │
 │  - Runtime-shaped API               │         │  isolate per VM, watchdog thread      │
 │  - supervisor: spawn, lock down,     │   pipe  │  seccomp + Landlock (+ namespaces)    │
-│    route by tenant, quotas, recycle, │◀───────▶├───────────────────────────────────────┤
+│    route by tenant, quotas,          │◀───────▶├───────────────────────────────────────┤
 │    quarantine                        │         │ worker: tenant B                      │
-│  - runs host functions (app secrets  │   pipe  ├───────────────────────────────────────┤
-│    stay here)                        │◀───────▶│ worker: quarantine (--jitless)        │
+│  - runs host functions (app secrets  │         │                                       │
+│    stay here)                        │         │                                       │
 └──────────────────────────────────────┘         └───────────────────────────────────────┘
 ```
 
@@ -90,12 +90,12 @@ code, the worker is treated as potentially compromised.
   it reads any guest code.
 - **Isolation unit:** by default one worker process per tenant, containing
   one isolate per stateful VM (`tenant.isolate()`) or per one-shot run. Isolates are
-  never reused across VMs. A `tenantsPerWorker` option allows grouping
-  tenants by plan when process count matters more; that is Cloudflare's
-  model.
-- **Lifecycle:** workers start on a tenant's first request, idle out after a
-  configurable period, and are recycled after a maximum lifetime or request
-  count.
+  never reused across VMs. Grouping tenants by plan into shared workers
+  (Cloudflare's model) is planned, not built.
+- **Lifecycle:** workers start on a tenant's first request and idle out
+  after a configurable period. Recycling after a maximum lifetime or request
+  count is planned, not built: until then a worker that is compromised but
+  keeps running lives until it idles out or is stopped.
 
 ### Request flow
 
@@ -138,7 +138,7 @@ code, the worker is treated as potentially compromised.
   `TerminateExecution`, which works inside JIT-compiled code.
 - An explicit stack limit per thread.
 - To evaluate: `--memory-protection-keys` (write-protects JIT code on CPUs
-  with PKU), and `--jitless` for the quarantine worker.
+  with PKU), and `--jitless` workers for quarantined tenants.
 
 ### L2: Worker process lockdown
 
@@ -185,12 +185,20 @@ deploying. Development mode warns instead of refusing.
 ### L3: Tenancy, recycling, quarantine
 
 - Process per tenant by default (above).
-- Workers are recycled after a maximum lifetime or request count.
-- A worker crash (SIGSEGV, a V8 sandbox violation, or a seccomp kill) is
-  treated as a possible exploit attempt. The tenant moves to a quarantine
-  worker (`--jitless`), and the event is surfaced to the application through
-  an `onSecurityEvent` callback with the tenant id and code hash, so the
-  application can alert or suspend the account.
+- Planned: workers recycled after a maximum lifetime or request count.
+- A worker crash (SIGSEGV, a V8 sandbox violation, or a seccomp kill), a
+  protocol violation, or an unresponsive worker is treated as a possible
+  exploit attempt. The worker is gone (killed if needed), the tenant is
+  refused with `ERR_TENANT_QUARANTINED` for `quarantineMs`, and the event is
+  surfaced through `onSecurityEvent` with the tenant and what happened, so
+  the application can alert or suspend the account. Planned: a `--jitless`
+  quarantine worker instead of refusing, and a hash of the code that ran.
+- What a worker reports about itself is advisory once it has run guest
+  code: usage figures (CPU, memory, log bytes), the limit it says was hit,
+  and its exit code come from a process that may be compromised. The
+  supervisor checks the shapes, cuts log lines, counts host calls and their
+  bytes itself, and kills a worker that breaks the protocol, but billing on
+  `usage()` trusts the worker's word.
 
 ### L4: Shipping V8 fixes through npm
 
