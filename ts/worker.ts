@@ -23,6 +23,18 @@ export const MAX_FRAME = 64 << 20;
 const BINARY_TAG = 0;
 const BINARY_HEADER = 5;
 
+/**
+ * Input queued for a worker that it hasn't read. A worker reads its input
+ * as fast as it arrives (its main thread only forwards it), so past
+ * INPUT_BACKLOG bytes it has INPUT_STALL_MS to catch up (Node to report
+ * the queue drained), and past INPUT_MAX it's killed at once: a worker
+ * that stops reading would otherwise grow the supervisor's memory without
+ * bound.
+ */
+export const INPUT_BACKLOG = 64 << 20;
+export const INPUT_STALL_MS = 5_000;
+export const INPUT_MAX = 1 << 30;
+
 /** Time a fresh worker has to initialize V8 and report ready. */
 const READY_TIMEOUT_MS = 10_000;
 
@@ -219,6 +231,7 @@ export class WorkerProcess {
   #buf: Buffer = Buffer.alloc(0);
   #alive = true;
   #stderrTail = '';
+  #stall: NodeJS.Timeout | undefined;
 
   /**
    * `prepareWeb`: the worker will run web VMs, so if its binary has no
@@ -252,6 +265,7 @@ export class WorkerProcess {
       if (!this.#alive) return;
       this.#alive = false;
       clearTimeout(readyTimer);
+      clearTimeout(this.#stall);
       if (!isReady) failReady(new Error(`worker failed to start: ${exit.detail ?? exit.reason}`));
       handlers.onExit(exit);
     };
@@ -349,6 +363,27 @@ export class WorkerProcess {
     );
     this.#child.on('error', (err) => exitWith({ code: null, signal: null, reason: 'exited', detail: err.message }));
     this.#child.stdin.on('error', () => {});
+    this.#child.stdin.on('drain', () => {
+      clearTimeout(this.#stall);
+      this.#stall = undefined;
+    });
+  }
+
+  /** After a write: hold the worker to reading what it's sent. */
+  #checkBacklog(): void {
+    const queued = this.#child.stdin.writableLength;
+    if (queued > INPUT_MAX) {
+      this.#fail('unresponsive', `stopped reading its input (${queued} bytes queued)`);
+      return;
+    }
+    if (queued > INPUT_BACKLOG && !this.#stall) {
+      this.#stall = setTimeout(() => {
+        const left = this.#child.stdin.writableLength;
+        if (left > INPUT_BACKLOG) this.#fail('unresponsive', `stopped reading its input (${left} bytes queued for ${INPUT_STALL_MS}ms)`);
+        this.#stall = undefined;
+      }, INPUT_STALL_MS);
+      this.#stall.unref();
+    }
   }
 
   #fail: (reason: WorkerExit['reason'], detail: string) => void = () => {};
@@ -369,6 +404,7 @@ export class WorkerProcess {
       const header = Buffer.alloc(4);
       header.writeUInt32LE(json.length, 0);
       this.#child.stdin.write(Buffer.concat([header, json]));
+      this.#checkBacklog();
       return;
     }
     const bytes = attached.reduce((n, b) => n + b.length, 0);
@@ -377,6 +413,7 @@ export class WorkerProcess {
     header[4] = BINARY_TAG;
     header.writeUInt32LE(json.length, 5);
     this.#child.stdin.write(Buffer.concat([header, json, ...attached]));
+    this.#checkBacklog();
   }
 
   /** Whether a message of `json` bytes plus `attached` bytes fits in a frame. */

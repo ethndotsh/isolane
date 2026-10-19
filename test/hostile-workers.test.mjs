@@ -119,3 +119,21 @@ test('a worker that sends host calls past limits.pendingHostCalls is killed', as
   assert.ok(calls <= 11, `${calls} calls ran`);
   hostile.close();
 });
+
+test('a worker that stops reading its input is killed, not buffered for without bound', async () => {
+  const events = [];
+  const stuck = new Runtime({
+    // Never reads stdin.
+    workerPath: fakeWorker(`send({ t: 'ready', protocol: 2, v8: 'fake', sandboxSecure: true, lockdown: { landlock: 'full', seccomp: 'full' } }); process.stdin.pause(); setInterval(() => {}, 1000);`),
+    hooks: { onSecurityEvent: (e) => events.push(e) },
+  });
+  const vm = isolateOf(stuck, { tenant: 'stuck', limits: { timeoutMs: null } });
+  const code10MiB = `/*${'x'.repeat(10 << 20)}*/ 1`;
+  const evals = Array.from({ length: 10 }, () => vm.eval(code10MiB).catch((e) => e.code));
+  const started = Date.now();
+  assert.deepEqual(new Set(await Promise.all(evals)), new Set(['ERR_WORKER_UNRESPONSIVE']));
+  assert.ok(Date.now() - started < 15_000);
+  assert.equal(events[0]?.kind, 'unresponsive');
+  assert.match(events[0]?.detail, /stopped reading its input/);
+  stuck.close();
+});
