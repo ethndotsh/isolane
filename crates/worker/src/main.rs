@@ -111,9 +111,13 @@ fn init_v8() {
     unsafe { v8_set_fatal_memory_error_callback(vm::out_of_memory) };
     // V8 reserves process-wide memory (the JIT's code range) when the first
     // isolate is created, before that isolate's OOM handler can be set. Do it
-    // now, with a throwaway isolate: under a memory limit too small for V8 the
-    // worker then fails at startup, here, instead of later in a guest's eval.
-    drop(v8::Isolate::new(Default::default()));
+    // now: under a memory limit too small for V8 the worker then fails at
+    // startup, here, instead of later in a guest's eval. The isolate is kept
+    // for the life of the process: it holds V8's process-wide heaps (the
+    // shared read-only heap and shared space) up, so they're never torn
+    // down and rebuilt while one VM's isolate is created as another's is
+    // disposed, which crashed V8 deserializing a snapshot.
+    std::mem::forget(v8::Isolate::new(Default::default()));
 }
 
 #[cfg(not(feature = "dev-prebuilt"))]

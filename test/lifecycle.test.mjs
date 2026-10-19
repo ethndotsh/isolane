@@ -132,3 +132,22 @@ test('closing an isolate rejects its in-flight evals at once, and the worker sta
   assert.equal(await t.run('4'), 4);
   rt.close();
 });
+
+test('isolates from different snapshots can start while others stop', async () => {
+  // A web isolate closed, a plain one stopping, and a web one starting, on
+  // one worker: V8's shared heaps must not be torn down in between.
+  const rt = new Runtime({ strict });
+  const security = [];
+  rt.on('securityEvent', (e) => security.push(e.detail));
+  for (let round = 0; round < 6; round++) {
+    const t = rt.tenant(`snapshots-${round}`);
+    const vm = t.isolate({ web: true });
+    await vm.eval('setInterval(() => {}, 10); 0');
+    await new Promise((r) => setTimeout(r, 100));
+    vm.close();
+    await t.run(`console.log('x'.repeat(20 << 20)); 1`, { web: false, limits: { heapBytes: 512 << 20 } });
+    await t.run('1', { web: true });
+  }
+  assert.deepEqual(security, []);
+  rt.close();
+});
