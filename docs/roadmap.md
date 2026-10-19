@@ -190,7 +190,7 @@ randomUUID 100%. Remaining failures, by cause:
 | — | Fix or upstream the `url` crate's lag on newest URL-spec edge cases (url 94.9%) | planned |
 | — | test262 run (catch regressions from removed globals and flags) | planned |
 | — | List isolane on unjs/runtime-compat | idea |
-| — | Node compatibility layer (workerd's `src/node` JS/TS, Apache-2.0: `node:buffer`, `node:events`, `node:util`, ...) | idea |
+| — | Node compatibility layer | later (see "Later milestone: npm and Node compatibility") |
 
 ## 4. API and ergonomics
 
@@ -224,13 +224,26 @@ Checked on the dev build (October 2026): a guest throw gives a correct stack but
 
 ### Bundles, npm, and shims
 
+isolane is a library that platforms embed; deploy tooling (a CLI, a
+dashboard) belongs to whoever builds on it, like `examples/serverless`. What
+isolane provides is the library half: `deploy()` accepting a bundle or a
+file tree.
+
 | Item | Status |
 |---|---|
-| Wrangler-style deploys: an `isolane` CLI (`isolane deploy`, `isolane dev`) that bundles locally (Rolldown or esbuild) with worker export conditions (`workerd`, `worker`, `browser`, `import`, `default`), uploads the bundle (or a file tree), and streams logs back | planned |
-| npm packages: deployers install on their own machine (trusted; lifecycle scripts never run on the platform) and ship the result; or the platform fetches tarballs from the registry by lockfile, with no install scripts, ever | planned |
-| Node compatibility (`node:buffer`, `events`, `util`, `stream`, `crypto`, `path`, `url`, `assert`, `string_decoder`, `process`): unenv presets (the layer behind Wrangler's `nodejs_compat` and Nitro) and/or workerd's `src/node` (Apache-2.0), with `node:net`/`node:tls` on our `connect` broker and `node:fs` on our `fs` broker; anything needing native addons, `child_process`, or real threads stays unsupported, by design | planned |
+| `deploy()` accepts a prebuilt bundle (single module + optional source map) as well as a file tree; documented recipe for bundling with Rolldown/esbuild using worker export conditions (`workerd`, `worker`, `browser`, `import`, `default`) | planned |
 | Customizable shims: `modules: { 'node:fs': './my-fs.js', pg: './pg-shim.js' }` (aliases and overrides), host-provided virtual modules (`import { kv } from 'isolane:kv'` backed by host functions), and `define` for compile-time constants | planned |
-| Honest compatibility statement: "anything that runs on Cloudflare Workers with nodejs_compat" as the target; publish a tested-packages list | planned |
+| A CLI (`isolane deploy` / `isolane dev`, Wrangler-style) | dropped: not isolane's job as an embeddable library; platforms build their own |
+
+### Later milestone: npm and Node compatibility
+
+Deliberately late, so it can be done properly once the core is settled.
+
+| Item | Status |
+|---|---|
+| npm packages: deployers install on their own machine (trusted; lifecycle scripts never run on the platform) and ship the result; or the platform fetches tarballs from the registry by lockfile, with no install scripts, ever | later |
+| Node compatibility (`node:buffer`, `events`, `util`, `stream`, `crypto`, `path`, `url`, `assert`, `string_decoder`, `process`): unenv presets (the layer behind Wrangler's `nodejs_compat` and Nitro) and/or workerd's `src/node` (Apache-2.0), with `node:net`/`node:tls` on our `connect` broker and `node:fs` on our `fs` broker; native addons, `child_process`, and real threads stay unsupported, by design | later |
+| Compatibility target: "anything that runs on Cloudflare Workers with nodejs_compat"; publish a tested-packages list | later |
 
 ### API v2 (from `docs/api-review.md`)
 
@@ -300,7 +313,7 @@ Measured against isolated-vm (Linux x64 under Rosetta; re-measure natively):
 | Dev build against prebuilt V8 (`--features dev-prebuilt`, `ISOLANE_DEV_INSECURE=1`) for local iteration | done |
 | Build speed, round 1: `fast` Cargo profile for local work (an edit rebuilds in 1.3 s vs 12.3 s with fat-LTO `release`); `release` gets `panic = "abort"` and stripped debug info; CI links with lld, caches the Cargo registry, sets `CARGO_INCREMENTAL=0`, frees disk in the background; V8 built with `symbol_level=0` (GN args in `scripts/v8.gn`, part of the cache key) | done |
 | Measured: a V8 patch bump (15.2.124.1 → .45) is close to a full rebuild on a 2-core runner — patch releases touch widely included headers, so most objects really are stale | done |
-| Bigger lever for V8 builds: more cores. GitHub prices runners per core, so an 8- or 16-core runner costs about the same per build and finishes 4–8× sooner (needs an org on the Team plan for larger runners), or make the repo public: standard runners are free with no minute cap, 4-core on Linux, but concurrency is still capped per account (reportedly 20 jobs on Free, 5 of them macOS; unconfirmed) and jobs still stop at 6 h | decide |
+| Bigger lever for V8 builds: more cores. GitHub prices runners per core, so an 8- or 16-core runner costs about the same per build and finishes 4–8× sooner (needs an org on the Team plan for larger runners), or make the repo public: standard runners are free with no minute cap, 4-core on Linux, but concurrency is still capped per account (reportedly 20 jobs on Free, 5 of them macOS; unconfirmed) and jobs still stop at 6 h. The account is on GitHub Pro: private repos keep 2-core runners with 3,000 included minutes/month, and larger runners still need an org on Team. At today's rate (V8 15.2 shipped ~4 patch releases a week, each ~2 h of 2-core build) that's ~2,000 min/month for bumps alone, near the included 3,000; overage is $0.006/min | decide |
 | A prebuilt CI image (toolchain, libclang 21, strace) to drop the ~1 min of apt and setup per run | idea |
 | sccache for Rust dependencies once oxc and friends land (not for V8: patch bumps change shared headers, so per-object caching mostly misses) | planned |
 | Nightly-only Rust build speedups (parallel frontend `-Zthreads`, Cranelift for dev builds) if we ever move off stable | idea |
