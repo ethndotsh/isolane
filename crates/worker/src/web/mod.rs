@@ -1,5 +1,5 @@
 //! The web platform (WinterTC's Minimum Common Web Platform API, phases 1
-//! to 3) for VMs created with `webPlatform`. The APIs themselves are Deno's
+//! to 4) for VMs created with `webPlatform`. The APIs themselves are Deno's
 //! web-platform JS, vendored in runtime/deno/ (MIT). In place of deno_core,
 //! this module provides the native layer that JS calls: Deno's ops (same
 //! names and calling conventions) and a few helpers for runtime/core.js.
@@ -65,6 +65,7 @@ const EXT: &[(&str, &str)] = &[
     ("ext:deno_fetch/22_body.js", runtime_js!("deno/ext/fetch/22_body.js")),
     ("ext:deno_fetch/23_request.js", runtime_js!("deno/ext/fetch/23_request.js")),
     ("ext:deno_fetch/23_response.js", runtime_js!("deno/ext/fetch/23_response.js")),
+    ("ext:deno_crypto/00_crypto.js", runtime_js!("deno/ext/crypto/00_crypto.js")),
     // isolane's fetch() over the network broker (in place of 26_fetch.js).
     ("ext:isolane/fetch.js", runtime_js!("fetch.js")),
     // connect(), the Sockets API over the socket broker.
@@ -288,14 +289,6 @@ pub(crate) fn fill_random(buf: &mut [u8]) -> bool {
     crate::vm::seeded_entropy(buf) || getrandom::getrandom(buf).is_ok()
 }
 
-fn get_random_values(scope: &mut v8::PinScope, args: Args, _rv: Rv) {
-    match with_bytes_mut(scope, args.get(0), fill_random) {
-        None => throw_type(scope, "expected an integer TypedArray"),
-        Some(false) => throw_type(scope, "no randomness available"),
-        Some(true) => {}
-    }
-}
-
 fn random_uuid(scope: &mut v8::PinScope, _args: Args, mut rv: Rv) {
     let mut b = [0u8; 16];
     if !fill_random(&mut b) {
@@ -372,6 +365,8 @@ macro_rules! natives {
 
 type Natives = Vec<(&'static str, v8::FunctionCallback)>;
 
+mod crypto;
+
 fn native_fns() -> Natives {
     natives!(
         "compileExt" => compile_ext,
@@ -390,7 +385,7 @@ fn native_fns() -> Natives {
         "serialize" => clone::serialize_op,
         "deserialize" => clone::deserialize_op,
         "markNotSerializable" => clone::mark_not_serializable,
-        "getRandomValues" => get_random_values,
+        "setHostObject" => clone::set_host_object,
         "randomUUID" => random_uuid,
         "reportUnhandledException" => report_unhandled_exception,
         "newDecoder" => encoding::new_decoder,
@@ -411,7 +406,7 @@ fn native_fns() -> Natives {
 }
 
 fn op_fns() -> Natives {
-    natives!(
+    let mut ops = natives!(
         "op_base64_decode" => base64::op_base64_decode,
         "op_base64_encode_from_buffer" => base64::op_base64_encode_from_buffer,
         "op_base64_atob" => base64::op_base64_atob,
@@ -430,7 +425,9 @@ fn op_fns() -> Natives {
         "op_encoding_encode_into_fallback" => encoding::op_encoding_encode_into_fallback,
         "op_now" => op_now,
         "op_time_origin" => op_time_origin,
-    )
+    );
+    ops.extend(crypto::op_fns());
+    ops
 }
 
 /// Every callback the web platform's objects hold.

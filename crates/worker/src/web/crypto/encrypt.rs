@@ -1,4 +1,6 @@
 // Copyright 2018-2026 the Deno authors. MIT license.
+// Ported from Deno's ext/crypto/encrypt.rs (denoland/deno@eb4061f6f367) to
+// isolane's ops: see mod.rs.
 
 use aes::cipher::BlockEncryptMut;
 use aes::cipher::KeyIvInit;
@@ -16,11 +18,6 @@ use aes_gcm::aes::Aes256;
 use ctr::Ctr32BE;
 use ctr::Ctr64BE;
 use ctr::Ctr128BE;
-use deno_core::JsBuffer;
-use deno_core::convert::Uint8Array;
-use deno_core::op2;
-use deno_core::unsync::spawn_blocking;
-use rand::rngs::OsRng;
 use rsa::pkcs1::DecodeRsaPublicKey;
 use serde::Deserialize;
 use sha1::Sha1;
@@ -31,7 +28,8 @@ use sha3::Sha3_256;
 use sha3::Sha3_384;
 use sha3::Sha3_512;
 
-use crate::shared::*;
+use super::shared::*;
+use super::IsolaneRng;
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -112,39 +110,36 @@ pub enum EncryptError {
   Failed,
 }
 
-#[op2]
-pub async fn op_crypto_encrypt(
-  #[serde] opts: EncryptOptions,
-  #[buffer] data: JsBuffer,
-) -> Result<Uint8Array, EncryptError> {
+pub fn op_crypto_encrypt(
+  opts: EncryptOptions,
+  data: &[u8],
+) -> Result<Vec<u8>, EncryptError> {
   let key = opts.key;
-  let fun = move || match opts.algorithm {
+  match opts.algorithm {
     EncryptAlgorithm::RsaOaep { hash, label } => {
-      encrypt_rsa_oaep(key, hash, label, &data)
+      encrypt_rsa_oaep(key, hash, label, data)
     }
     EncryptAlgorithm::AesCbc { iv, length } => {
-      encrypt_aes_cbc(key, length, iv, &data)
+      encrypt_aes_cbc(key, length, iv, data)
     }
     EncryptAlgorithm::AesGcm {
       iv,
       additional_data,
       length,
       tag_length,
-    } => encrypt_aes_gcm(key, length, tag_length, iv, additional_data, &data),
+    } => encrypt_aes_gcm(key, length, tag_length, iv, additional_data, data),
     EncryptAlgorithm::AesOcb {
       iv,
       additional_data,
       length,
       tag_length,
-    } => encrypt_aes_ocb(key, length, tag_length, iv, additional_data, &data),
+    } => encrypt_aes_ocb(key, length, tag_length, iv, additional_data, data),
     EncryptAlgorithm::AesCtr {
       counter,
       ctr_length,
       key_length,
-    } => encrypt_aes_ctr(key, key_length, &counter, ctr_length, &data),
-  };
-  let buf = spawn_blocking(fun).await.unwrap()?;
-  Ok(buf.into())
+    } => encrypt_aes_ctr(key, key_length, &counter, ctr_length, data),
+  }
 }
 
 fn encrypt_rsa_oaep(
@@ -158,7 +153,7 @@ fn encrypt_rsa_oaep(
   let public_key = key.as_rsa_public_key()?;
   let public_key = rsa::RsaPublicKey::from_pkcs1_der(&public_key)
     .map_err(|_| SharedError::FailedDecodePublicKey)?;
-  let mut rng = OsRng;
+  let mut rng = IsolaneRng;
   let padding = match hash {
     ShaHash::Sha1 => rsa::Oaep {
       digest: Box::<Sha1>::default(),
@@ -307,8 +302,9 @@ fn encrypt_aes_gcm(
   };
 
   // Truncated tag to the specified tag length.
-  // `tag` is fixed to be 16 bytes long and (tag_length / 8) is always <= 16
-  let tag = &tag[..(tag_length / 8)];
+  // `tag` is fixed to be 16 bytes long; the JS checks (tag_length / 8) <= 16,
+  // and this does too: slicing past it would panic, which aborts the worker.
+  let tag = tag.get(..(tag_length / 8)).ok_or(EncryptError::InvalidLength)?;
 
   // C | T
   ciphertext.extend_from_slice(tag);
@@ -334,8 +330,10 @@ fn encrypt_aes_ocb(
 
   let mut ciphertext = data.to_vec();
 
-  // OCB supports nonce sizes from 1 to 15 bytes (recommended: 12 bytes)
-  if iv.is_empty() || iv.len() > 15 {
+  // OCB allows nonces of 1 to 15 bytes, but `Ocb3`'s default nonce size is
+  // 12 bytes, and `from_slice` panics on any other length (which aborts the
+  // worker; Deno, unwinding, would only fail the op).
+  if iv.len() != 12 {
     return Err(EncryptError::InvalidIvLength);
   }
 
@@ -368,7 +366,7 @@ fn encrypt_aes_ocb(
 
   // Truncate tag to the specified tag length
   // OCB tag is 16 bytes by default
-  let tag = &tag[..(tag_length / 8)];
+  let tag = tag.get(..(tag_length / 8)).ok_or(EncryptError::InvalidLength)?;
 
   // C | T
   ciphertext.extend_from_slice(tag);
@@ -384,7 +382,10 @@ fn encrypt_aes_ctr_gen<B>(
 where
   B: KeyIvInit + StreamCipher,
 {
-  let mut cipher = B::new(key.into(), counter.into());
+  // `new` panics on a key or counter of the wrong size; `new_from_slices`
+  // checks.
+  let mut cipher = B::new_from_slices(key, counter)
+    .map_err(|_| EncryptError::InvalidKeyOrIv)?;
 
   let mut ciphertext = data.to_vec();
   cipher

@@ -24,6 +24,30 @@ fn not_serializable<'s>(scope: &mut v8::PinScope<'s, '_>) -> v8::Local<'s, v8::P
     v8::Private::for_api(scope, Some(name))
 }
 
+/// Where native.setHostObject keeps an object's clone function: a private,
+/// which guest code can't see or reach (unlike `hostObjectBrand`, a
+/// registered symbol). For objects whose clone data is secret: a CryptoKey's
+/// is its key material, which `extractable: false` keeps from the guest.
+fn host_object<'s>(scope: &mut v8::PinScope<'s, '_>) -> v8::Local<'s, v8::Private> {
+    let name = v8::String::new(scope, "isolane#hostObject").unwrap();
+    v8::Private::for_api(scope, Some(name))
+}
+
+/// native.setHostObject(object, describe): `object` clones as
+/// `describe()`'s data, rebuilt by the deserializer registered with
+/// core.registerPrivateCloneable for its `type`.
+pub fn set_host_object(scope: &mut v8::PinScope, args: Args, _rv: Rv) {
+    if let (Ok(obj), Ok(f)) = (v8::Local::<v8::Object>::try_from(args.get(0)), v8::Local::<v8::Function>::try_from(args.get(1))) {
+        let key = host_object(scope);
+        obj.set_private(scope, key, f.into());
+    }
+}
+
+/// The prefix of a private cloneable's deserializer name. Data that clones
+/// through `hostObjectBrand` (which guest code can attach to anything) can't
+/// name one, so guest code can't forge a CryptoKey from bytes of its choice.
+const PRIVATE_TYPE: &str = "\0";
+
 /// native.markNotSerializable(object)
 pub fn mark_not_serializable(scope: &mut v8::PinScope, args: Args, _rv: Rv) {
     if let Ok(obj) = v8::Local::<v8::Object>::try_from(args.get(0)) {
@@ -60,6 +84,8 @@ struct Delegate {
 }
 
 const IN_BAND: u32 = u32::MAX;
+/// In-band data from native.setHostObject's function.
+const IN_BAND_PRIVATE: u32 = u32::MAX - 1;
 
 impl Delegate {
     /// A clone error: the error callback's exception if it throws (it's
@@ -95,6 +121,10 @@ impl v8::ValueSerializerImpl for Delegate {
         if refused(scope, object)? {
             return Some(true);
         }
+        let private = host_object(scope);
+        if object.has_private(scope, private)? {
+            return Some(true);
+        }
         match &self.brand {
             Some(brand) => {
                 let brand = v8::Local::new(scope, brand);
@@ -122,6 +152,13 @@ impl v8::ValueSerializerImpl for Delegate {
             }
         }
         if !refused(scope, object)? {
+            let private = host_object(scope);
+            if let Ok(f) = v8::Local::<v8::Function>::try_from(object.get_private(scope, private)?) {
+                let data = f.call(scope, object.into(), &[])?;
+                serializer.write_uint32(IN_BAND_PRIVATE);
+                let context = scope.get_current_context();
+                return serializer.write_value(context, data);
+            }
             if let Some(brand) = &self.brand {
                 let brand = v8::Local::new(scope, brand);
                 let method = object.get(scope, brand.into())?;
@@ -149,7 +186,7 @@ impl v8::ValueDeserializerImpl for Delegate {
         if !deserializer.read_uint32(&mut tag) {
             return None;
         }
-        if tag != IN_BAND {
+        if tag != IN_BAND && tag != IN_BAND_PRIVATE {
             let list = v8::Local::new(scope, self.host_objects.as_ref()?);
             return list.get_index(scope, tag)?.to_object(scope);
         }
@@ -158,8 +195,14 @@ impl v8::ValueDeserializerImpl for Delegate {
         let deserializers = v8::Local::new(scope, self.deserializers.as_ref()?);
         let obj = data.to_object(scope)?;
         let key = v8::String::new(scope, "type").unwrap();
-        let ty = obj.get(scope, key.into())?;
-        let f = v8::Local::<v8::Function>::try_from(deserializers.get(scope, ty)?).ok()?;
+        let ty = obj.get(scope, key.into())?.to_rust_string_lossy(scope);
+        let name = match tag {
+            IN_BAND_PRIVATE => format!("{PRIVATE_TYPE}{ty}"),
+            _ if ty.starts_with(PRIVATE_TYPE) => return None,
+            _ => ty,
+        };
+        let name = v8::String::new(scope, &name)?;
+        let f = v8::Local::<v8::Function>::try_from(deserializers.get(scope, name.into())?).ok()?;
         // V8 forbids running JS while deserializing, unless asked.
         let scope = std::pin::pin!(v8::AllowJavascriptExecutionScope::new(scope));
         let scope = &mut scope.init();

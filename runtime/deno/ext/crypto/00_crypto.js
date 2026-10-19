@@ -88,7 +88,6 @@ const { createFilteredInspectProxy } = core.loadExtScript(
   "ext:deno_web/01_console.js",
 );
 const { DOMException } = core.loadExtScript("ext:deno_web/01_dom_exception.js");
-const { kKeyObject } = internals;
 
 const supportedNamedCurves = ["P-256", "P-384", "P-521"];
 const recognisedUsages = [
@@ -367,8 +366,6 @@ class CryptoKey {
   [_usages];
   /** @type {object} */
   [_handle];
-  /** @type {object} */
-  [kKeyObject];
 
   constructor() {
     webidl.illegalConstructor();
@@ -435,25 +432,21 @@ function constructKey(type, extractable, usages, algorithm, handle) {
   key[_usages] = usages;
   key[_algorithm] = algorithm;
   key[_handle] = handle;
-  key[kKeyObject] = WeakMapPrototypeGet(KEY_STORE, handle);
-  ObjectDefineProperty(key, core.hostObjectBrand, {
-    __proto__: null,
-    value: () => ({
-      type: "CryptoKey",
-      keyType: type,
-      extractable,
-      usages,
-      algorithm,
-      keyData: WeakMapPrototypeGet(KEY_STORE, handle),
-    }),
-    enumerable: false,
-    configurable: false,
-    writable: false,
-  });
+  // isolane: the clone data carries the key material, so it isn't on a
+  // property guest code can reach (Deno's hostObjectBrand is a registered
+  // symbol, and kKeyObject held the material itself).
+  core.setHostObject(key, () => ({
+    type: "CryptoKey",
+    keyType: type,
+    extractable,
+    usages,
+    algorithm,
+    keyData: WeakMapPrototypeGet(KEY_STORE, handle),
+  }));
   return key;
 }
 
-core.registerCloneableResource("CryptoKey", (data) => {
+core.registerPrivateCloneable("CryptoKey", (data) => {
   const handle = {};
   WeakMapPrototypeSet(KEY_STORE, handle, data.keyData);
   return constructKey(
@@ -2264,7 +2257,7 @@ function importKeyX448(
         throw new DOMException("Invalid key usage", "SyntaxError");
       }
 
-      const privateKeyData = new Uint8Array(32);
+      const privateKeyData = new Uint8Array(56);
       if (!op_crypto_import_pkcs8_x448(keyData, privateKeyData)) {
         throw new DOMException("Invalid key data", "DataError");
       }
@@ -4712,9 +4705,9 @@ function exportKeyX448(format, key, innerKey) {
       }
 
       const pkcs8Der = op_crypto_export_pkcs8_x448(
-        new Uint8Array([0x04, 0x22, ...new SafeArrayIterator(innerKey)]),
+        new Uint8Array([0x04, 0x3a, ...new SafeArrayIterator(innerKey)]),
       );
-      pkcs8Der[15] = 0x20;
+      pkcs8Der[15] = 0x38;
       return TypedArrayPrototypeGetBuffer(pkcs8Der);
     }
     case "jwk": {
@@ -6068,9 +6061,9 @@ function cryptoKeyExportNodeKeyMaterial(cryptoKey) {
     }
     case "X448": {
       data = op_crypto_export_pkcs8_x448(
-        new Uint8Array([0x04, 0x22, ...new SafeArrayIterator(innerKey)]),
+        new Uint8Array([0x04, 0x3a, ...new SafeArrayIterator(innerKey)]),
       );
-      data[15] = 0x20;
+      data[15] = 0x38;
       break;
     }
     default:

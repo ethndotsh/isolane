@@ -1,11 +1,8 @@
 // Copyright 2018-2026 the Deno authors. MIT license.
+// Ported from Deno's ext/crypto/key.rs (denoland/deno@eb4061f6f367) to
+// isolane's ops: see mod.rs. The aws-lc-rs algorithm mappings are gone
+// (ops.rs uses RustCrypto directly).
 
-use aws_lc_rs::agreement::Algorithm as RingAlgorithm;
-use aws_lc_rs::digest;
-use aws_lc_rs::hkdf;
-use aws_lc_rs::hmac::Algorithm as HmacAlgorithm;
-use aws_lc_rs::signature::EcdsaSigningAlgorithm;
-use aws_lc_rs::signature::EcdsaVerificationAlgorithm;
 use serde::Deserialize;
 use serde::Serialize;
 
@@ -35,80 +32,6 @@ pub enum CryptoNamedCurve {
   P384,
   #[serde(rename = "P-521")]
   P521,
-}
-
-impl From<CryptoNamedCurve> for &RingAlgorithm {
-  fn from(curve: CryptoNamedCurve) -> &'static RingAlgorithm {
-    match curve {
-      CryptoNamedCurve::P256 => &aws_lc_rs::agreement::ECDH_P256,
-      CryptoNamedCurve::P384 => &aws_lc_rs::agreement::ECDH_P384,
-      CryptoNamedCurve::P521 => &aws_lc_rs::agreement::ECDH_P521,
-    }
-  }
-}
-
-impl From<CryptoNamedCurve> for &EcdsaSigningAlgorithm {
-  fn from(curve: CryptoNamedCurve) -> &'static EcdsaSigningAlgorithm {
-    match curve {
-      CryptoNamedCurve::P256 => {
-        &aws_lc_rs::signature::ECDSA_P256_SHA256_FIXED_SIGNING
-      }
-      CryptoNamedCurve::P384 => {
-        &aws_lc_rs::signature::ECDSA_P384_SHA384_FIXED_SIGNING
-      }
-      CryptoNamedCurve::P521 => {
-        &aws_lc_rs::signature::ECDSA_P521_SHA512_FIXED_SIGNING
-      }
-    }
-  }
-}
-
-impl From<CryptoNamedCurve> for &EcdsaVerificationAlgorithm {
-  fn from(curve: CryptoNamedCurve) -> &'static EcdsaVerificationAlgorithm {
-    match curve {
-      CryptoNamedCurve::P256 => &aws_lc_rs::signature::ECDSA_P256_SHA256_FIXED,
-      CryptoNamedCurve::P384 => &aws_lc_rs::signature::ECDSA_P384_SHA384_FIXED,
-      CryptoNamedCurve::P521 => &aws_lc_rs::signature::ECDSA_P521_SHA512_FIXED,
-    }
-  }
-}
-
-impl From<CryptoHash> for HmacAlgorithm {
-  fn from(hash: CryptoHash) -> HmacAlgorithm {
-    match hash {
-      CryptoHash::Sha1 => aws_lc_rs::hmac::HMAC_SHA1_FOR_LEGACY_USE_ONLY,
-      CryptoHash::Sha256 => aws_lc_rs::hmac::HMAC_SHA256,
-      CryptoHash::Sha384 => aws_lc_rs::hmac::HMAC_SHA384,
-      CryptoHash::Sha512 => aws_lc_rs::hmac::HMAC_SHA512,
-      // SHA3 is only supported for digest, not HMAC.
-      // The JS layer prevents SHA3 from reaching here.
-      CryptoHash::Sha3_256 | CryptoHash::Sha3_384 | CryptoHash::Sha3_512 => {
-        unreachable!("SHA3 is not supported for HMAC")
-      }
-    }
-  }
-}
-
-impl From<CryptoHash> for &'static digest::Algorithm {
-  fn from(hash: CryptoHash) -> &'static digest::Algorithm {
-    match hash {
-      CryptoHash::Sha1 => &digest::SHA1_FOR_LEGACY_USE_ONLY,
-      CryptoHash::Sha256 => &digest::SHA256,
-      CryptoHash::Sha384 => &digest::SHA384,
-      CryptoHash::Sha512 => &digest::SHA512,
-      CryptoHash::Sha3_256 => &digest::SHA3_256,
-      CryptoHash::Sha3_384 => &digest::SHA3_384,
-      CryptoHash::Sha3_512 => &digest::SHA3_512,
-    }
-  }
-}
-
-pub struct HkdfOutput<T>(pub T);
-
-impl hkdf::KeyType for HkdfOutput<usize> {
-  fn len(&self) -> usize {
-    self.0
-  }
 }
 
 #[derive(Serialize, Deserialize, Clone, Copy)]

@@ -103,6 +103,19 @@ pub fn seeded_entropy(buf: &mut [u8]) -> bool {
     })
 }
 
+thread_local! {
+    /// The VM thread's watchdog, for native code that runs long without
+    /// returning to JavaScript (where termination takes effect).
+    static WATCHDOG: std::cell::RefCell<Option<Arc<Watchdog>>> = const { std::cell::RefCell::new(None) };
+}
+
+/// Has a budget run out for what this VM thread is running? Long native
+/// loops (PBKDF2) check it and stop, since the watchdog's termination only
+/// lands once they return to JavaScript.
+pub fn out_of_time() -> bool {
+    WATCHDOG.with(|w| w.borrow().as_ref().is_some_and(|w| w.fired()))
+}
+
 // ---- messages ----
 
 pub enum VmMsg {
@@ -222,6 +235,7 @@ fn vm_main(id: u64, config: VmConfig, rx: Receiver<VmMsg>, out: Output) {
         Ok(w) => w,
         Err(e) => return refuse_all(&rx, &out, format!("vm could not start: {e}")),
     };
+    WATCHDOG.with(|w| *w.borrow_mut() = Some(watchdog.clone()));
     let oom = Box::new(OomState { handle, hit: AtomicBool::new(false) });
     isolate.add_near_heap_limit_callback(near_heap_limit, &*oom as *const OomState as *mut c_void);
     // The heap limit as configured (V8's own figure, which adds young

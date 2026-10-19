@@ -491,11 +491,37 @@
     return new Promise((resolve) => createTimer(resolve, 0, undefined, false, true));
   }
 
+  // Web Crypto's ops (web/crypto/) throw deno_core's way: built-in classes
+  // as themselves, DOMExceptions as Errors named "DOMException<name>", which
+  // these wrappers turn into DOMExceptions (deno_core's error builders).
+  function cryptoError(error) {
+    if (!ObjectPrototypeIsPrototypeOf(ErrorPrototype, error)) return error;
+    const name = error.name;
+    if (typeof name !== "string" || !StringPrototypeStartsWith(name, "DOMException")) return error;
+    const { DOMException, QuotaExceededError } = loadExtScript("ext:deno_web/01_dom_exception.js");
+    const domName = StringPrototypeSlice(name, 12);
+    if (domName === "QuotaExceededError") return new QuotaExceededError(error.message);
+    return new DOMException(error.message, domName);
+  }
+  const cryptoOps = { __proto__: null };
+  for (const name in rawOps) {
+    if (!StringPrototypeStartsWith(name, "op_crypto_")) continue;
+    const raw = rawOps[name];
+    // Every crypto op takes at most three arguments.
+    cryptoOps[name] = function (a, b, c) {
+      try {
+        return raw(a, b, c);
+      } catch (error) {
+        throw cryptoError(error);
+      }
+    };
+  }
+
   // TextDecoder stream handles: native decoder ids, wrapped so a handle the
   // guest abandons mid-stream frees its decoder when collected.
   const decoders = new FinalizationRegistry((id) => native.freeDecoder(id));
   const ops = ObjectFreeze(
-    ObjectAssign(ObjectCreate(null), rawOps, blobOps, compressionOps, portOps, { op_encode_binary_string, op_defer }, {
+    ObjectAssign(ObjectCreate(null), rawOps, cryptoOps, blobOps, compressionOps, portOps, { op_encode_binary_string, op_defer }, {
       // (No op_http_new_response_native_headers / op_http_drop_response_native:
       // 23_response.js skips Deno.serve's native responses when they're absent.)
       op_encoding_new_decoder(label, fatal, ignoreBOM) {
@@ -615,6 +641,14 @@
     registerCloneableResource(name, deserialize) {
       cloneableDeserializers[name] = deserialize;
     },
+    // Not part of deno_core: platform objects whose clone data guest code
+    // mustn't see (a CryptoKey's material). setHostObject keeps `describe`
+    // in a V8 private; only data written that way reaches a deserializer
+    // registered here (web/clone.rs).
+    setHostObject: native.setHostObject,
+    registerPrivateCloneable(name, deserialize) {
+      cloneableDeserializers["\0" + name] = deserialize;
+    },
     getCloneableDeserializers: () => cloneableDeserializers,
     registerTransferableResource(name, send, receive) {
       const sendPort = name === "MessagePort" ? (port) => releasePort(send(port)) : send;
@@ -652,9 +686,6 @@
     setReportException(fn) {
       reportException = fn;
     },
-    // Not part of deno_core: randomness for crypto in runtime/globals.js.
-    getRandomValues: native.getRandomValues,
-    randomUUID: native.randomUUID,
     // Not part of deno_core: for runtime/fetch.js, the data: URL processor
     // and Subresource Integrity's digests.
     dataUrl: native.dataUrl,

@@ -34,7 +34,40 @@ brotli = "8"
 # fetch(): data: URLs (Fetch's processor, as Deno uses) and Subresource
 # Integrity digests. Pure Rust.
 data-url = "0.3"
-sha2 = "0.10"
+sha2 = { version = "0.10", features = ["oid"] }
+# crypto.subtle (src/web/crypto/, ported from Deno's ext/crypto): the
+# RustCrypto crates Deno uses, all pure Rust. Where Deno uses aws-lc-rs (a C
+# library with its own OS randomness), the RustCrypto equivalents stand in,
+# so every key and nonce comes from the isolate's `random` policy.
+aes = "0.8"
+aes-gcm = "0.10"
+aes-kw = { version = "0.2", features = ["alloc"] }
+base64 = "0.22"
+cbc = { version = "0.1", features = ["alloc"] }
+const-oid = "0.9"
+ctr = { version = "0.9", features = ["alloc"] }
+curve25519-dalek = "4"
+deno_error = "=0.7.1"
+ecdsa = "0.16"
+ed25519-dalek = "2"
+x448 = { version = "=0.14.0-pre.12", default-features = false }
+elliptic-curve = { version = "0.13", features = ["std", "arithmetic", "ecdh", "pkcs8", "sec1"] }
+hkdf = "0.12"
+hmac = "0.12"
+num-traits = "0.2"
+ocb3 = "0.1"
+p256 = { version = "0.13", features = ["ecdh", "ecdsa", "pkcs8"] }
+p384 = { version = "0.13", features = ["ecdh", "ecdsa", "pkcs8"] }
+p521 = { version = "0.13", features = ["ecdh", "ecdsa", "pkcs8"] }
+rand_core = "0.6"
+rsa = { version = "0.9", default-features = false, features = ["std"] }
+serde_bytes = "0.11"
+sha1 = { version = "0.10", features = ["oid"] }
+sha3 = "0.10"
+signature = "2"
+spki = "0.7"
+thiserror = "2"
+x25519-dalek = "2"
 
 [target.'cfg(target_os = "linux")'.dependencies]
 landlock = "0.4"

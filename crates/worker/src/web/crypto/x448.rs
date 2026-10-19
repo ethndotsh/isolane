@@ -1,13 +1,13 @@
 // Copyright 2018-2026 the Deno authors. MIT license.
+// Ported from Deno's ext/crypto/x448.rs (denoland/deno@eb4061f6f367) to
+// isolane's ops: see mod.rs. Buffer lengths are checked before copying (a
+// mismatch would panic, which aborts the worker). The curve arithmetic is
+// RustCrypto's x448 crate (RFC 7748's X448, scalar clamping included), not
+// ed448-goldilocks directly, whose prerelease Deno pins.
 
-use deno_core::convert::Uint8Array;
-use deno_core::op2;
-use ed448_goldilocks::EdwardsScalar;
-use ed448_goldilocks::MontgomeryPoint;
-use ed448_goldilocks::subtle::ConstantTimeEq;
+use elliptic_curve::subtle::ConstantTimeEq;
 use elliptic_curve::pkcs8::PrivateKeyInfo;
-use rand::RngCore;
-use rand::rngs::OsRng;
+use rand_core::RngCore;
 use spki::der::Decode;
 use spki::der::Encode;
 use spki::der::asn1::BitString;
@@ -25,43 +25,45 @@ pub enum X448Error {
   Der(#[from] spki::der::Error),
 }
 
-#[op2(fast)]
 pub fn op_crypto_generate_x448_keypair(
-  #[buffer] pkey: &mut [u8],
-  #[buffer] pubkey: &mut [u8],
-) {
-  let mut rng = OsRng;
-  rng.fill_bytes(pkey);
+  pkey: &mut [u8],
+  pubkey: &mut [u8],
+) -> bool {
+  if pkey.len() != 56 || pubkey.len() != 56 {
+    return false;
+  }
+  if super::IsolaneRng.try_fill_bytes(pkey).is_err() {
+    return false;
+  }
 
   // x448(pkey, 5)
-  let mut scalar_bytes = [0u8; 57];
-  scalar_bytes[..56].copy_from_slice(pkey);
-  let scalar = EdwardsScalar::from_bytes_mod_order(&scalar_bytes.into());
-  let point = &MontgomeryPoint::GENERATOR * &scalar;
-  pubkey.copy_from_slice(&point.0);
+  let Ok(scalar) = <[u8; 56]>::try_from(&*pkey) else {
+    return false;
+  };
+  pubkey.copy_from_slice(&x448::x448_unchecked(scalar, x448::X448_BASEPOINT_BYTES));
+  true
 }
 
-static MONTGOMERY_IDENTITY: MontgomeryPoint = MontgomeryPoint([0; 56]);
+const MONTGOMERY_IDENTITY: [u8; 56] = [0; 56];
 
-#[op2(fast)]
 pub fn op_crypto_derive_bits_x448(
-  #[buffer] k: &[u8],
-  #[buffer] u: &[u8],
-  #[buffer] secret: &mut [u8],
+  k: &[u8],
+  u: &[u8],
+  secret: &mut [u8],
 ) -> Result<bool, X448Error> {
   let k: [u8; 56] = k.try_into().map_err(|_| X448Error::InvalidKeyLength)?;
   let u: [u8; 56] = u.try_into().map_err(|_| X448Error::InvalidKeyLength)?;
 
   // x448(k, u)
-  let mut scalar_bytes = [0u8; 57];
-  scalar_bytes[..56].copy_from_slice(&k);
-  let scalar = EdwardsScalar::from_bytes_mod_order(&scalar_bytes.into());
-  let point = &MontgomeryPoint(u) * &scalar;
+  let point = x448::x448_unchecked(k, u);
   if point.ct_eq(&MONTGOMERY_IDENTITY).unwrap_u8() == 1 {
     return Ok(true);
   }
 
-  secret.copy_from_slice(&point.0);
+  if secret.len() != 56 {
+    return Err(X448Error::InvalidKeyLength);
+  }
+  secret.copy_from_slice(&point);
   Ok(false)
 }
 
@@ -69,10 +71,9 @@ pub fn op_crypto_derive_bits_x448(
 const X448_OID: const_oid::ObjectIdentifier =
   const_oid::ObjectIdentifier::new_unwrap("1.3.101.111");
 
-#[op2]
 pub fn op_crypto_export_spki_x448(
-  #[buffer] pubkey: &[u8],
-) -> Result<Uint8Array, X448Error> {
+  pubkey: &[u8],
+) -> Result<Vec<u8>, X448Error> {
   let key_info = spki::SubjectPublicKeyInfo {
     algorithm: spki::AlgorithmIdentifierRef {
       oid: X448_OID,
@@ -83,15 +84,13 @@ pub fn op_crypto_export_spki_x448(
   Ok(
     key_info
       .to_der()
-      .map_err(|_| X448Error::FailedExport)?
-      .into(),
+      .map_err(|_| X448Error::FailedExport)?,
   )
 }
 
-#[op2]
 pub fn op_crypto_export_pkcs8_x448(
-  #[buffer] pkey: &[u8],
-) -> Result<Uint8Array, X448Error> {
+  pkey: &[u8],
+) -> Result<Vec<u8>, X448Error> {
   use rsa::pkcs1::der::Encode;
 
   let pk_info = rsa::pkcs8::PrivateKeyInfo {
@@ -105,13 +104,12 @@ pub fn op_crypto_export_pkcs8_x448(
 
   let mut buf = Vec::new();
   pk_info.encode_to_vec(&mut buf)?;
-  Ok(buf.into())
+  Ok(buf)
 }
 
-#[op2(fast)]
 pub fn op_crypto_import_spki_x448(
-  #[buffer] key_data: &[u8],
-  #[buffer] out: &mut [u8],
+  key_data: &[u8],
+  out: &mut [u8],
 ) -> bool {
   // 2-3.
   let pk_info = match spki::SubjectPublicKeyInfoRef::try_from(key_data) {
@@ -127,14 +125,17 @@ pub fn op_crypto_import_spki_x448(
   if pk_info.algorithm.parameters.is_some() {
     return false;
   }
-  out.copy_from_slice(pk_info.subject_public_key.raw_bytes());
+  let key = pk_info.subject_public_key.raw_bytes();
+  if key.len() != out.len() {
+    return false;
+  }
+  out.copy_from_slice(key);
   true
 }
 
-#[op2(fast)]
 pub fn op_crypto_import_pkcs8_x448(
-  #[buffer] key_data: &[u8],
-  #[buffer] out: &mut [u8],
+  key_data: &[u8],
+  out: &mut [u8],
 ) -> bool {
   // 2-3.
   let pk_info = match PrivateKeyInfo::from_der(key_data) {
@@ -151,8 +152,10 @@ pub fn op_crypto_import_pkcs8_x448(
     return false;
   }
   // 6.
-  // CurvePrivateKey ::= OCTET STRING
-  if pk_info.private_key.len() != 56 {
+  // CurvePrivateKey ::= OCTET STRING: 2 bytes of header, then 56 of key.
+  // (Deno at this commit checked for 56 here, and then panicked copying
+  // 54 bytes into 56; fixed upstream in denoland/deno#34578.)
+  if pk_info.private_key.len() != 58 || out.len() != 56 {
     return false;
   }
   out.copy_from_slice(&pk_info.private_key[2..]);

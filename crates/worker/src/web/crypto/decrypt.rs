@@ -1,4 +1,6 @@
 // Copyright 2018-2026 the Deno authors. MIT license.
+// Ported from Deno's ext/crypto/decrypt.rs (denoland/deno@eb4061f6f367) to
+// isolane's ops: see mod.rs.
 
 use aes::cipher::BlockDecryptMut;
 use aes::cipher::KeyIvInit;
@@ -16,10 +18,6 @@ use ctr::Ctr32BE;
 use ctr::Ctr64BE;
 use ctr::Ctr128BE;
 use ctr::cipher::StreamCipher;
-use deno_core::JsBuffer;
-use deno_core::convert::Uint8Array;
-use deno_core::op2;
-use deno_core::unsync::spawn_blocking;
 use rsa::pkcs1::DecodeRsaPrivateKey;
 use serde::Deserialize;
 use sha1::Sha1;
@@ -30,7 +28,7 @@ use sha3::Sha3_256;
 use sha3::Sha3_384;
 use sha3::Sha3_512;
 
-use crate::shared::*;
+use super::shared::*;
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -120,39 +118,36 @@ pub enum DecryptError {
   Rsa(rsa::Error),
 }
 
-#[op2]
-pub async fn op_crypto_decrypt(
-  #[serde] opts: DecryptOptions,
-  #[buffer] data: JsBuffer,
-) -> Result<Uint8Array, DecryptError> {
+pub fn op_crypto_decrypt(
+  opts: DecryptOptions,
+  data: &[u8],
+) -> Result<Vec<u8>, DecryptError> {
   let key = opts.key;
-  let fun = move || match opts.algorithm {
+  match opts.algorithm {
     DecryptAlgorithm::RsaOaep { hash, label } => {
-      decrypt_rsa_oaep(key, hash, label, &data)
+      decrypt_rsa_oaep(key, hash, label, data)
     }
     DecryptAlgorithm::AesCbc { iv, length } => {
-      decrypt_aes_cbc(key, length, iv, &data)
+      decrypt_aes_cbc(key, length, iv, data)
     }
     DecryptAlgorithm::AesCtr {
       counter,
       ctr_length,
       key_length,
-    } => decrypt_aes_ctr(key, key_length, &counter, ctr_length, &data),
+    } => decrypt_aes_ctr(key, key_length, &counter, ctr_length, data),
     DecryptAlgorithm::AesGcm {
       iv,
       additional_data,
       length,
       tag_length,
-    } => decrypt_aes_gcm(key, length, tag_length, iv, additional_data, &data),
+    } => decrypt_aes_gcm(key, length, tag_length, iv, additional_data, data),
     DecryptAlgorithm::AesOcb {
       iv,
       additional_data,
       length,
       tag_length,
-    } => decrypt_aes_ocb(key, length, tag_length, iv, additional_data, &data),
-  };
-  let buf = spawn_blocking(fun).await.unwrap()?;
-  Ok(buf.into())
+    } => decrypt_aes_ocb(key, length, tag_length, iv, additional_data, data),
+  }
 }
 
 fn decrypt_rsa_oaep(
@@ -264,7 +259,10 @@ fn decrypt_aes_ctr_gen<B>(
 where
   B: KeyIvInit + StreamCipher,
 {
-  let mut cipher = B::new(key.into(), counter.into());
+  // `new` panics on a key or counter of the wrong size; `new_from_slices`
+  // checks.
+  let mut cipher = B::new_from_slices(key, counter)
+    .map_err(|_| DecryptError::InvalidKeyOrIv)?;
 
   let mut plaintext = data.to_vec();
   cipher
@@ -377,7 +375,11 @@ fn decrypt_aes_gcm(
     return Err(DecryptError::InvalidTagLength);
   }
 
-  let sep = data.len() - (tag_length / 8);
+  // Shorter than the tag: OperationError (subtracting would underflow).
+  let sep = data
+    .len()
+    .checked_sub(tag_length / 8)
+    .ok_or(DecryptError::Failed)?;
   let tag = &data[sep..];
 
   // The actual ciphertext, called plaintext because it is reused in place.
@@ -431,12 +433,15 @@ fn decrypt_aes_ocb(
     return Err(DecryptError::InvalidTagLength);
   }
 
-  // OCB supports nonce sizes from 1 to 15 bytes (recommended: 12 bytes)
-  if iv.is_empty() || iv.len() > 15 {
+  // As in encrypt_aes_ocb: `Ocb3` takes 12-byte nonces only.
+  if iv.len() != 12 {
     return Err(DecryptError::InvalidIvLength);
   }
 
-  let sep = data.len() - (tag_length / 8);
+  let sep = data
+    .len()
+    .checked_sub(tag_length / 8)
+    .ok_or(DecryptError::Failed)?;
   let tag_bytes = &data[sep..];
 
   // The actual ciphertext, called plaintext because it is reused in place.

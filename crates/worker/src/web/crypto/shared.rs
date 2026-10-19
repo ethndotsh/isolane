@@ -1,9 +1,11 @@
 // Copyright 2018-2026 the Deno authors. MIT license.
+// Ported from Deno's ext/crypto/shared.rs (denoland/deno@eb4061f6f367) to
+// isolane's ops: see mod.rs.
 
 use std::borrow::Cow;
 
-use deno_core::JsBuffer;
-use deno_core::ToJsBuffer;
+use super::bridge::JsBuffer;
+use super::bridge::ToJsBuffer;
 use elliptic_curve::sec1::ToEncodedPoint;
 use p256::pkcs8::DecodePrivateKey;
 use rsa::RsaPrivateKey;
@@ -145,8 +147,7 @@ impl V8RawKeyData {
           .map_err(|_| SharedError::ExpectedValidPrivateECKey)?;
         Ok(signing_key.public_key().to_encoded_point(false))
       }
-      // Should never reach here.
-      V8RawKeyData::Secret(_) => unreachable!(),
+      V8RawKeyData::Secret(_) => Err(SharedError::ExpectedPublicKey),
     }
   }
 
@@ -162,8 +163,7 @@ impl V8RawKeyData {
           .map_err(|_| SharedError::ExpectedValidPrivateECKey)?;
         Ok(signing_key.public_key().to_encoded_point(false))
       }
-      // Should never reach here.
-      V8RawKeyData::Secret(_) => unreachable!(),
+      V8RawKeyData::Secret(_) => Err(SharedError::ExpectedPublicKey),
     }
   }
 
@@ -182,8 +182,7 @@ impl V8RawKeyData {
           .map_err(|_| SharedError::ExpectedValidPrivateECKey)?;
         Ok(signing_key.public_key().to_encoded_point(false))
       }
-      // Should never reach here.
-      V8RawKeyData::Secret(_) => unreachable!(),
+      V8RawKeyData::Secret(_) => Err(SharedError::ExpectedPublicKey),
     }
   }
 

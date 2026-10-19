@@ -1,11 +1,12 @@
 // Copyright 2018-2026 the Deno authors. MIT license.
+// Ported from Deno's ext/crypto/export_key.rs (denoland/deno@eb4061f6f367) to
+// isolane's ops: see mod.rs.
 
 use base64::Engine;
 use base64::prelude::BASE64_URL_SAFE_NO_PAD;
 use const_oid::AssociatedOid;
 use const_oid::ObjectIdentifier;
-use deno_core::ToJsBuffer;
-use deno_core::op2;
+use super::bridge::ToJsBuffer;
 use elliptic_curve::sec1::ToEncodedPoint;
 use p256::pkcs8::DecodePrivateKey;
 use rsa::pkcs1::der::Decode;
@@ -18,7 +19,7 @@ use spki::AlgorithmIdentifierOwned;
 use spki::der::asn1;
 use spki::der::asn1::BitString;
 
-use crate::shared::*;
+use super::shared::*;
 
 #[derive(Debug, thiserror::Error, deno_error::JsError)]
 pub enum ExportKeyError {
@@ -32,9 +33,6 @@ pub enum ExportKeyError {
   #[class(generic)]
   #[error(transparent)]
   Der(#[from] spki::der::Error),
-  #[class("DOMExceptionNotSupportedError")]
-  #[error("Unsupported named curve")]
-  UnsupportedNamedCurve,
 }
 
 #[derive(Deserialize)]
@@ -109,11 +107,9 @@ pub enum ExportKeyResult {
   },
 }
 
-#[op2]
-#[serde]
 pub fn op_crypto_export_key(
-  #[serde] opts: ExportKeyOptions,
-  #[serde] key_data: V8RawKeyData,
+  opts: ExportKeyOptions,
+  key_data: V8RawKeyData,
 ) -> Result<ExportKeyResult, ExportKeyError> {
   match opts.algorithm {
     ExportKeyAlgorithm::RsassaPkcs1v15 {}
@@ -154,11 +150,11 @@ fn export_key_rsa(
           // It MUST have ASN.1 type NULL.
           parameters: Some(asn1::AnyRef::from(asn1::Null)),
         },
-        subject_public_key: BitString::from_bytes(subject_public_key).unwrap(),
+        subject_public_key: BitString::from_bytes(subject_public_key)?,
       };
 
       // Infallible because we know the public key is valid.
-      let spki_der = key_info.to_der().unwrap();
+      let spki_der = key_info.to_der()?;
       Ok(ExportKeyResult::Spki(spki_der.into()))
     }
     ExportKeyFormat::Pkcs8 => {
@@ -311,10 +307,10 @@ fn export_key_ec(
       // the SPKI structure
       let key_info = spki::SubjectPublicKeyInfo {
         algorithm: alg_id,
-        subject_public_key: BitString::from_bytes(&subject_public_key).unwrap(),
+        subject_public_key: BitString::from_bytes(&subject_public_key)?,
       };
 
-      let spki_der = key_info.to_der().unwrap();
+      let spki_der = key_info.to_der()?;
 
       Ok(ExportKeyResult::Spki(spki_der.into()))
     }

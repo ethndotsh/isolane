@@ -1,4 +1,4 @@
-// The web platform globals (WinterTC Minimum Common API, phases 1–3), defined
+// The web platform globals (WinterTC Minimum Common API, phases 1–4), defined
 // non-enumerable like Deno's 98_global_scope_shared.js. Called once per
 // context by the worker:
 //   (bootstrap) => { configure(baseUrl), materialize() }
@@ -10,8 +10,6 @@
   "use strict";
   const { core, primordials } = bootstrap;
   const {
-    ArrayBufferIsView,
-    ArrayPrototypeIncludes,
     ObjectDefineProperty,
     ObjectFreeze,
     ObjectHasOwn,
@@ -19,8 +17,6 @@
     PromisePrototypeThen,
     PromiseResolve,
     TypeError,
-    TypedArrayPrototypeGetByteLength,
-    TypedArrayPrototypeGetSymbolToStringTag,
   } = primordials;
   const load = core.loadExtScript;
   const g = globalThis;
@@ -264,48 +260,11 @@
     define("location", ObjectFreeze(loc));
   }
 
-  const INTEGER_ARRAYS = [
-    "Int8Array",
-    "Uint8Array",
-    "Uint8ClampedArray",
-    "Int16Array",
-    "Uint16Array",
-    "Int32Array",
-    "Uint32Array",
-    "BigInt64Array",
-    "BigUint64Array",
-  ];
-  define(
-    "crypto",
-    ObjectFreeze({
-      __proto__: null,
-      getRandomValues(array) {
-        if (!ArrayBufferIsView(array)) {
-          throw new TypeError("Failed to execute 'getRandomValues' on 'Crypto': parameter 1 is not of type 'ArrayBufferView'.");
-        }
-        const tag = TypedArrayPrototypeGetSymbolToStringTag(array);
-        if (!ArrayPrototypeIncludes(INTEGER_ARRAYS, tag)) {
-          const { DOMException } = load(DOM_EXCEPTION_JS);
-          throw new DOMException(
-            "The provided ArrayBufferView is not an integer array type",
-            "TypeMismatchError",
-          );
-        }
-        if (TypedArrayPrototypeGetByteLength(array) > 65536) {
-          // WebCrypto leaves quota and requested null.
-          const { QuotaExceededError } = load(DOM_EXCEPTION_JS);
-          throw new QuotaExceededError(
-            "The ArrayBufferView's byte length exceeds the number of bytes of entropy available via this API (65536)",
-          );
-        }
-        core.getRandomValues(array);
-        return array;
-      },
-      randomUUID() {
-        return core.randomUUID();
-      },
-    }),
-  );
+  // Web Crypto: Deno's (crypto.getRandomValues, randomUUID, and subtle).
+  const CRYPTO_JS = "ext:deno_crypto/00_crypto.js";
+  for (const name of ["crypto", "Crypto", "CryptoKey", "SubtleCrypto"]) {
+    lazy(name, from(CRYPTO_JS, name));
+  }
 
   // Every lazy global, resolved now (for the snapshot). Accessing one
   // replaces its accessor with the value; the EventTarget methods turn the
@@ -324,6 +283,7 @@
     "Headers", "FormData", "Request", "Response", "fetch", "structuredClone",
     "MessageChannel", "MessagePort", "MessageEvent",
     "performance", "Performance", "PerformanceEntry", "PerformanceMark", "PerformanceMeasure",
+    "crypto", "Crypto", "CryptoKey", "SubtleCrypto",
   ];
   function materialize() {
     for (const name of LAZY) void g[name];

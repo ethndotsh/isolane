@@ -1,9 +1,10 @@
 // Copyright 2018-2026 the Deno authors. MIT license.
+// Ported from Deno's ext/crypto/import_key.rs (denoland/deno@eb4061f6f367) to
+// isolane's ops: see mod.rs.
 
 use base64::Engine;
-use deno_core::JsBuffer;
-use deno_core::ToJsBuffer;
-use deno_core::op2;
+use super::bridge::JsBuffer;
+use super::bridge::ToJsBuffer;
 use elliptic_curve::pkcs8::PrivateKeyInfo;
 use p256::pkcs8::EncodePrivateKey;
 use rsa::pkcs1::UintRef;
@@ -12,7 +13,7 @@ use serde::Deserialize;
 use serde::Serialize;
 use spki::der::Decode;
 
-use crate::shared::*;
+use super::shared::*;
 
 #[derive(Debug, thiserror::Error, deno_error::JsError)]
 #[class("DOMExceptionDataError")]
@@ -157,11 +158,9 @@ pub enum ImportKeyResult {
   Hmac { raw_data: RustRawKeyData },
 }
 
-#[op2]
-#[serde]
 pub fn op_crypto_import_key(
-  #[serde] opts: ImportKeyOptions,
-  #[serde] key_data: KeyData,
+  opts: ImportKeyOptions,
+  key_data: KeyData,
 ) -> Result<ImportKeyResult, ImportKeyError> {
   match opts {
     ImportKeyOptions::RsassaPkcs1v15 {} => import_key_rsassa(key_data),
@@ -268,7 +267,7 @@ fn import_key_rsa_jwk(
         public_exponent,
       })
     }
-    _ => unreachable!(),
+    _ => Err(ImportKeyError::InvalidKeyData),
   }
 }
 
@@ -617,7 +616,7 @@ fn import_key_ec_jwk(
         raw_data: RustRawKeyData::Private(pkcs8_der.as_bytes().to_vec().into()),
       })
     }
-    _ => unreachable!(),
+    _ => Err(ImportKeyError::InvalidKeyData),
   }
 }
 

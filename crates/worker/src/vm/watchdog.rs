@@ -125,6 +125,11 @@ impl Watchdog {
         deadline
     }
 
+    /// Has a budget run out since the last `arm`?
+    pub(super) fn fired(&self) -> bool {
+        self.state.lock().unwrap().fired != Fired::No
+    }
+
     /// Disarm; returns which budget ran out, if one did.
     pub(super) fn disarm(&self) -> Fired {
         let mut s = self.state.lock().unwrap();

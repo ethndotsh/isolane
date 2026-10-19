@@ -1,14 +1,17 @@
 // Copyright 2018-2026 the Deno authors. MIT license.
+// Ported from Deno's ext/crypto/ed25519.rs (denoland/deno@eb4061f6f367) to
+// isolane's ops: see mod.rs. Signing is ed25519-dalek's (pure Rust), not
+// aws-lc-rs's, and buffer lengths are checked before copying (a mismatch
+// would panic, which aborts the worker).
 
-use aws_lc_rs::signature::Ed25519KeyPair;
-use aws_lc_rs::signature::KeyPair;
 use base64::Engine;
 use base64::prelude::BASE64_URL_SAFE_NO_PAD;
-use deno_core::convert::Uint8Array;
-use deno_core::op2;
+use ed25519_dalek::Signer;
+use ed25519_dalek::SigningKey;
+use ed25519_dalek::Verifier;
+use ed25519_dalek::VerifyingKey;
 use elliptic_curve::pkcs8::PrivateKeyInfo;
-use rand::RngCore;
-use rand::rngs::OsRng;
+use rand_core::RngCore;
 use spki::der::Decode;
 use spki::der::Encode;
 use spki::der::asn1::BitString;
@@ -21,63 +24,73 @@ pub enum Ed25519Error {
   #[class(generic)]
   #[error(transparent)]
   Der(#[from] rsa::pkcs1::der::Error),
-  #[class(generic)]
-  #[error(transparent)]
-  KeyRejected(#[from] aws_lc_rs::error::KeyRejected),
+  #[class("DOMExceptionOperationError")]
+  #[error("Invalid key data")]
+  InvalidKey,
 }
 
-#[op2(fast)]
+/// A signing key from its 32-byte seed (the private key's bytes).
+fn signing_key(seed: &[u8]) -> Option<SigningKey> {
+  Some(SigningKey::from_bytes(seed.try_into().ok()?))
+}
+
 pub fn op_crypto_generate_ed25519_keypair(
-  #[buffer] pkey: &mut [u8],
-  #[buffer] pubkey: &mut [u8],
+  pkey: &mut [u8],
+  pubkey: &mut [u8],
 ) -> bool {
-  let mut rng = OsRng;
-  rng.fill_bytes(pkey);
+  if pkey.len() != 32 || pubkey.len() != 32 {
+    return false;
+  }
+  if super::IsolaneRng.try_fill_bytes(pkey).is_err() {
+    return false;
+  }
 
-  let pair = match Ed25519KeyPair::from_seed_unchecked(pkey) {
-    Ok(p) => p,
-    Err(_) => return false,
+  let Some(pair) = signing_key(pkey) else {
+    return false;
   };
-  pubkey.copy_from_slice(pair.public_key().as_ref());
+  pubkey.copy_from_slice(pair.verifying_key().as_bytes());
   true
 }
 
-#[op2(fast)]
 pub fn op_crypto_sign_ed25519(
-  #[buffer] key: &[u8],
-  #[buffer] data: &[u8],
-  #[buffer] signature: &mut [u8],
+  key: &[u8],
+  data: &[u8],
+  signature: &mut [u8],
 ) -> bool {
-  let pair = match Ed25519KeyPair::from_seed_unchecked(key) {
-    Ok(p) => p,
-    Err(_) => return false,
+  let Some(pair) = signing_key(key) else {
+    return false;
   };
-  signature.copy_from_slice(pair.sign(data).as_ref());
+  if signature.len() != 64 {
+    return false;
+  }
+  signature.copy_from_slice(&pair.sign(data).to_bytes());
   true
 }
 
-#[op2(fast)]
 pub fn op_crypto_verify_ed25519(
-  #[buffer] pubkey: &[u8],
-  #[buffer] data: &[u8],
-  #[buffer] signature: &[u8],
+  pubkey: &[u8],
+  data: &[u8],
+  signature: &[u8],
 ) -> bool {
-  aws_lc_rs::signature::UnparsedPublicKey::new(
-    &aws_lc_rs::signature::ED25519,
-    pubkey,
-  )
-  .verify(data, signature)
-  .is_ok()
+  let Ok(pubkey) = <&[u8; 32]>::try_from(pubkey) else {
+    return false;
+  };
+  let Ok(key) = VerifyingKey::from_bytes(pubkey) else {
+    return false;
+  };
+  let Ok(signature) = ed25519_dalek::Signature::from_slice(signature) else {
+    return false;
+  };
+  key.verify(data, &signature).is_ok()
 }
 
 // id-Ed25519 OBJECT IDENTIFIER ::= { 1 3 101 112 }
 pub const ED25519_OID: const_oid::ObjectIdentifier =
   const_oid::ObjectIdentifier::new_unwrap("1.3.101.112");
 
-#[op2(fast)]
 pub fn op_crypto_import_spki_ed25519(
-  #[buffer] key_data: &[u8],
-  #[buffer] out: &mut [u8],
+  key_data: &[u8],
+  out: &mut [u8],
 ) -> bool {
   // 2-3.
   let pk_info = match spki::SubjectPublicKeyInfoRef::try_from(key_data) {
@@ -93,14 +106,17 @@ pub fn op_crypto_import_spki_ed25519(
   if pk_info.algorithm.parameters.is_some() {
     return false;
   }
-  out.copy_from_slice(pk_info.subject_public_key.raw_bytes());
+  let key = pk_info.subject_public_key.raw_bytes();
+  if key.len() != out.len() {
+    return false;
+  }
+  out.copy_from_slice(key);
   true
 }
 
-#[op2(fast)]
 pub fn op_crypto_import_pkcs8_ed25519(
-  #[buffer] key_data: &[u8],
-  #[buffer] out: &mut [u8],
+  key_data: &[u8],
+  out: &mut [u8],
 ) -> bool {
   // 2-3.
   // This should probably use OneAsymmetricKey instead
@@ -119,17 +135,16 @@ pub fn op_crypto_import_pkcs8_ed25519(
   }
   // 6.
   // CurvePrivateKey ::= OCTET STRING
-  if pk_info.private_key.len() != 34 {
+  if pk_info.private_key.len() != 34 || out.len() != 32 {
     return false;
   }
   out.copy_from_slice(&pk_info.private_key[2..]);
   true
 }
 
-#[op2]
 pub fn op_crypto_export_spki_ed25519(
-  #[buffer] pubkey: &[u8],
-) -> Result<Uint8Array, Ed25519Error> {
+  pubkey: &[u8],
+) -> Result<Vec<u8>, Ed25519Error> {
   let key_info = spki::SubjectPublicKeyInfo {
     algorithm: spki::AlgorithmIdentifierOwned {
       // id-Ed25519
@@ -141,15 +156,13 @@ pub fn op_crypto_export_spki_ed25519(
   Ok(
     key_info
       .to_der()
-      .map_err(|_| Ed25519Error::FailedExport)?
-      .into(),
+      .map_err(|_| Ed25519Error::FailedExport)?,
   )
 }
 
-#[op2]
 pub fn op_crypto_export_pkcs8_ed25519(
-  #[buffer] pkey: &[u8],
-) -> Result<Uint8Array, Ed25519Error> {
+  pkey: &[u8],
+) -> Result<Vec<u8>, Ed25519Error> {
   use rsa::pkcs1::der::Encode;
 
   // This should probably use OneAsymmetricKey instead
@@ -165,16 +178,12 @@ pub fn op_crypto_export_pkcs8_ed25519(
 
   let mut buf = Vec::new();
   pk_info.encode_to_vec(&mut buf)?;
-  Ok(buf.into())
+  Ok(buf)
 }
 
 // 'x' from Section 2 of RFC 8037
 // https://www.rfc-editor.org/rfc/rfc8037#section-2
-#[op2]
-#[string]
-pub fn op_crypto_jwk_x_ed25519(
-  #[buffer] pkey: &[u8],
-) -> Result<String, Ed25519Error> {
-  let pair = Ed25519KeyPair::from_seed_unchecked(pkey)?;
-  Ok(BASE64_URL_SAFE_NO_PAD.encode(pair.public_key().as_ref()))
+pub fn op_crypto_jwk_x_ed25519(pkey: &[u8]) -> Result<String, Ed25519Error> {
+  let pair = signing_key(pkey).ok_or(Ed25519Error::InvalidKey)?;
+  Ok(BASE64_URL_SAFE_NO_PAD.encode(pair.verifying_key().as_bytes()))
 }
