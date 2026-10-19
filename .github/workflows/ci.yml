@@ -53,8 +53,30 @@ jobs:
       - name: GN args for V8
         run: echo "GN_ARGS=$(scripts/gn-args.sh)" >>"$GITHUB_ENV"
 
-      - name: Fetch rusty_v8
+      # The rusty_v8 + V8 checkout changes only when its pins or our patches
+      # do, so it's cached: a hit means no traffic to Chromium's git host,
+      # which often fails CI runners with 5xx errors. (The Rust toolchain
+      # inside it is in the V8 build cache instead.)
+      - name: Restore rusty_v8 sources
+        id: v8-src
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            build/rusty_v8
+            !build/rusty_v8/third_party/rust-toolchain
+          key: rusty-v8-src-${{ hashFiles('scripts/fetch-rusty-v8.sh', 'patches/**') }}
+
+      - name: Fetch rusty_v8 (when not cached)
         run: scripts/fetch-rusty-v8.sh
+
+      - name: Save rusty_v8 sources
+        if: steps.v8-src.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            build/rusty_v8
+            !build/rusty_v8/third_party/rust-toolchain
+          key: rusty-v8-src-${{ hashFiles('scripts/fetch-rusty-v8.sh', 'patches/**') }}
 
       - name: Restore V8 build
         id: v8-cache
