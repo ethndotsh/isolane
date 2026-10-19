@@ -1,0 +1,1763 @@
+{
+  "wptCommit": "c47791d69da614474168c0f6c1ad9a1dbd0cf0d3",
+  "reasons": {
+    "no-shared-memory": {
+      "category": "by-design",
+      "reason": "isolane removes SharedArrayBuffer and Atomics (no shared-memory timers for side channels), so tests that build one fail."
+    },
+    "no-wasm": {
+      "category": "by-design",
+      "reason": "WebAssembly is off unless an isolate enables `wasm`; these tests use WebAssembly.Memory to make buffers, and this run leaves it off."
+    },
+    "not-worker-scope": {
+      "category": "by-design",
+      "reason": "The global is a plain ECMAScript global with the WinterTC APIs, not a browser WorkerGlobalScope, which idlharness.js requires to start."
+    },
+    "tentative-owning-streams": {
+      "category": "by-design",
+      "reason": "Tentative \"owning\" streams and transfer lists, not in the Streams standard yet; isolane implements the published standards."
+    },
+    "no-xhr": {
+      "category": "browser-only",
+      "reason": "XMLHttpRequest is a browser API; WinterTC runtimes (isolane, Deno, workerd) provide fetch instead."
+    },
+    "no-cache-api": {
+      "category": "browser-only",
+      "reason": "The Cache API (`caches`) is browser storage, not part of WinterTC's minimum common API."
+    },
+    "no-video-frame": {
+      "category": "browser-only",
+      "reason": "VideoFrame (WebCodecs) is a browser media API."
+    },
+    "forbidden-headers": {
+      "category": "browser-only",
+      "reason": "Forbidden request headers and method-override headers protect a browser user's session; server runtimes (Deno, workerd) let code set them, and so does isolane."
+    },
+    "cors-and-origin": {
+      "category": "browser-only",
+      "reason": "CORS, the no-cors/same-origin modes, opaque responses, and the Origin header enforce the same-origin policy between a page's origin and others; there's no page origin to protect here (as in Deno and workerd)."
+    },
+    "referrer": {
+      "category": "browser-only",
+      "reason": "Referrer policy derives the Referer header from a document; isolane sends none (as Deno and workerd)."
+    },
+    "manual-redirect": {
+      "category": "browser-only",
+      "reason": "With redirect: 'manual', isolane returns the real 3xx response (as Deno and workerd), not an opaque-redirect filtered for a page's cross-origin protection."
+    },
+    "http-cache": {
+      "category": "browser-only",
+      "reason": "No HTTP cache: server runtimes go to the network every time (cache modes are accepted and ignored), so cache hit counts differ."
+    },
+    "set-cookie": {
+      "category": "browser-only",
+      "reason": "Set-Cookie is readable from response headers (as in Deno and workerd); browsers hide it from scripts."
+    },
+    "request-window": {
+      "category": "browser-only",
+      "reason": "RequestInit's `window` only means something with a browsing context."
+    },
+    "no-tls": {
+      "category": "environment",
+      "reason": "The WPT server here runs without TLS, so https URLs don't connect."
+    },
+    "no-h2": {
+      "category": "environment",
+      "reason": "No HTTP/2 server in the harness; .h2 tests need one."
+    },
+    "node-http-parser": {
+      "category": "environment",
+      "reason": "The broker's HTTP client (Node's) refuses response bytes Fetch allows (control characters in header values, bare LF line endings in .asis responses); isolane keeps Node's strict parser rather than loosening how it parses untrusted servers."
+    },
+    "http2-retry": {
+      "category": "environment",
+      "reason": "Retrying a 421 on a new connection is HTTP/2 connection-coalescing behaviour of a browser's network stack."
+    },
+    "wpt-proxy": {
+      "category": "environment",
+      "reason": "Uses WPT's proxy for a fake host (bad-port.wpt), which this harness doesn't run; the fetch policy also refuses that host."
+    },
+    "lazy-globals": {
+      "category": "bug",
+      "reason": "Web platform globals are installed as lazy getters (so unused APIs cost nothing), but WebIDL wants data properties. Fixed when the startup snapshot makes eager installation free (roadmap: startup snapshot)."
+    },
+    "message-channel": {
+      "category": "bug",
+      "reason": "No MessageChannel/MessagePort (or structuredClone transfer), so tests that use one to detach buffers fail (roadmap: MessageChannel and transfer)."
+    },
+    "decompression-trailing": {
+      "category": "bug",
+      "reason": "DecompressionStream with trailing data after the end of the stream stalls instead of erroring (roadmap: DecompressionStream trailing input)."
+    },
+    "compression-format": {
+      "category": "bug",
+      "reason": "CompressionStream/DecompressionStream edge cases: output for tiny repetitive inputs is larger than browsers', and a truncated or corrupt deflate stream isn't always detected (roadmap: compression conformance)."
+    },
+    "encoding-edge": {
+      "category": "bug",
+      "reason": "encoding_rs differs from the Encoding standard for EUC-JP's state after a fatal streaming error (roadmap: encoding conformance)."
+    },
+    "url-crate": {
+      "category": "bug",
+      "reason": "The `url` crate lags the newest URL-standard changes (spaces before ?/# in opaque paths, file URLs with Windows drive letters and backslashes, xn-- hosts, some setters) (roadmap: url crate)."
+    },
+    "event-attrs": {
+      "category": "bug",
+      "reason": "Event.timeStamp is always 0 and isTrusted isn't an own unforgeable attribute (Deno's vendored events, same in Deno) (roadmap: Event attributes)."
+    },
+    "sri": {
+      "category": "bug",
+      "reason": "Subresource Integrity (`integrity`) isn't checked (same in Deno) (roadmap: fetch integrity)."
+    },
+    "request-attrs": {
+      "category": "bug",
+      "reason": "Request lacks destination, isReloadNavigation, isHistoryNavigation, and duplex, doesn't validate `duplex`, and accepts credentials in the URL (Deno's vendored Request) (roadmap: Request attributes)."
+    },
+    "request-streaming": {
+      "category": "bug",
+      "reason": "Request bodies are buffered before sending, so streaming-upload rules (HTTP/1.1 refusal, keepalive with a stream body) don't apply (roadmap: streamed request bodies)."
+    },
+    "body-edge": {
+      "category": "bug",
+      "reason": "Response/Request body edge cases from Deno's vendored classes: BYOB readers on non-byte bodies, an Object.prototype.then injection, UTF-16 JSON, and an empty FormData serialized as text (roadmap: body conformance)."
+    },
+    "streams-edge": {
+      "category": "bug",
+      "reason": "Streams edge cases from Deno's vendored implementation: enqueue() calling the write algorithm synchronously, enqueue after detaching a BYOB buffer, byobRequest after a patched then(), a transformer.cancel() error race (roadmap: streams conformance)."
+    },
+    "structured-clone-edge": {
+      "category": "bug",
+      "reason": "structuredClone doesn't keep a resizable ArrayBuffer's maxByteLength or reject out-of-bounds views (roadmap: structured clone)."
+    }
+  },
+  "files": {
+    "FileAPI/blob/Blob-constructor-detached-buffer.any.js": {
+      "why": "message-channel",
+      "subtests": {
+        "Blob from a detached ArrayBufferView should be empty": "FAIL",
+        "Blob from a detached ArrayBufferView with offset should be empty": "FAIL",
+        "Blob from a detached ArrayBuffer should be empty": "FAIL",
+        "Blob from a detached ArrayBufferView mixed with string, detached part ignored": "FAIL"
+      }
+    },
+    "FileAPI/blob/Blob-constructor.any.js": {
+      "why": "message-channel",
+      "subtests": {
+        "Passing a FrozenArray as the blobParts array should work (FrozenArray<MessagePort>).": "FAIL"
+      }
+    },
+    "FileAPI/url/url-with-xhr.any.js": {
+      "why": "no-xhr",
+      "subtests": {
+        "Blob URLs can be used in XHR": "FAIL",
+        "XHR with a fragment should succeed": "FAIL",
+        "XHR of a revoked URL should fail": "FAIL",
+        "Only exact matches should revoke URLs, using XHR": "FAIL",
+        "Appending a query string should cause XHR to fail": "FAIL",
+        "Appending a path should cause XHR to fail": "FAIL",
+        "XHR with method \"HEAD\" should fail": "FAIL",
+        "XHR with method \"POST\" should fail": "FAIL",
+        "XHR with method \"DELETE\" should fail": "FAIL",
+        "XHR with method \"OPTIONS\" should fail": "FAIL",
+        "XHR with method \"PUT\" should fail": "FAIL",
+        "XHR with method \"CUSTOM\" should fail": "FAIL",
+        "XHR should return Content-Type from Blob": "FAIL",
+        "Revoke blob URL after open(), will fetch": "FAIL"
+      }
+    },
+    "compression/compression-bad-chunks.any.js": {
+      "why": "no-wasm",
+      "subtests": {
+        "chunk of type SharedArrayBuffer should error the stream for deflate": "FAIL",
+        "chunk of type shared Uint8Array should error the stream for deflate": "FAIL",
+        "chunk of type SharedArrayBuffer should error the stream for deflate-raw": "FAIL",
+        "chunk of type shared Uint8Array should error the stream for deflate-raw": "FAIL",
+        "chunk of type SharedArrayBuffer should error the stream for gzip": "FAIL",
+        "chunk of type shared Uint8Array should error the stream for gzip": "FAIL",
+        "chunk of type SharedArrayBuffer should error the stream for brotli": "FAIL",
+        "chunk of type shared Uint8Array should error the stream for brotli": "FAIL"
+      }
+    },
+    "compression/compression-output-length.any.js": {
+      "why": "compression-format",
+      "subtests": {
+        "the length of deflate data should be shorter than that of the original data": "FAIL",
+        "the length of gzip data should be shorter than that of the original data": "FAIL"
+      }
+    },
+    "compression/decompression-bad-chunks.any.js": {
+      "why": "no-wasm",
+      "subtests": {
+        "chunk of type SharedArrayBuffer should error the stream for deflate": "FAIL",
+        "chunk of type shared Uint8Array should error the stream for deflate": "FAIL",
+        "chunk of type SharedArrayBuffer should error the stream for deflate-raw": "FAIL",
+        "chunk of type shared Uint8Array should error the stream for deflate-raw": "FAIL",
+        "chunk of type SharedArrayBuffer should error the stream for gzip": "FAIL",
+        "chunk of type shared Uint8Array should error the stream for gzip": "FAIL",
+        "chunk of type SharedArrayBuffer should error the stream for brotli": "FAIL",
+        "chunk of type shared Uint8Array should error the stream for brotli": "FAIL"
+      }
+    },
+    "compression/decompression-corrupt-input.any.js": {
+      "why": "compression-format",
+      "subtests": {
+        "truncating the input for 'deflate' should give an error": "FAIL",
+        "format 'deflate' field DATA should be error for 5": "FAIL"
+      }
+    },
+    "compression/decompression-extra-input.any.js": {
+      "status": "ERROR",
+      "why": "decompression-trailing"
+    },
+    "compression/idlharness.https.any.js": {
+      "why": "not-worker-scope",
+      "subtests": {
+        "idl_test setup": "FAIL"
+      }
+    },
+    "dom/events/Event-constructors.any.js": {
+      "why": "event-attrs",
+      "subtests": {
+        "Event-constructors 3": "FAIL",
+        "Event-constructors 4": "FAIL"
+      }
+    },
+    "dom/events/Event-isTrusted.any.js": {
+      "why": "event-attrs",
+      "subtests": {
+        "Event-isTrusted": "FAIL"
+      }
+    },
+    "encoding/encodeInto.any.js": {
+      "subtests": {
+        "encodeInto() into SharedArrayBuffer with Hi and destination length 0, offset 0, filler 0": {
+          "status": "FAIL",
+          "why": "no-shared-memory"
+        },
+        "encodeInto() into SharedArrayBuffer with Hi and destination length 0, offset 4, filler 0": {
+          "status": "FAIL",
+          "why": "no-shared-memory"
+        },
+        "encodeInto() into SharedArrayBuffer with Hi and destination length 0, offset 0, filler 128": {
+          "status": "FAIL",
+          "why": "no-shared-memory"
+        },
+        "encodeInto() into SharedArrayBuffer with Hi and destination length 0, offset 4, filler 128": {
+          "status": "FAIL",
+          "why": "no-shared-memory"
+        },
+        "encodeInto() into SharedArrayBuffer with Hi and destination length 0, offset 0, filler random": {
+          "status": "FAIL",
+          "why": "no-shared-memory"
+        },
+        "encodeInto() into SharedArrayBuffer with Hi and destination length 0, offset 4, filler random": {
+          "status": "FAIL",
+          "why": "no-shared-memory"
+        },
+        "encodeInto() into SharedArrayBuffer with A and destination length 10, offset 0, filler 0": {
+          "status": "FAIL",
+          "why": "no-shared-memory"
+        },
+        "encodeInto() into SharedArrayBuffer with A and destination length 10, offset 4, filler 0": {
+          "status": "FAIL",
+          "why": "no-shared-memory"
+        },
+        "encodeInto() into SharedArrayBuffer with A and destination length 10, offset 0, filler 128": {
+          "status": "FAIL",
+          "why": "no-shared-memory"
+        },
+        "encodeInto() into SharedArrayBuffer with A and destination length 10, offset 4, filler 128": {
+          "status": "FAIL",
+          "why": "no-shared-memory"
+        },
+        "encodeInto() into SharedArrayBuffer with A and destination length 10, offset 0, filler random": {
+          "status": "FAIL",
+          "why": "no-shared-memory"
+        },
+        "encodeInto() into SharedArrayBuffer with A and destination length 10, offset 4, filler random": {
+          "status": "FAIL",
+          "why": "no-shared-memory"
+        },
+        "encodeInto() into SharedArrayBuffer with \ud834\udf06 and destination length 4, offset 0, filler 0": {
+          "status": "FAIL",
+          "why": "no-shared-memory"
+        },
+        "encodeInto() into SharedArrayBuffer with \ud834\udf06 and destination length 4, offset 4, filler 0": {
+          "status": "FAIL",
+          "why": "no-shared-memory"
+        },
+        "encodeInto() into SharedArrayBuffer with \ud834\udf06 and destination length 4, offset 0, filler 128": {
+          "status": "FAIL",
+          "why": "no-shared-memory"
+        },
+        "encodeInto() into SharedArrayBuffer with \ud834\udf06 and destination length 4, offset 4, filler 128": {
+          "status": "FAIL",
+          "why": "no-shared-memory"
+        },
+        "encodeInto() into SharedArrayBuffer with \ud834\udf06 and destination length 4, offset 0, filler random": {
+          "status": "FAIL",
+          "why": "no-shared-memory"
+        },
+        "encodeInto() into SharedArrayBuffer with \ud834\udf06 and destination length 4, offset 4, filler random": {
+          "status": "FAIL",
+          "why": "no-shared-memory"
+        },
+        "encodeInto() into SharedArrayBuffer with \ud834\udf06A and destination length 3, offset 0, filler 0": {
+          "status": "FAIL",
+          "why": "no-shared-memory"
+        },
+        "encodeInto() into SharedArrayBuffer with \ud834\udf06A and destination length 3, offset 4, filler 0": {
+          "status": "FAIL",
+          "why": "no-shared-memory"
+        },
+        "encodeInto() into SharedArrayBuffer with \ud834\udf06A and destination length 3, offset 0, filler 128": {
+          "status": "FAIL",
+          "why": "no-shared-memory"
+        },
+        "encodeInto() into SharedArrayBuffer with \ud834\udf06A and destination length 3, offset 4, filler 128": {
+          "status": "FAIL",
+          "why": "no-shared-memory"
+        },
+        "encodeInto() into SharedArrayBuffer with \ud834\udf06A and destination length 3, offset 0, filler random": {
+          "status": "FAIL",
+          "why": "no-shared-memory"
+        },
+        "encodeInto() into SharedArrayBuffer with \ud834\udf06A and destination length 3, offset 4, filler random": {
+          "status": "FAIL",
+          "why": "no-shared-memory"
+        },
+        "encodeInto() into SharedArrayBuffer with U+d834AU+df06A\u00a5Hi and destination length 10, offset 0, filler 0": {
+          "status": "FAIL",
+          "why": "no-shared-memory"
+        },
+        "encodeInto() into SharedArrayBuffer with U+d834AU+df06A\u00a5Hi and destination length 10, offset 4, filler 0": {
+          "status": "FAIL",
+          "why": "no-shared-memory"
+        },
+        "encodeInto() into SharedArrayBuffer with U+d834AU+df06A\u00a5Hi and destination length 10, offset 0, filler 128": {
+          "status": "FAIL",
+          "why": "no-shared-memory"
+        },
+        "encodeInto() into SharedArrayBuffer with U+d834AU+df06A\u00a5Hi and destination length 10, offset 4, filler 128": {
+          "status": "FAIL",
+          "why": "no-shared-memory"
+        },
+        "encodeInto() into SharedArrayBuffer with U+d834AU+df06A\u00a5Hi and destination length 10, offset 0, filler random": {
+          "status": "FAIL",
+          "why": "no-shared-memory"
+        },
+        "encodeInto() into SharedArrayBuffer with U+d834AU+df06A\u00a5Hi and destination length 10, offset 4, filler random": {
+          "status": "FAIL",
+          "why": "no-shared-memory"
+        },
+        "encodeInto() into SharedArrayBuffer with AU+df06 and destination length 4, offset 0, filler 0": {
+          "status": "FAIL",
+          "why": "no-shared-memory"
+        },
+        "encodeInto() into SharedArrayBuffer with AU+df06 and destination length 4, offset 4, filler 0": {
+          "status": "FAIL",
+          "why": "no-shared-memory"
+        },
+        "encodeInto() into SharedArrayBuffer with AU+df06 and destination length 4, offset 0, filler 128": {
+          "status": "FAIL",
+          "why": "no-shared-memory"
+        },
+        "encodeInto() into SharedArrayBuffer with AU+df06 and destination length 4, offset 4, filler 128": {
+          "status": "FAIL",
+          "why": "no-shared-memory"
+        },
+        "encodeInto() into SharedArrayBuffer with AU+df06 and destination length 4, offset 0, filler random": {
+          "status": "FAIL",
+          "why": "no-shared-memory"
+        },
+        "encodeInto() into SharedArrayBuffer with AU+df06 and destination length 4, offset 4, filler random": {
+          "status": "FAIL",
+          "why": "no-shared-memory"
+        },
+        "encodeInto() into SharedArrayBuffer with \u00a5\u00a5 and destination length 4, offset 0, filler 0": {
+          "status": "FAIL",
+          "why": "no-shared-memory"
+        },
+        "encodeInto() into SharedArrayBuffer with \u00a5\u00a5 and destination length 4, offset 4, filler 0": {
+          "status": "FAIL",
+          "why": "no-shared-memory"
+        },
+        "encodeInto() into SharedArrayBuffer with \u00a5\u00a5 and destination length 4, offset 0, filler 128": {
+          "status": "FAIL",
+          "why": "no-shared-memory"
+        },
+        "encodeInto() into SharedArrayBuffer with \u00a5\u00a5 and destination length 4, offset 4, filler 128": {
+          "status": "FAIL",
+          "why": "no-shared-memory"
+        },
+        "encodeInto() into SharedArrayBuffer with \u00a5\u00a5 and destination length 4, offset 0, filler random": {
+          "status": "FAIL",
+          "why": "no-shared-memory"
+        },
+        "encodeInto() into SharedArrayBuffer with \u00a5\u00a5 and destination length 4, offset 4, filler random": {
+          "status": "FAIL",
+          "why": "no-shared-memory"
+        },
+        "Invalid encodeInto() destination: DataView, backed by: SharedArrayBuffer": {
+          "status": "FAIL",
+          "why": "no-shared-memory"
+        },
+        "Invalid encodeInto() destination: Int8Array, backed by: SharedArrayBuffer": {
+          "status": "FAIL",
+          "why": "no-shared-memory"
+        },
+        "Invalid encodeInto() destination: Int16Array, backed by: SharedArrayBuffer": {
+          "status": "FAIL",
+          "why": "no-shared-memory"
+        },
+        "Invalid encodeInto() destination: Int32Array, backed by: SharedArrayBuffer": {
+          "status": "FAIL",
+          "why": "no-shared-memory"
+        },
+        "Invalid encodeInto() destination: Uint16Array, backed by: SharedArrayBuffer": {
+          "status": "FAIL",
+          "why": "no-shared-memory"
+        },
+        "Invalid encodeInto() destination: Uint32Array, backed by: SharedArrayBuffer": {
+          "status": "FAIL",
+          "why": "no-shared-memory"
+        },
+        "Invalid encodeInto() destination: Uint8ClampedArray, backed by: SharedArrayBuffer": {
+          "status": "FAIL",
+          "why": "no-shared-memory"
+        },
+        "Invalid encodeInto() destination: BigInt64Array, backed by: SharedArrayBuffer": {
+          "status": "FAIL",
+          "why": "no-shared-memory"
+        },
+        "Invalid encodeInto() destination: BigUint64Array, backed by: SharedArrayBuffer": {
+          "status": "FAIL",
+          "why": "no-shared-memory"
+        },
+        "Invalid encodeInto() destination: Float16Array, backed by: SharedArrayBuffer": {
+          "status": "FAIL",
+          "why": "no-shared-memory"
+        },
+        "Invalid encodeInto() destination: Float32Array, backed by: SharedArrayBuffer": {
+          "status": "FAIL",
+          "why": "no-shared-memory"
+        },
+        "Invalid encodeInto() destination: Float64Array, backed by: SharedArrayBuffer": {
+          "status": "FAIL",
+          "why": "no-shared-memory"
+        },
+        "encodeInto() and a detached output buffer": {
+          "status": "FAIL",
+          "why": "message-channel"
+        }
+      }
+    },
+    "encoding/idlharness.any.js": {
+      "why": "not-worker-scope",
+      "subtests": {
+        "idl_test setup": "FAIL"
+      }
+    },
+    "encoding/replacement-encodings.any.js": {
+      "why": "no-xhr",
+      "subtests": {
+        "csiso2022kr - non-empty input decodes to one replacement character.": "FAIL",
+        "csiso2022kr - empty input decodes to empty output.": "FAIL",
+        "hz-gb-2312 - non-empty input decodes to one replacement character.": "FAIL",
+        "hz-gb-2312 - empty input decodes to empty output.": "FAIL",
+        "iso-2022-cn - non-empty input decodes to one replacement character.": "FAIL",
+        "iso-2022-cn - empty input decodes to empty output.": "FAIL",
+        "iso-2022-cn-ext - non-empty input decodes to one replacement character.": "FAIL",
+        "iso-2022-cn-ext - empty input decodes to empty output.": "FAIL",
+        "iso-2022-kr - non-empty input decodes to one replacement character.": "FAIL",
+        "iso-2022-kr - empty input decodes to empty output.": "FAIL",
+        "replacement - non-empty input decodes to one replacement character.": "FAIL",
+        "replacement - empty input decodes to empty output.": "FAIL"
+      }
+    },
+    "encoding/streams/decode-utf8.any.js": {
+      "status": "ERROR",
+      "why": "no-shared-memory"
+    },
+    "encoding/textdecoder-copy.any.js": {
+      "why": "no-shared-memory",
+      "subtests": {
+        "Modify buffer after passing it in (SharedArrayBuffer)": "FAIL"
+      }
+    },
+    "encoding/textdecoder-mistakes.any.js": {
+      "why": "encoding-edge",
+      "subtests": {
+        "EUC-JP JIS0212 state after a fatal streaming error": "FAIL"
+      }
+    },
+    "encoding/textdecoder-streaming.any.js": {
+      "why": "no-shared-memory",
+      "subtests": {
+        "Streaming decode: utf-8, 1 byte window (SharedArrayBuffer)": "FAIL",
+        "Streaming decode: utf-8, 2 byte window (SharedArrayBuffer)": "FAIL",
+        "Streaming decode: utf-8, 3 byte window (SharedArrayBuffer)": "FAIL",
+        "Streaming decode: utf-8, 4 byte window (SharedArrayBuffer)": "FAIL",
+        "Streaming decode: utf-8, 5 byte window (SharedArrayBuffer)": "FAIL",
+        "Streaming decode: utf-16le, 1 byte window (SharedArrayBuffer)": "FAIL",
+        "Streaming decode: utf-16le, 2 byte window (SharedArrayBuffer)": "FAIL",
+        "Streaming decode: utf-16le, 3 byte window (SharedArrayBuffer)": "FAIL",
+        "Streaming decode: utf-16le, 4 byte window (SharedArrayBuffer)": "FAIL",
+        "Streaming decode: utf-16le, 5 byte window (SharedArrayBuffer)": "FAIL",
+        "Streaming decode: utf-16be, 1 byte window (SharedArrayBuffer)": "FAIL",
+        "Streaming decode: utf-16be, 2 byte window (SharedArrayBuffer)": "FAIL",
+        "Streaming decode: utf-16be, 3 byte window (SharedArrayBuffer)": "FAIL",
+        "Streaming decode: utf-16be, 4 byte window (SharedArrayBuffer)": "FAIL",
+        "Streaming decode: utf-16be, 5 byte window (SharedArrayBuffer)": "FAIL",
+        "Streaming decode: UTF-8 chunk tests (SharedArrayBuffer)": "FAIL"
+      }
+    },
+    "encoding/unsupported-encodings.any.js": {
+      "why": "no-xhr",
+      "subtests": {
+        "UTF-7 should not be supported": "FAIL",
+        "utf-7 should not be supported": "FAIL",
+        "UTF-32 with BOM should decode as UTF-16LE": "FAIL",
+        "UTF-32 with no BOM should decode as UTF-8": "FAIL",
+        "utf-32 with BOM should decode as UTF-16LE": "FAIL",
+        "utf-32 with no BOM should decode as UTF-8": "FAIL",
+        "UTF-32LE with BOM should decode as UTF-16LE": "FAIL",
+        "UTF-32LE with no BOM should decode as UTF-8": "FAIL",
+        "utf-32le with BOM should decode as UTF-16LE": "FAIL",
+        "utf-32le with no BOM should decode as UTF-8": "FAIL",
+        "UTF-32be with no BOM should decode as UTF-8": "FAIL",
+        "UTF-32be with BOM should decode as UTF-8": "FAIL",
+        "utf-32be with no BOM should decode as UTF-8": "FAIL",
+        "utf-32be with BOM should decode as UTF-8": "FAIL"
+      }
+    },
+    "fetch/api/abort/cache.https.any.js": {
+      "why": "no-cache-api",
+      "subtests": {
+        "Signals are not stored in the cache API": "FAIL",
+        "Signals are not stored in the cache API, even if they're already aborted": "FAIL"
+      }
+    },
+    "fetch/api/basic/conditional-get.any.js": {
+      "why": "http-cache",
+      "subtests": {
+        "Testing conditional GET with ETags": "FAIL"
+      }
+    },
+    "fetch/api/basic/header-value-combining.any.js": {
+      "why": "node-http-parser",
+      "subtests": {
+        "response.headers.get('content-length') expects 0": "FAIL",
+        "response.headers.get('content-length') expects 0, 0": "FAIL",
+        "response.headers.get('double-trouble') expects , ": "FAIL",
+        "response.headers.get('foo-test') expects 1, 2, 3": "FAIL",
+        "response.headers.get('heya') expects , \u000b\f, 1, , , 2": "FAIL",
+        "response.headers.get('www-authenticate') expects 1, 2, 3, 4": "FAIL"
+      }
+    },
+    "fetch/api/basic/integrity.sub.any.js": {
+      "subtests": {
+        "Invalid integrity": {
+          "status": "FAIL",
+          "why": "sri"
+        },
+        "Multiple integrities: invalid stronger than valid": {
+          "status": "FAIL",
+          "why": "sri"
+        },
+        "Multiple integrities: both are invalid": {
+          "status": "FAIL",
+          "why": "sri"
+        },
+        "CORS invalid integrity": {
+          "status": "FAIL",
+          "why": "cors-and-origin"
+        },
+        "Empty string integrity for opaque response": {
+          "status": "FAIL",
+          "why": "no-tls"
+        }
+      }
+    },
+    "fetch/api/basic/mode-no-cors.sub.any.js": {
+      "subtests": {
+        "Fetch https://localhost:{HTTPS_PORT}/fetch/api/resources/top.txt with no-cors mode": {
+          "status": "FAIL",
+          "why": "no-tls"
+        },
+        "Fetch http://localhost:{HTTP_PORT2}/fetch/api/resources/top.txt with no-cors mode": {
+          "status": "FAIL",
+          "why": "cors-and-origin"
+        }
+      }
+    },
+    "fetch/api/basic/mode-same-origin.any.js": {
+      "why": "cors-and-origin",
+      "subtests": {
+        "Fetch http://127.0.0.1:{HTTP_PORT}/fetch/api/resources/top.txt with same-origin mode": "FAIL",
+        "Fetch /fetch/api/basic/../resources/redirect.py?location=http://127.0.0.1:{HTTP_PORT}/fetch/api/resources/top.txt with same-origin mode": "FAIL"
+      }
+    },
+    "fetch/api/basic/referrer.any.js": {
+      "why": "referrer",
+      "subtests": {
+        "origin-when-cross-origin policy on a same-origin URL": "FAIL",
+        "origin-when-cross-origin policy on a cross-origin URL": "FAIL",
+        "origin-when-cross-origin policy on a cross-origin URL after same-origin redirection": "FAIL",
+        "origin-when-cross-origin policy on a same-origin URL after cross-origin redirection": "FAIL",
+        "Referrer with credentials should be stripped": "FAIL",
+        "Referrer with fragment ID should be stripped": "FAIL"
+      }
+    },
+    "fetch/api/basic/request-forbidden-headers.any.js": {
+      "why": "forbidden-headers",
+      "subtests": {
+        "Accept-Charset is a forbidden request header": "FAIL",
+        "Accept-Encoding is a forbidden request header": "FAIL",
+        "Access-Control-Request-Headers is a forbidden request header": "FAIL",
+        "Access-Control-Request-Method is a forbidden request header": "FAIL",
+        "Connection is a forbidden request header": "FAIL",
+        "Cookie is a forbidden request header": "FAIL",
+        "Cookie2 is a forbidden request header": "FAIL",
+        "Date is a forbidden request header": "FAIL",
+        "DNT is a forbidden request header": "FAIL",
+        "Expect is a forbidden request header": "FAIL",
+        "Origin is a forbidden request header": "FAIL",
+        "Referer is a forbidden request header": "FAIL",
+        "Via is a forbidden request header": "FAIL",
+        "Proxy- is a forbidden request header": "FAIL",
+        "Proxy-Test is a forbidden request header": "FAIL",
+        "Sec- is a forbidden request header": "FAIL",
+        "Sec-Test is a forbidden request header": "FAIL",
+        "header x-http-method-override is forbidden to use value TRACE": "FAIL",
+        "header x-http-method is forbidden to use value TRACE": "FAIL",
+        "header x-method-override is forbidden to use value TRACE": "FAIL",
+        "header X-HTTP-METHOD-OVERRIDE is forbidden to use value TRACE": "FAIL",
+        "header X-HTTP-METHOD is forbidden to use value TRACE": "FAIL",
+        "header X-METHOD-OVERRIDE is forbidden to use value TRACE": "FAIL",
+        "header x-http-method-override is forbidden to use value TRACK": "FAIL",
+        "header x-http-method is forbidden to use value TRACK": "FAIL",
+        "header x-method-override is forbidden to use value TRACK": "FAIL",
+        "header X-HTTP-METHOD-OVERRIDE is forbidden to use value TRACK": "FAIL",
+        "header X-HTTP-METHOD is forbidden to use value TRACK": "FAIL",
+        "header X-METHOD-OVERRIDE is forbidden to use value TRACK": "FAIL",
+        "header x-http-method-override is forbidden to use value CONNECT": "FAIL",
+        "header x-http-method is forbidden to use value CONNECT": "FAIL",
+        "header x-method-override is forbidden to use value CONNECT": "FAIL",
+        "header X-HTTP-METHOD-OVERRIDE is forbidden to use value CONNECT": "FAIL",
+        "header X-HTTP-METHOD is forbidden to use value CONNECT": "FAIL",
+        "header X-METHOD-OVERRIDE is forbidden to use value CONNECT": "FAIL",
+        "header x-http-method-override is forbidden to use value trace": "FAIL",
+        "header x-http-method is forbidden to use value trace": "FAIL",
+        "header x-method-override is forbidden to use value trace": "FAIL",
+        "header X-HTTP-METHOD-OVERRIDE is forbidden to use value trace": "FAIL",
+        "header X-HTTP-METHOD is forbidden to use value trace": "FAIL",
+        "header X-METHOD-OVERRIDE is forbidden to use value trace": "FAIL",
+        "header x-http-method-override is forbidden to use value track": "FAIL",
+        "header x-http-method is forbidden to use value track": "FAIL",
+        "header x-method-override is forbidden to use value track": "FAIL",
+        "header X-HTTP-METHOD-OVERRIDE is forbidden to use value track": "FAIL",
+        "header X-HTTP-METHOD is forbidden to use value track": "FAIL",
+        "header X-METHOD-OVERRIDE is forbidden to use value track": "FAIL",
+        "header x-http-method-override is forbidden to use value connect": "FAIL",
+        "header x-http-method is forbidden to use value connect": "FAIL",
+        "header x-method-override is forbidden to use value connect": "FAIL",
+        "header X-HTTP-METHOD-OVERRIDE is forbidden to use value connect": "FAIL",
+        "header X-HTTP-METHOD is forbidden to use value connect": "FAIL",
+        "header X-METHOD-OVERRIDE is forbidden to use value connect": "FAIL",
+        "header x-http-method-override is forbidden to use value trace,": "FAIL",
+        "header x-http-method is forbidden to use value trace,": "FAIL",
+        "header x-method-override is forbidden to use value trace,": "FAIL",
+        "header X-HTTP-METHOD-OVERRIDE is forbidden to use value trace,": "FAIL",
+        "header X-HTTP-METHOD is forbidden to use value trace,": "FAIL",
+        "header X-METHOD-OVERRIDE is forbidden to use value trace,": "FAIL"
+      }
+    },
+    "fetch/api/basic/request-headers.any.js": {
+      "why": "cors-and-origin",
+      "subtests": {
+        "Fetch with PUT without body": "FAIL",
+        "Fetch with PUT with body": "FAIL",
+        "Fetch with POST without body": "FAIL",
+        "Fetch with POST with text body": "FAIL",
+        "Fetch with POST with FormData body": "FAIL",
+        "Fetch with POST with URLSearchParams body": "FAIL",
+        "Fetch with POST with Blob body": "FAIL",
+        "Fetch with POST with ArrayBuffer body": "FAIL",
+        "Fetch with POST with Uint8Array body": "FAIL",
+        "Fetch with POST with Int8Array body": "FAIL",
+        "Fetch with POST with Float16Array body": "FAIL",
+        "Fetch with POST with Float32Array body": "FAIL",
+        "Fetch with POST with Float64Array body": "FAIL",
+        "Fetch with POST with DataView body": "FAIL",
+        "Fetch with POST with Blob body with mime type": "FAIL",
+        "Fetch with Chicken": "FAIL",
+        "Fetch with Chicken with body": "FAIL",
+        "Fetch with POST and mode \"same-origin\" needs an Origin header": "FAIL",
+        "Fetch with POST and mode \"no-cors\" needs an Origin header": "FAIL",
+        "Fetch with PUT and mode \"same-origin\" needs an Origin header": "FAIL",
+        "Fetch with TacO and mode \"same-origin\" needs an Origin header": "FAIL",
+        "Fetch with TacO and mode \"cors\" needs an Origin header": "FAIL"
+      }
+    },
+    "fetch/api/basic/request-referrer.any.js": {
+      "why": "referrer",
+      "subtests": {
+        "about:client referrer": "FAIL",
+        "url referrer": "FAIL"
+      }
+    },
+    "fetch/api/basic/request-upload-421.any.js": {
+      "why": "http2-retry",
+      "subtests": {
+        "Fetch with POST with text body on 421 response should be retried once on new connection.": "FAIL"
+      }
+    },
+    "fetch/api/basic/request-upload.any.js": {
+      "why": "request-streaming",
+      "subtests": {
+        "Streaming upload shouldn't work on Http/1.1.": "FAIL"
+      }
+    },
+    "fetch/api/basic/request-upload.h2.any.js": {
+      "status": "ERROR",
+      "why": "no-h2"
+    },
+    "fetch/api/basic/status.h2.any.js": {
+      "why": "no-h2",
+      "subtests": {
+        "statusText over H2 for status 200 should be the empty string": "FAIL",
+        "statusText over H2 for status 210 should be the empty string": "FAIL",
+        "statusText over H2 for status 400 should be the empty string": "FAIL",
+        "statusText over H2 for status 404 should be the empty string": "FAIL",
+        "statusText over H2 for status 410 should be the empty string": "FAIL",
+        "statusText over H2 for status 500 should be the empty string": "FAIL",
+        "statusText over H2 for status 502 should be the empty string": "FAIL"
+      }
+    },
+    "fetch/api/headers/header-setcookie.any.js": {
+      "why": "set-cookie",
+      "subtests": {
+        "Set-Cookie is a forbidden response header": "FAIL"
+      }
+    },
+    "fetch/api/headers/header-values-normalize.any.js": {
+      "why": "node-http-parser",
+      "subtests": {
+        "fetch() with value %01": "FAIL",
+        "fetch() with value %02": "FAIL",
+        "fetch() with value %03": "FAIL",
+        "fetch() with value %04": "FAIL",
+        "fetch() with value %05": "FAIL",
+        "fetch() with value %06": "FAIL",
+        "fetch() with value %07": "FAIL",
+        "fetch() with value %08": "FAIL",
+        "fetch() with value %0E": "FAIL",
+        "fetch() with value %0F": "FAIL",
+        "fetch() with value %10": "FAIL",
+        "fetch() with value %11": "FAIL",
+        "fetch() with value %12": "FAIL",
+        "fetch() with value %13": "FAIL",
+        "fetch() with value %14": "FAIL",
+        "fetch() with value %15": "FAIL",
+        "fetch() with value %16": "FAIL",
+        "fetch() with value %17": "FAIL",
+        "fetch() with value %18": "FAIL",
+        "fetch() with value %19": "FAIL",
+        "fetch() with value %1A": "FAIL",
+        "fetch() with value %1B": "FAIL",
+        "fetch() with value %1C": "FAIL",
+        "fetch() with value %1D": "FAIL",
+        "fetch() with value %1E": "FAIL",
+        "fetch() with value %1F": "FAIL"
+      }
+    },
+    "fetch/api/headers/header-values.any.js": {
+      "why": "node-http-parser",
+      "subtests": {
+        "fetch() with all valid values": "FAIL"
+      }
+    },
+    "fetch/api/headers/headers-forbidden-override.any.js": {
+      "why": "forbidden-headers",
+      "subtests": {
+        "header x-http-method-override is forbidden to use value TRACE": "FAIL",
+        "header x-http-method is forbidden to use value TRACE": "FAIL",
+        "header x-method-override is forbidden to use value TRACE": "FAIL",
+        "header X-HTTP-METHOD-OVERRIDE is forbidden to use value TRACE": "FAIL",
+        "header X-HTTP-METHOD is forbidden to use value TRACE": "FAIL",
+        "header X-METHOD-OVERRIDE is forbidden to use value TRACE": "FAIL",
+        "header x-http-method-override is forbidden to use value TRACK": "FAIL",
+        "header x-http-method is forbidden to use value TRACK": "FAIL",
+        "header x-method-override is forbidden to use value TRACK": "FAIL",
+        "header X-HTTP-METHOD-OVERRIDE is forbidden to use value TRACK": "FAIL",
+        "header X-HTTP-METHOD is forbidden to use value TRACK": "FAIL",
+        "header X-METHOD-OVERRIDE is forbidden to use value TRACK": "FAIL",
+        "header x-http-method-override is forbidden to use value CONNECT": "FAIL",
+        "header x-http-method is forbidden to use value CONNECT": "FAIL",
+        "header x-method-override is forbidden to use value CONNECT": "FAIL",
+        "header X-HTTP-METHOD-OVERRIDE is forbidden to use value CONNECT": "FAIL",
+        "header X-HTTP-METHOD is forbidden to use value CONNECT": "FAIL",
+        "header X-METHOD-OVERRIDE is forbidden to use value CONNECT": "FAIL",
+        "header x-http-method-override is forbidden to use value trace": "FAIL",
+        "header x-http-method is forbidden to use value trace": "FAIL",
+        "header x-method-override is forbidden to use value trace": "FAIL",
+        "header X-HTTP-METHOD-OVERRIDE is forbidden to use value trace": "FAIL",
+        "header X-HTTP-METHOD is forbidden to use value trace": "FAIL",
+        "header X-METHOD-OVERRIDE is forbidden to use value trace": "FAIL",
+        "header x-http-method-override is forbidden to use value track": "FAIL",
+        "header x-http-method is forbidden to use value track": "FAIL",
+        "header x-method-override is forbidden to use value track": "FAIL",
+        "header X-HTTP-METHOD-OVERRIDE is forbidden to use value track": "FAIL",
+        "header X-HTTP-METHOD is forbidden to use value track": "FAIL",
+        "header X-METHOD-OVERRIDE is forbidden to use value track": "FAIL",
+        "header x-http-method-override is forbidden to use value connect": "FAIL",
+        "header x-http-method is forbidden to use value connect": "FAIL",
+        "header x-method-override is forbidden to use value connect": "FAIL",
+        "header X-HTTP-METHOD-OVERRIDE is forbidden to use value connect": "FAIL",
+        "header X-HTTP-METHOD is forbidden to use value connect": "FAIL",
+        "header X-METHOD-OVERRIDE is forbidden to use value connect": "FAIL",
+        "header x-http-method-override is forbidden to use value \rtrace": "FAIL",
+        "header x-http-method is forbidden to use value \rtrace": "FAIL",
+        "header x-method-override is forbidden to use value \rtrace": "FAIL",
+        "header X-HTTP-METHOD-OVERRIDE is forbidden to use value \rtrace": "FAIL",
+        "header X-HTTP-METHOD is forbidden to use value \rtrace": "FAIL",
+        "header X-METHOD-OVERRIDE is forbidden to use value \rtrace": "FAIL",
+        "header x-http-method-override is forbidden to use value \ttrack": "FAIL",
+        "header x-http-method is forbidden to use value \ttrack": "FAIL",
+        "header x-method-override is forbidden to use value \ttrack": "FAIL",
+        "header X-HTTP-METHOD-OVERRIDE is forbidden to use value \ttrack": "FAIL",
+        "header X-HTTP-METHOD is forbidden to use value \ttrack": "FAIL",
+        "header X-METHOD-OVERRIDE is forbidden to use value \ttrack": "FAIL",
+        "header x-http-method-override is forbidden to use value \nconnect": "FAIL",
+        "header x-http-method is forbidden to use value \nconnect": "FAIL",
+        "header x-method-override is forbidden to use value \nconnect": "FAIL",
+        "header X-HTTP-METHOD-OVERRIDE is forbidden to use value \nconnect": "FAIL",
+        "header X-HTTP-METHOD is forbidden to use value \nconnect": "FAIL",
+        "header X-METHOD-OVERRIDE is forbidden to use value \nconnect": "FAIL",
+        "header x-http-method-override is forbidden to use value trace,": "FAIL",
+        "header x-http-method is forbidden to use value trace,": "FAIL",
+        "header x-method-override is forbidden to use value trace,": "FAIL",
+        "header X-HTTP-METHOD-OVERRIDE is forbidden to use value trace,": "FAIL",
+        "header X-HTTP-METHOD is forbidden to use value trace,": "FAIL",
+        "header X-METHOD-OVERRIDE is forbidden to use value trace,": "FAIL",
+        "header x-http-method-override is forbidden to use value GET,track ": "FAIL",
+        "header x-http-method is forbidden to use value GET,track ": "FAIL",
+        "header x-method-override is forbidden to use value GET,track ": "FAIL",
+        "header X-HTTP-METHOD-OVERRIDE is forbidden to use value GET,track ": "FAIL",
+        "header X-HTTP-METHOD is forbidden to use value GET,track ": "FAIL",
+        "header X-METHOD-OVERRIDE is forbidden to use value GET,track ": "FAIL",
+        "header x-http-method-override is forbidden to use value  connect": "FAIL",
+        "header x-http-method is forbidden to use value  connect": "FAIL",
+        "header x-method-override is forbidden to use value  connect": "FAIL",
+        "header X-HTTP-METHOD-OVERRIDE is forbidden to use value  connect": "FAIL",
+        "header X-HTTP-METHOD is forbidden to use value  connect": "FAIL",
+        "header X-METHOD-OVERRIDE is forbidden to use value  connect": "FAIL"
+      }
+    },
+    "fetch/api/headers/headers-no-cors.any.js": {
+      "why": "cors-and-origin",
+      "subtests": {
+        "Loading data\u2026": "FAIL",
+        "\"no-cors\" Headers object cannot have accept set to sssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssss, , sssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssss": "FAIL",
+        "\"no-cors\" Headers object cannot have accept-language set to sssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssss, , sssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssss": "FAIL",
+        "\"no-cors\" Headers object cannot have content-language set to sssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssss, , sssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssss": "FAIL",
+        "\"no-cors\" Headers object cannot have accept set to , sssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssss": "FAIL",
+        "\"no-cors\" Headers object cannot have accept-language set to , sssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssss": "FAIL",
+        "\"no-cors\" Headers object cannot have content-language set to , sssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssss": "FAIL",
+        "\"no-cors\" Headers object cannot have content-type set to text/plain;ssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssss, text/plain": "FAIL"
+      }
+    },
+    "fetch/api/redirect/redirect-back-to-original-origin.any.js": {
+      "why": "cors-and-origin",
+      "subtests": {
+        "original => remote => original with mode: \"no-cors\"": "FAIL",
+        "original => remote => original with mode: \"cors\"": "FAIL"
+      }
+    },
+    "fetch/api/redirect/redirect-empty-location.any.js": {
+      "why": "manual-redirect",
+      "subtests": {
+        "redirect response with empty Location, manual mode": "FAIL"
+      }
+    },
+    "fetch/api/redirect/redirect-location.any.js": {
+      "why": "manual-redirect",
+      "subtests": {
+        "Redirect 301 in \"manual\" mode without location": "FAIL",
+        "Redirect 301 in \"manual\" mode with valid location": "FAIL",
+        "Redirect 301 in \"manual\" mode with invalid location": "FAIL",
+        "Redirect 301 in \"manual\" mode with data location": "FAIL",
+        "Redirect 302 in \"manual\" mode without location": "FAIL",
+        "Redirect 302 in \"manual\" mode with valid location": "FAIL",
+        "Redirect 302 in \"manual\" mode with invalid location": "FAIL",
+        "Redirect 302 in \"manual\" mode with data location": "FAIL",
+        "Redirect 303 in \"manual\" mode without location": "FAIL",
+        "Redirect 303 in \"manual\" mode with valid location": "FAIL",
+        "Redirect 303 in \"manual\" mode with invalid location": "FAIL",
+        "Redirect 303 in \"manual\" mode with data location": "FAIL",
+        "Redirect 307 in \"manual\" mode without location": "FAIL",
+        "Redirect 307 in \"manual\" mode with valid location": "FAIL",
+        "Redirect 307 in \"manual\" mode with invalid location": "FAIL",
+        "Redirect 307 in \"manual\" mode with data location": "FAIL",
+        "Redirect 308 in \"manual\" mode without location": "FAIL",
+        "Redirect 308 in \"manual\" mode with valid location": "FAIL",
+        "Redirect 308 in \"manual\" mode with invalid location": "FAIL",
+        "Redirect 308 in \"manual\" mode with data location": "FAIL"
+      }
+    },
+    "fetch/api/redirect/redirect-mode.any.js": {
+      "subtests": {
+        "same-origin redirect 301 in manual redirect and cors mode": {
+          "status": "FAIL",
+          "why": "manual-redirect"
+        },
+        "same-origin redirect 301 in manual redirect and no-cors mode": {
+          "status": "FAIL",
+          "why": "manual-redirect"
+        },
+        "same-origin redirect 302 in manual redirect and cors mode": {
+          "status": "FAIL",
+          "why": "manual-redirect"
+        },
+        "same-origin redirect 302 in manual redirect and no-cors mode": {
+          "status": "FAIL",
+          "why": "manual-redirect"
+        },
+        "same-origin redirect 303 in manual redirect and cors mode": {
+          "status": "FAIL",
+          "why": "manual-redirect"
+        },
+        "same-origin redirect 303 in manual redirect and no-cors mode": {
+          "status": "FAIL",
+          "why": "manual-redirect"
+        },
+        "same-origin redirect 307 in manual redirect and cors mode": {
+          "status": "FAIL",
+          "why": "manual-redirect"
+        },
+        "same-origin redirect 307 in manual redirect and no-cors mode": {
+          "status": "FAIL",
+          "why": "manual-redirect"
+        },
+        "same-origin redirect 308 in manual redirect and cors mode": {
+          "status": "FAIL",
+          "why": "manual-redirect"
+        },
+        "same-origin redirect 308 in manual redirect and no-cors mode": {
+          "status": "FAIL",
+          "why": "manual-redirect"
+        },
+        "cross-origin redirect 301 in manual redirect and cors mode": {
+          "status": "FAIL",
+          "why": "manual-redirect"
+        },
+        "cross-origin redirect 301 in manual redirect and no-cors mode": {
+          "status": "FAIL",
+          "why": "manual-redirect"
+        },
+        "cross-origin redirect 301 in follow redirect and no-cors mode": {
+          "status": "FAIL",
+          "why": "cors-and-origin"
+        },
+        "cross-origin redirect 302 in manual redirect and cors mode": {
+          "status": "FAIL",
+          "why": "manual-redirect"
+        },
+        "cross-origin redirect 302 in manual redirect and no-cors mode": {
+          "status": "FAIL",
+          "why": "manual-redirect"
+        },
+        "cross-origin redirect 302 in follow redirect and no-cors mode": {
+          "status": "FAIL",
+          "why": "cors-and-origin"
+        },
+        "cross-origin redirect 303 in manual redirect and cors mode": {
+          "status": "FAIL",
+          "why": "manual-redirect"
+        },
+        "cross-origin redirect 303 in manual redirect and no-cors mode": {
+          "status": "FAIL",
+          "why": "manual-redirect"
+        },
+        "cross-origin redirect 303 in follow redirect and no-cors mode": {
+          "status": "FAIL",
+          "why": "cors-and-origin"
+        },
+        "cross-origin redirect 307 in manual redirect and cors mode": {
+          "status": "FAIL",
+          "why": "manual-redirect"
+        },
+        "cross-origin redirect 307 in manual redirect and no-cors mode": {
+          "status": "FAIL",
+          "why": "manual-redirect"
+        },
+        "cross-origin redirect 307 in follow redirect and no-cors mode": {
+          "status": "FAIL",
+          "why": "cors-and-origin"
+        },
+        "cross-origin redirect 308 in manual redirect and cors mode": {
+          "status": "FAIL",
+          "why": "manual-redirect"
+        },
+        "cross-origin redirect 308 in manual redirect and no-cors mode": {
+          "status": "FAIL",
+          "why": "manual-redirect"
+        },
+        "cross-origin redirect 308 in follow redirect and no-cors mode": {
+          "status": "FAIL",
+          "why": "cors-and-origin"
+        },
+        "manual redirect with a CORS error should be rejected": {
+          "status": "FAIL",
+          "why": "manual-redirect"
+        }
+      }
+    },
+    "fetch/api/redirect/redirect-origin.any.js": {
+      "why": "cors-and-origin",
+      "subtests": {
+        "[GET] Redirect 301 Same origin to other origin": "FAIL",
+        "[GET] Redirect 301 Other origin to other origin": "FAIL",
+        "[GET] Redirect 301 Other origin to same origin": "FAIL",
+        "[POST] Redirect 301 Same origin to other origin": "FAIL",
+        "[POST] Redirect 301 Other origin to other origin": "FAIL",
+        "[POST] Redirect 301 Other origin to same origin": "FAIL",
+        "[GET] Redirect 302 Same origin to other origin": "FAIL",
+        "[GET] Redirect 302 Other origin to other origin": "FAIL",
+        "[GET] Redirect 302 Other origin to same origin": "FAIL",
+        "[POST] Redirect 302 Same origin to other origin": "FAIL",
+        "[POST] Redirect 302 Other origin to other origin": "FAIL",
+        "[POST] Redirect 302 Other origin to same origin": "FAIL",
+        "[GET] Redirect 303 Same origin to other origin": "FAIL",
+        "[GET] Redirect 303 Other origin to other origin": "FAIL",
+        "[GET] Redirect 303 Other origin to same origin": "FAIL",
+        "[POST] Redirect 303 Same origin to other origin": "FAIL",
+        "[POST] Redirect 303 Other origin to other origin": "FAIL",
+        "[POST] Redirect 303 Other origin to same origin": "FAIL",
+        "[GET] Redirect 307 Same origin to other origin": "FAIL",
+        "[GET] Redirect 307 Other origin to other origin": "FAIL",
+        "[GET] Redirect 307 Other origin to same origin": "FAIL",
+        "[POST] Redirect 307 Same origin to other origin": "FAIL",
+        "[POST] Redirect 307 Other origin to other origin": "FAIL",
+        "[POST] Redirect 307 Other origin to same origin": "FAIL",
+        "[GET] Redirect 308 Same origin to other origin": "FAIL",
+        "[GET] Redirect 308 Other origin to other origin": "FAIL",
+        "[GET] Redirect 308 Other origin to same origin": "FAIL",
+        "[POST] Redirect 308 Same origin to other origin": "FAIL",
+        "[POST] Redirect 308 Other origin to other origin": "FAIL",
+        "[POST] Redirect 308 Other origin to same origin": "FAIL"
+      }
+    },
+    "fetch/api/redirect/redirect-referrer-override.any.js": {
+      "why": "referrer",
+      "subtests": {
+        "Same origin redirection, no-referrer-when-downgrade init, no-referrer-when-downgrade redirect header ": "FAIL",
+        "Cross origin redirection, no-referrer-when-downgrade init, no-referrer-when-downgrade redirect header ": "FAIL",
+        "Same origin redirection, no-referrer-when-downgrade init, origin redirect header ": "FAIL",
+        "Cross origin redirection, no-referrer-when-downgrade init, origin redirect header ": "FAIL",
+        "Same origin redirection, no-referrer-when-downgrade init, origin-when-cross-origin redirect header ": "FAIL",
+        "Cross origin redirection, no-referrer-when-downgrade init, origin-when-cross-origin redirect header ": "FAIL",
+        "Same origin redirection, no-referrer-when-downgrade init, same-origin redirect header ": "FAIL",
+        "Same origin redirection, no-referrer-when-downgrade init, strict-origin redirect header ": "FAIL",
+        "Cross origin redirection, no-referrer-when-downgrade init, strict-origin redirect header ": "FAIL",
+        "Same origin redirection, no-referrer-when-downgrade init, strict-origin-when-cross-origin redirect header ": "FAIL",
+        "Cross origin redirection, no-referrer-when-downgrade init, strict-origin-when-cross-origin redirect header ": "FAIL",
+        "Same origin redirection, no-referrer-when-downgrade init, unsafe-url redirect header ": "FAIL",
+        "Cross origin redirection, no-referrer-when-downgrade init, unsafe-url redirect header ": "FAIL",
+        "Same origin redirection, origin init, no-referrer-when-downgrade redirect header ": "FAIL",
+        "Cross origin redirection, origin init, no-referrer-when-downgrade redirect header ": "FAIL",
+        "Same origin redirection, origin init, origin redirect header ": "FAIL",
+        "Cross origin redirection, origin init, origin redirect header ": "FAIL",
+        "Same origin redirection, origin init, origin-when-cross-origin redirect header ": "FAIL",
+        "Cross origin redirection, origin init, origin-when-cross-origin redirect header ": "FAIL",
+        "Same origin redirection, origin init, same-origin redirect header ": "FAIL",
+        "Same origin redirection, origin init, strict-origin redirect header ": "FAIL",
+        "Cross origin redirection, origin init, strict-origin redirect header ": "FAIL",
+        "Same origin redirection, origin init, strict-origin-when-cross-origin redirect header ": "FAIL",
+        "Cross origin redirection, origin init, strict-origin-when-cross-origin redirect header ": "FAIL",
+        "Same origin redirection, origin init, unsafe-url redirect header ": "FAIL",
+        "Cross origin redirection, origin init, unsafe-url redirect header ": "FAIL",
+        "Same origin redirection, origin-when-cross-origin init, no-referrer-when-downgrade redirect header ": "FAIL",
+        "Cross origin redirection, origin-when-cross-origin init, no-referrer-when-downgrade redirect header ": "FAIL",
+        "Same origin redirection, origin-when-cross-origin init, origin redirect header ": "FAIL",
+        "Cross origin redirection, origin-when-cross-origin init, origin redirect header ": "FAIL",
+        "Same origin redirection, origin-when-cross-origin init, origin-when-cross-origin redirect header ": "FAIL",
+        "Cross origin redirection, origin-when-cross-origin init, origin-when-cross-origin redirect header ": "FAIL",
+        "Same origin redirection, origin-when-cross-origin init, same-origin redirect header ": "FAIL",
+        "Same origin redirection, origin-when-cross-origin init, strict-origin redirect header ": "FAIL",
+        "Cross origin redirection, origin-when-cross-origin init, strict-origin redirect header ": "FAIL",
+        "Same origin redirection, origin-when-cross-origin init, strict-origin-when-cross-origin redirect header ": "FAIL",
+        "Cross origin redirection, origin-when-cross-origin init, strict-origin-when-cross-origin redirect header ": "FAIL",
+        "Same origin redirection, origin-when-cross-origin init, unsafe-url redirect header ": "FAIL",
+        "Cross origin redirection, origin-when-cross-origin init, unsafe-url redirect header ": "FAIL",
+        "Same origin redirection, same-origin init, no-referrer-when-downgrade redirect header ": "FAIL",
+        "Cross origin redirection, same-origin init, no-referrer-when-downgrade redirect header ": "FAIL",
+        "Same origin redirection, same-origin init, origin redirect header ": "FAIL",
+        "Cross origin redirection, same-origin init, origin redirect header ": "FAIL",
+        "Same origin redirection, same-origin init, origin-when-cross-origin redirect header ": "FAIL",
+        "Cross origin redirection, same-origin init, origin-when-cross-origin redirect header ": "FAIL",
+        "Same origin redirection, same-origin init, same-origin redirect header ": "FAIL",
+        "Same origin redirection, same-origin init, strict-origin redirect header ": "FAIL",
+        "Cross origin redirection, same-origin init, strict-origin redirect header ": "FAIL",
+        "Same origin redirection, same-origin init, strict-origin-when-cross-origin redirect header ": "FAIL",
+        "Cross origin redirection, same-origin init, strict-origin-when-cross-origin redirect header ": "FAIL",
+        "Same origin redirection, same-origin init, unsafe-url redirect header ": "FAIL",
+        "Cross origin redirection, same-origin init, unsafe-url redirect header ": "FAIL",
+        "Same origin redirection, strict-origin init, no-referrer-when-downgrade redirect header ": "FAIL",
+        "Cross origin redirection, strict-origin init, no-referrer-when-downgrade redirect header ": "FAIL",
+        "Same origin redirection, strict-origin init, origin redirect header ": "FAIL",
+        "Cross origin redirection, strict-origin init, origin redirect header ": "FAIL",
+        "Same origin redirection, strict-origin init, origin-when-cross-origin redirect header ": "FAIL",
+        "Cross origin redirection, strict-origin init, origin-when-cross-origin redirect header ": "FAIL",
+        "Same origin redirection, strict-origin init, same-origin redirect header ": "FAIL",
+        "Same origin redirection, strict-origin init, strict-origin redirect header ": "FAIL",
+        "Cross origin redirection, strict-origin init, strict-origin redirect header ": "FAIL",
+        "Same origin redirection, strict-origin init, strict-origin-when-cross-origin redirect header ": "FAIL",
+        "Cross origin redirection, strict-origin init, strict-origin-when-cross-origin redirect header ": "FAIL",
+        "Same origin redirection, strict-origin init, unsafe-url redirect header ": "FAIL",
+        "Cross origin redirection, strict-origin init, unsafe-url redirect header ": "FAIL",
+        "Same origin redirection, strict-origin-when-cross-origin init, no-referrer-when-downgrade redirect header ": "FAIL",
+        "Cross origin redirection, strict-origin-when-cross-origin init, no-referrer-when-downgrade redirect header ": "FAIL",
+        "Same origin redirection, strict-origin-when-cross-origin init, origin redirect header ": "FAIL",
+        "Cross origin redirection, strict-origin-when-cross-origin init, origin redirect header ": "FAIL",
+        "Same origin redirection, strict-origin-when-cross-origin init, origin-when-cross-origin redirect header ": "FAIL",
+        "Cross origin redirection, strict-origin-when-cross-origin init, origin-when-cross-origin redirect header ": "FAIL",
+        "Same origin redirection, strict-origin-when-cross-origin init, same-origin redirect header ": "FAIL",
+        "Same origin redirection, strict-origin-when-cross-origin init, strict-origin redirect header ": "FAIL",
+        "Cross origin redirection, strict-origin-when-cross-origin init, strict-origin redirect header ": "FAIL",
+        "Same origin redirection, strict-origin-when-cross-origin init, strict-origin-when-cross-origin redirect header ": "FAIL",
+        "Cross origin redirection, strict-origin-when-cross-origin init, strict-origin-when-cross-origin redirect header ": "FAIL",
+        "Same origin redirection, strict-origin-when-cross-origin init, unsafe-url redirect header ": "FAIL",
+        "Cross origin redirection, strict-origin-when-cross-origin init, unsafe-url redirect header ": "FAIL",
+        "Same origin redirection, unsafe-url init, no-referrer-when-downgrade redirect header ": "FAIL",
+        "Cross origin redirection, unsafe-url init, no-referrer-when-downgrade redirect header ": "FAIL",
+        "Same origin redirection, unsafe-url init, origin redirect header ": "FAIL",
+        "Cross origin redirection, unsafe-url init, origin redirect header ": "FAIL",
+        "Same origin redirection, unsafe-url init, origin-when-cross-origin redirect header ": "FAIL",
+        "Cross origin redirection, unsafe-url init, origin-when-cross-origin redirect header ": "FAIL",
+        "Same origin redirection, unsafe-url init, same-origin redirect header ": "FAIL",
+        "Same origin redirection, unsafe-url init, strict-origin redirect header ": "FAIL",
+        "Cross origin redirection, unsafe-url init, strict-origin redirect header ": "FAIL",
+        "Same origin redirection, unsafe-url init, strict-origin-when-cross-origin redirect header ": "FAIL",
+        "Cross origin redirection, unsafe-url init, strict-origin-when-cross-origin redirect header ": "FAIL",
+        "Same origin redirection, unsafe-url init, unsafe-url redirect header ": "FAIL",
+        "Cross origin redirection, unsafe-url init, unsafe-url redirect header ": "FAIL"
+      }
+    },
+    "fetch/api/redirect/redirect-referrer.any.js": {
+      "why": "referrer",
+      "subtests": {
+        "Same origin redirection, empty init, unsafe-url redirect header ": "FAIL",
+        "Same origin redirection, empty init, no-referrer-when-downgrade redirect header ": "FAIL",
+        "Same origin redirection, empty init, same-origin redirect header ": "FAIL",
+        "Same origin redirection, empty init, origin redirect header ": "FAIL",
+        "Same origin redirection, empty init, origin-when-cross-origin redirect header ": "FAIL",
+        "Same origin redirection, empty init, strict-origin redirect header ": "FAIL",
+        "Same origin redirection, empty init, strict-origin-when-cross-origin redirect header ": "FAIL",
+        "Same origin redirection, empty redirect header, unsafe-url init ": "FAIL",
+        "Same origin redirection, empty redirect header, no-referrer-when-downgrade init ": "FAIL",
+        "Same origin redirection, empty redirect header, same-origin init ": "FAIL",
+        "Same origin redirection, empty redirect header, origin init ": "FAIL",
+        "Same origin redirection, empty redirect header, origin-when-cross-origin init ": "FAIL",
+        "Same origin redirection, empty redirect header, strict-origin init ": "FAIL",
+        "Same origin redirection, empty redirect header, strict-origin-when-cross-origin init ": "FAIL",
+        "Cross origin redirection, empty init, unsafe-url redirect header ": "FAIL",
+        "Cross origin redirection, empty init, no-referrer-when-downgrade redirect header ": "FAIL",
+        "Cross origin redirection, empty init, origin redirect header ": "FAIL",
+        "Cross origin redirection, empty init, origin-when-cross-origin redirect header ": "FAIL",
+        "Cross origin redirection, empty init, strict-origin redirect header ": "FAIL",
+        "Cross origin redirection, empty init, strict-origin-when-cross-origin redirect header ": "FAIL",
+        "Cross origin redirection, empty redirect header, unsafe-url init ": "FAIL",
+        "Cross origin redirection, empty redirect header, no-referrer-when-downgrade init ": "FAIL",
+        "Cross origin redirection, empty redirect header, origin init ": "FAIL",
+        "Cross origin redirection, empty redirect header, origin-when-cross-origin init ": "FAIL",
+        "Cross origin redirection, empty redirect header, strict-origin init ": "FAIL",
+        "Cross origin redirection, empty redirect header, strict-origin-when-cross-origin init ": "FAIL"
+      }
+    },
+    "fetch/api/redirect/redirect-upload.h2.any.js": {
+      "why": "no-h2",
+      "subtests": {
+        "Fetch upload streaming should be accepted on 303": "FAIL",
+        "Fetch upload streaming should fail on 301": "FAIL",
+        "Fetch upload streaming should fail on 302": "FAIL",
+        "Fetch upload streaming should fail on 307": "FAIL",
+        "Fetch upload streaming should fail on 308": "FAIL"
+      }
+    },
+    "fetch/api/request/request-bad-port.any.js": {
+      "why": "wpt-proxy",
+      "subtests": {
+        "Request on a port that is not bad should succeed through the proxy.": "FAIL"
+      }
+    },
+    "fetch/api/request/request-cache-default.any.js": {
+      "why": "http-cache",
+      "subtests": {
+        "RequestCache \"default\" mode checks the cache for previously cached content and avoids going to the network if a fresh response exists with Etag and fresh response": "FAIL",
+        "RequestCache \"default\" mode checks the cache for previously cached content and avoids going to the network if a fresh response exists with Last-Modified and fresh response": "FAIL"
+      }
+    },
+    "fetch/api/request/request-cache-force-cache.any.js": {
+      "why": "http-cache",
+      "subtests": {
+        "RequestCache \"force-cache\" mode checks the cache for previously cached content and avoid revalidation for stale responses with Etag and stale response": "FAIL",
+        "RequestCache \"force-cache\" mode checks the cache for previously cached content and avoid revalidation for stale responses with Last-Modified and stale response": "FAIL",
+        "RequestCache \"force-cache\" mode checks the cache for previously cached content and avoid revalidation for fresh responses with Etag and fresh response": "FAIL",
+        "RequestCache \"force-cache\" mode checks the cache for previously cached content and avoid revalidation for fresh responses with Last-Modified and fresh response": "FAIL",
+        "RequestCache \"force-cache\" stores the response in the cache if it goes to the network with Etag and fresh response": "FAIL",
+        "RequestCache \"force-cache\" stores the response in the cache if it goes to the network with Last-Modified and fresh response": "FAIL"
+      }
+    },
+    "fetch/api/request/request-cache-only-if-cached.any.js": {
+      "why": "http-cache",
+      "subtests": {
+        "RequestCache \"only-if-cached\" mode checks the cache for previously cached content and avoids revalidation for stale responses with Etag and stale response": "FAIL",
+        "RequestCache \"only-if-cached\" mode checks the cache for previously cached content and avoids revalidation for stale responses with Last-Modified and stale response": "FAIL",
+        "RequestCache \"only-if-cached\" mode checks the cache for previously cached content and avoids revalidation for fresh responses with Etag and fresh response": "FAIL",
+        "RequestCache \"only-if-cached\" mode checks the cache for previously cached content and avoids revalidation for fresh responses with Last-Modified and fresh response": "FAIL",
+        "RequestCache \"only-if-cached\" mode checks the cache for previously cached content and does not go to the network if a cached response is not found with Etag and fresh response": "FAIL",
+        "RequestCache \"only-if-cached\" mode checks the cache for previously cached content and does not go to the network if a cached response is not found with Last-Modified and fresh response": "FAIL",
+        "RequestCache \"only-if-cached\" (with \"same-origin\") uses cached same-origin redirects to same-origin content with Etag and fresh response": "FAIL",
+        "RequestCache \"only-if-cached\" (with \"same-origin\") uses cached same-origin redirects to same-origin content with Last-Modified and fresh response": "FAIL",
+        "RequestCache \"only-if-cached\" (with \"same-origin\") uses cached same-origin redirects to same-origin content with Etag and stale response": "FAIL",
+        "RequestCache \"only-if-cached\" (with \"same-origin\") uses cached same-origin redirects to same-origin content with Last-Modified and stale response": "FAIL",
+        "RequestCache \"only-if-cached\" (with \"same-origin\") does not follow redirects across origins and rejects with Etag and fresh response": "FAIL",
+        "RequestCache \"only-if-cached\" (with \"same-origin\") does not follow redirects across origins and rejects with Last-Modified and fresh response": "FAIL",
+        "RequestCache \"only-if-cached\" (with \"same-origin\") does not follow redirects across origins and rejects with Etag and stale response": "FAIL",
+        "RequestCache \"only-if-cached\" (with \"same-origin\") does not follow redirects across origins and rejects with Last-Modified and stale response": "FAIL"
+      }
+    },
+    "fetch/api/request/request-cache-reload.any.js": {
+      "why": "http-cache",
+      "subtests": {
+        "RequestCache \"reload\" mode does store the response in the cache with Etag and fresh response": "FAIL",
+        "RequestCache \"reload\" mode does store the response in the cache with Last-Modified and fresh response": "FAIL",
+        "RequestCache \"reload\" mode does store the response in the cache even if a previous response is already stored with Etag and fresh response": "FAIL",
+        "RequestCache \"reload\" mode does store the response in the cache even if a previous response is already stored with Last-Modified and fresh response": "FAIL"
+      }
+    },
+    "fetch/api/request/request-consume-empty.any.js": {
+      "why": "body-edge",
+      "subtests": {
+        "Consume empty FormData request body as text": "FAIL"
+      }
+    },
+    "fetch/api/request/request-error.any.js": {
+      "subtests": {
+        "RequestInit's window is not null": {
+          "status": "FAIL",
+          "why": "request-window"
+        },
+        "Input URL has credentials": {
+          "status": "FAIL",
+          "why": "request-attrs"
+        },
+        "RequestInit's mode is no-cors and method is not simple": {
+          "status": "FAIL",
+          "why": "cors-and-origin"
+        }
+      }
+    },
+    "fetch/api/request/request-headers.any.js": {
+      "subtests": {
+        "Adding invalid request header \"Accept-Charset: KO\"": {
+          "status": "FAIL",
+          "why": "forbidden-headers"
+        },
+        "Adding invalid request header \"accept-charset: KO\"": {
+          "status": "FAIL",
+          "why": "forbidden-headers"
+        },
+        "Adding invalid request header \"ACCEPT-ENCODING: KO\"": {
+          "status": "FAIL",
+          "why": "forbidden-headers"
+        },
+        "Adding invalid request header \"Accept-Encoding: KO\"": {
+          "status": "FAIL",
+          "why": "forbidden-headers"
+        },
+        "Adding invalid request header \"Access-Control-Request-Headers: KO\"": {
+          "status": "FAIL",
+          "why": "forbidden-headers"
+        },
+        "Adding invalid request header \"Access-Control-Request-Method: KO\"": {
+          "status": "FAIL",
+          "why": "forbidden-headers"
+        },
+        "Adding invalid request header \"Connection: KO\"": {
+          "status": "FAIL",
+          "why": "forbidden-headers"
+        },
+        "Adding invalid request header \"Content-Length: KO\"": {
+          "status": "FAIL",
+          "why": "forbidden-headers"
+        },
+        "Adding invalid request header \"Cookie: KO\"": {
+          "status": "FAIL",
+          "why": "forbidden-headers"
+        },
+        "Adding invalid request header \"Cookie2: KO\"": {
+          "status": "FAIL",
+          "why": "forbidden-headers"
+        },
+        "Adding invalid request header \"Date: KO\"": {
+          "status": "FAIL",
+          "why": "forbidden-headers"
+        },
+        "Adding invalid request header \"DNT: KO\"": {
+          "status": "FAIL",
+          "why": "forbidden-headers"
+        },
+        "Adding invalid request header \"Expect: KO\"": {
+          "status": "FAIL",
+          "why": "forbidden-headers"
+        },
+        "Adding invalid request header \"Host: KO\"": {
+          "status": "FAIL",
+          "why": "forbidden-headers"
+        },
+        "Adding invalid request header \"Keep-Alive: KO\"": {
+          "status": "FAIL",
+          "why": "forbidden-headers"
+        },
+        "Adding invalid request header \"Origin: KO\"": {
+          "status": "FAIL",
+          "why": "forbidden-headers"
+        },
+        "Adding invalid request header \"Referer: KO\"": {
+          "status": "FAIL",
+          "why": "forbidden-headers"
+        },
+        "Adding invalid request header \"Set-Cookie: KO\"": {
+          "status": "FAIL",
+          "why": "forbidden-headers"
+        },
+        "Adding invalid request header \"TE: KO\"": {
+          "status": "FAIL",
+          "why": "forbidden-headers"
+        },
+        "Adding invalid request header \"Trailer: KO\"": {
+          "status": "FAIL",
+          "why": "forbidden-headers"
+        },
+        "Adding invalid request header \"Transfer-Encoding: KO\"": {
+          "status": "FAIL",
+          "why": "forbidden-headers"
+        },
+        "Adding invalid request header \"Upgrade: KO\"": {
+          "status": "FAIL",
+          "why": "forbidden-headers"
+        },
+        "Adding invalid request header \"Via: KO\"": {
+          "status": "FAIL",
+          "why": "forbidden-headers"
+        },
+        "Adding invalid request header \"Proxy-: KO\"": {
+          "status": "FAIL",
+          "why": "forbidden-headers"
+        },
+        "Adding invalid request header \"proxy-a: KO\"": {
+          "status": "FAIL",
+          "why": "forbidden-headers"
+        },
+        "Adding invalid request header \"Sec-: KO\"": {
+          "status": "FAIL",
+          "why": "forbidden-headers"
+        },
+        "Adding invalid request header \"sec-b: KO\"": {
+          "status": "FAIL",
+          "why": "forbidden-headers"
+        },
+        "Adding invalid no-cors request header \"Content-Type: KO\"": {
+          "status": "FAIL",
+          "why": "cors-and-origin"
+        },
+        "Adding invalid no-cors request header \"Potato: KO\"": {
+          "status": "FAIL",
+          "why": "cors-and-origin"
+        },
+        "Adding invalid no-cors request header \"proxy: KO\"": {
+          "status": "FAIL",
+          "why": "cors-and-origin"
+        },
+        "Adding invalid no-cors request header \"proxya: KO\"": {
+          "status": "FAIL",
+          "why": "cors-and-origin"
+        },
+        "Adding invalid no-cors request header \"sec: KO\"": {
+          "status": "FAIL",
+          "why": "cors-and-origin"
+        },
+        "Adding invalid no-cors request header \"secb: KO\"": {
+          "status": "FAIL",
+          "why": "cors-and-origin"
+        },
+        "Adding invalid no-cors request header \"Empty-Value: \"": {
+          "status": "FAIL",
+          "why": "cors-and-origin"
+        },
+        "Check that request constructor is filtering headers provided as init parameter": {
+          "status": "FAIL",
+          "why": "forbidden-headers"
+        },
+        "Check that no-cors request constructor is filtering headers provided as init parameter": {
+          "status": "FAIL",
+          "why": "cors-and-origin"
+        },
+        "Check that no-cors request constructor is filtering headers provided as part of request parameter": {
+          "status": "FAIL",
+          "why": "cors-and-origin"
+        }
+      }
+    },
+    "fetch/api/request/request-init-stream.any.js": {
+      "why": "request-attrs",
+      "subtests": {
+        "It is error to omit .duplex when the body is a ReadableStream.": "FAIL",
+        "It is error to set .duplex = 'full' when the body is null.": "FAIL",
+        "It is error to set .duplex = 'full' when the body is a string.": "FAIL",
+        "It is error to set .duplex = 'full' when the body is a Uint8Array.": "FAIL",
+        "It is error to set .duplex = 'full' when the body is a Blob.": "FAIL",
+        "It is error to set .duplex = 'full' when the body is a ReadableStream.": "FAIL"
+      }
+    },
+    "fetch/api/request/request-keepalive.any.js": {
+      "why": "request-streaming",
+      "subtests": {
+        "keepalive flag with stream body": "FAIL"
+      }
+    },
+    "fetch/api/request/request-structure.any.js": {
+      "why": "request-attrs",
+      "subtests": {
+        "Check destination attribute": "FAIL",
+        "Check isReloadNavigation attribute": "FAIL",
+        "Check isHistoryNavigation attribute": "FAIL",
+        "Check duplex attribute": "FAIL"
+      }
+    },
+    "fetch/api/response/response-consume-empty.any.js": {
+      "why": "body-edge",
+      "subtests": {
+        "Consume empty FormData response body as text": "FAIL"
+      }
+    },
+    "fetch/api/response/response-consume-stream.any.js": {
+      "why": "body-edge",
+      "subtests": {
+        "Read text response's body as readableStream with mode=byob": "FAIL",
+        "Read URLSearchParams response's body as readableStream with mode=byob": "FAIL",
+        "Read array buffer response's body as readableStream with mode=byob": "FAIL",
+        "Reading with offset from Response stream": "FAIL"
+      }
+    },
+    "fetch/api/response/response-stream-with-broken-then.any.js": {
+      "why": "body-edge",
+      "subtests": {
+        "Attempt to inject {done: false, value: bye} via Object.prototype.then.": "FAIL",
+        "Attempt to inject value: undefined via Object.prototype.then.": "FAIL",
+        "Attempt to inject undefined via Object.prototype.then.": "FAIL",
+        "Attempt to inject 8.2 via Object.prototype.then.": "FAIL",
+        "intercepting arraybuffer to text conversion via Object.prototype.then should not be possible": "FAIL"
+      }
+    },
+    "hr-time/idlharness.any.js": {
+      "why": "not-worker-scope",
+      "subtests": {
+        "idl_test setup": "FAIL"
+      }
+    },
+    "html/webappapis/structured-clone/structured-clone.any.js": {
+      "subtests": {
+        "Resizable ArrayBuffer": {
+          "status": "FAIL",
+          "why": "structured-clone-edge"
+        },
+        "Growable SharedArrayBuffer": {
+          "status": "FAIL",
+          "why": "no-shared-memory"
+        },
+        "Serializing OOB TypedArray throws": {
+          "status": "FAIL",
+          "why": "structured-clone-edge"
+        },
+        "Serializing OOB DataView throws": {
+          "status": "FAIL",
+          "why": "structured-clone-edge"
+        },
+        "ArrayBuffer": {
+          "status": "FAIL",
+          "why": "structured-clone-edge"
+        },
+        "MessagePort": {
+          "status": "FAIL",
+          "why": "message-channel"
+        },
+        "ImageBitmap": {
+          "status": "FAIL",
+          "why": "structured-clone-edge"
+        },
+        "OffscreenCanvas": {
+          "status": "FAIL",
+          "why": "structured-clone-edge"
+        },
+        "A detached ArrayBuffer cannot be transferred": {
+          "status": "FAIL",
+          "why": "structured-clone-edge"
+        },
+        "A detached platform object cannot be transferred": {
+          "status": "FAIL",
+          "why": "message-channel"
+        },
+        "Transferring a non-transferable platform object fails": {
+          "status": "FAIL",
+          "why": "structured-clone-edge"
+        },
+        "An object whose interface is deleted from the global object must still be received": {
+          "status": "FAIL",
+          "why": "message-channel"
+        },
+        "A subclass instance will be received as its closest transferable superclass": {
+          "status": "PRECONDITION_FAILED",
+          "why": "structured-clone-edge"
+        },
+        "Resizable ArrayBuffer is transferable": {
+          "status": "FAIL",
+          "why": "structured-clone-edge"
+        },
+        "Length-tracking TypedArray is transferable": {
+          "status": "FAIL",
+          "why": "structured-clone-edge"
+        },
+        "Length-tracking DataView is transferable": {
+          "status": "FAIL",
+          "why": "structured-clone-edge"
+        },
+        "Transferring OOB TypedArray throws": {
+          "status": "FAIL",
+          "why": "structured-clone-edge"
+        },
+        "Transferring OOB DataView throws": {
+          "status": "FAIL",
+          "why": "structured-clone-edge"
+        }
+      }
+    },
+    "streams/idlharness.any.js": {
+      "why": "not-worker-scope",
+      "subtests": {
+        "idl_test setup": "FAIL"
+      }
+    },
+    "streams/piping/general-addition.any.js": {
+      "why": "streams-edge",
+      "subtests": {
+        "enqueue() must not synchronously call write algorithm": "FAIL"
+      }
+    },
+    "streams/readable-byte-streams/enqueue-with-detached-buffer.any.js": {
+      "why": "streams-edge",
+      "subtests": {
+        "enqueue after detaching byobRequest.view.buffer should throw": "FAIL"
+      }
+    },
+    "streams/readable-byte-streams/non-transferable-buffers.any.js": {
+      "why": "no-wasm",
+      "subtests": {
+        "ReadableStream with byte source: read() with a non-transferable buffer": "FAIL",
+        "ReadableStream with byte source: fill() with a non-transferable buffer": "FAIL",
+        "ReadableStream with byte source: enqueue() with a non-transferable buffer": "FAIL",
+        "ReadableStream with byte source: respondWithNewView() with a non-transferable buffer": "FAIL"
+      }
+    },
+    "streams/readable-byte-streams/patched-global.any.js": {
+      "why": "streams-edge",
+      "subtests": {
+        "Patched then() sees byobRequest after filling all pending pull-into descriptors": "FAIL"
+      }
+    },
+    "streams/readable-streams/owning-type-message-port.tentative.any.js": {
+      "why": "message-channel",
+      "subtests": {
+        "Transferred MessageChannel works as expected": "FAIL",
+        "Second branch of owning ReadableStream tee should end up into errors with transfer only values": "FAIL"
+      }
+    },
+    "streams/readable-streams/owning-type-video-frame.tentative.any.js": {
+      "why": "no-video-frame",
+      "subtests": {
+        "ReadableStream of type owning should close serialized chunks": "FAIL",
+        "ReadableStream of type owning should transfer JS chunks with transferred values": "FAIL",
+        "ReadableStream of type owning should error when trying to enqueue not serializable values": "FAIL",
+        "ReadableStream of type owning should clone serializable objects when teeing": "FAIL",
+        "ReadableStream of type owning should clone JS Objects with serializables when teeing": "FAIL"
+      }
+    },
+    "streams/readable-streams/owning-type.tentative.any.js": {
+      "why": "tentative-owning-streams",
+      "subtests": {
+        "ReadableStream can be constructed with owning type": "FAIL",
+        "ReadableStream of type owning should call start with a ReadableStreamDefaultController": "FAIL",
+        "ReadableStream should be able to call enqueue with an empty transfer list": "FAIL",
+        "ReadableStream should check transfer parameter": "FAIL",
+        "ReadableStream of type owning should transfer enqueued chunks": "FAIL"
+      }
+    },
+    "streams/transform-streams/cancel.any.js": {
+      "why": "streams-edge",
+      "subtests": {
+        "readable.cancel() and a parallel writable.close() should reject if a transformer.cancel() calls controller.error()": "FAIL"
+      }
+    },
+    "url/idlharness.any.js": {
+      "why": "lazy-globals",
+      "subtests": {
+        "URL interface: existence and properties of interface object": "FAIL"
+      }
+    },
+    "url/url-constructor.any.js?exclude=(file|javascript|mailto)": {
+      "why": "url-crate",
+      "subtests": {
+        "Parsing: <non-special:opaque  ?hi> without base": "FAIL",
+        "Parsing: <non-special:opaque  #hi> without base": "FAIL",
+        "Parsing: <non-special:opaque \t\t  \t#hi> without base": "FAIL",
+        "Parsing: <non-special:opaque \t\t  #hi> without base": "FAIL",
+        "Parsing: <non-special:opaque\t\t  \r #hi> without base": "FAIL",
+        "Parsing: <http://a.b.c.xn--pokxncvks> without base": "FAIL",
+        "Parsing: <http://10.0.0.xn--pokxncvks> without base": "FAIL",
+        "Parsing: <http://a.b.c.XN--pokxncvks> without base": "FAIL",
+        "Parsing: <http://a.b.c.Xn--pokxncvks> without base": "FAIL",
+        "Parsing: <http://10.0.0.XN--pokxncvks> without base": "FAIL",
+        "Parsing: <http://10.0.0.xN--pokxncvks> without base": "FAIL",
+        "Parsing: <..> against <abc://x/y/z/C:/>": "FAIL",
+        "Parsing: <non-spec:/.//> without base": "FAIL",
+        "Parsing: <non-spec:/..//> without base": "FAIL",
+        "Parsing: <non-spec:/a/..//> without base": "FAIL",
+        "Parsing: <non-spec:/.//path> without base": "FAIL",
+        "Parsing: <non-spec:/..//path> without base": "FAIL",
+        "Parsing: <non-spec:/a/..//path> without base": "FAIL",
+        "Parsing: </.//path> against <non-spec:/p>": "FAIL",
+        "Parsing: </..//path> against <non-spec:/p>": "FAIL",
+        "Parsing: <..//path> against <non-spec:/p>": "FAIL",
+        "Parsing: <a/..//path> against <non-spec:/p>": "FAIL",
+        "Parsing: <> against <non-spec:/..//p>": "FAIL",
+        "Parsing: <path> against <non-spec:/..//p>": "FAIL",
+        "Parsing: <foo://host/ !\"$%&'()*+,-./:;<=>@[\\]^_`{|}~> without base": "FAIL",
+        "Parsing: <wss://host/ !\"$%&'()*+,-./:;<=>@[\\]^_`{|}~> without base": "FAIL",
+        "Parsing: <https://xn--/> without base": "FAIL",
+        "Parsing: <///test> against <http://example.org/>": "FAIL",
+        "Parsing: <///\\//\\//test> against <http://example.org/>": "FAIL",
+        "Parsing: <///example.org/path> against <http://example.org/>": "FAIL",
+        "Parsing: <///example.org/../path> against <http://example.org/>": "FAIL",
+        "Parsing: <///example.org/../../> against <http://example.org/>": "FAIL",
+        "Parsing: <///example.org/../path/../../> against <http://example.org/>": "FAIL",
+        "Parsing: <///example.org/../path/../../path> against <http://example.org/>": "FAIL",
+        "Parsing: <\\a> against <foo://foo/a>": "FAIL",
+        "Parsing: <\\/a> against <foo://foo/a>": "FAIL",
+        "Parsing: <\\\\a> against <foo://foo/a>": "FAIL"
+      }
+    },
+    "url/url-constructor.any.js?include=file": {
+      "why": "url-crate",
+      "subtests": {
+        "Parsing: <file:///w|/m> without base": "FAIL",
+        "Parsing: </> against <file://h/C:/a/b>": "FAIL",
+        "Parsing: <file:\\\\//> without base": "FAIL",
+        "Parsing: <file:\\\\\\\\> without base": "FAIL",
+        "Parsing: <file:\\\\\\\\?fox> without base": "FAIL",
+        "Parsing: <file:\\\\\\\\#guppy> without base": "FAIL",
+        "Parsing: <file://spider///> without base": "FAIL",
+        "Parsing: <file:\\\\localhost//> without base": "FAIL",
+        "Parsing: <file://\\/localhost//cat> without base": "FAIL",
+        "Parsing: <file://localhost//a//../..//> without base": "FAIL",
+        "Parsing: </////mouse> against <file:///elephant>": "FAIL",
+        "Parsing: <\\/localhost//pig> against <file://lion/>": "FAIL",
+        "Parsing: <//localhost//pig> against <file://lion/>": "FAIL",
+        "Parsing: </..//localhost//pig> against <file://lion/>": "FAIL",
+        "Parsing: <C|> against <file://host/dir/file>": "FAIL",
+        "Parsing: <C|> against <file://host/D:/dir1/dir2/file>": "FAIL",
+        "Parsing: <C|#> against <file://host/dir/file>": "FAIL",
+        "Parsing: <C|?> against <file://host/dir/file>": "FAIL",
+        "Parsing: <C|/> against <file://host/dir/file>": "FAIL",
+        "Parsing: <C|\n/> against <file://host/dir/file>": "FAIL",
+        "Parsing: <C|\\> against <file://host/dir/file>": "FAIL",
+        "Parsing: </c:/foo/bar> against <file://host/path>": "FAIL",
+        "Parsing: <..> against <file://x/C:/>": "FAIL",
+        "Parsing: <file://example.net/C:/> without base": "FAIL",
+        "Parsing: <file://1.2.3.4/C:/> without base": "FAIL",
+        "Parsing: <file://[1::8]/C:/> without base": "FAIL",
+        "Parsing: <C|/> against <file://host/>": "FAIL",
+        "Parsing: </C:/> against <file://host/>": "FAIL",
+        "Parsing: <file:C:/> against <file://host/>": "FAIL",
+        "Parsing: <file:/C:/> against <file://host/>": "FAIL",
+        "Parsing: <file://localhost//a//../..//foo> without base": "FAIL",
+        "Parsing: <file://localhost////foo> without base": "FAIL",
+        "Parsing: <file:////foo> without base": "FAIL",
+        "Parsing: <file:////one/two> against <file:///>": "FAIL",
+        "Parsing: <////one/two> against <file:///>": "FAIL",
+        "Parsing: <file:///.//> against <file:////>": "FAIL",
+        "Parsing: <file:.//p> without base": "FAIL",
+        "Parsing: <file:/.//p> without base": "FAIL",
+        "Parsing: <file://xn--/p> without base": "FAIL",
+        "Parsing: </\\//\\/a/../> against <file:///>": "FAIL"
+      }
+    },
+    "url/url-origin.any.js": {
+      "why": "url-crate",
+      "subtests": {
+        "Origin parsing: <http://a.b.c.xn--pokxncvks> without base": "FAIL",
+        "Origin parsing: <http://10.0.0.xn--pokxncvks> without base": "FAIL",
+        "Origin parsing: <http://a.b.c.XN--pokxncvks> without base": "FAIL",
+        "Origin parsing: <http://a.b.c.Xn--pokxncvks> without base": "FAIL",
+        "Origin parsing: <http://10.0.0.XN--pokxncvks> without base": "FAIL",
+        "Origin parsing: <http://10.0.0.xN--pokxncvks> without base": "FAIL",
+        "Origin parsing: <blob:blob:https://example.org/> without base": "FAIL",
+        "Origin parsing: <blob:ftp://host/path> without base": "FAIL",
+        "Origin parsing: <blob:ws://example.org/> without base": "FAIL",
+        "Origin parsing: <blob:wss://example.org/> without base": "FAIL",
+        "Origin parsing: <https://xn--/> without base": "FAIL"
+      }
+    },
+    "url/url-setters.any.js?exclude=(file|javascript|mailto)": {
+      "why": "url-crate",
+      "subtests": {
+        "URL: Setting <https://example.com/>.host = 'xn--'": "FAIL",
+        "URL: Setting <non-spec:/.//p>.hostname = 'h' Drop /. from path": "FAIL",
+        "URL: Setting <non-spec:/.//p>.hostname = ''": "FAIL",
+        "URL: Setting <https://example.com/>.hostname = 'xn--'": "FAIL",
+        "URL: Setting <https://domain.com:3000>.port = '\n\n\t\t'": "FAIL",
+        "URL: Setting <foo:///some/path>.pathname = '' Non-special URLs with an empty host can have their paths erased": "FAIL",
+        "URL: Setting <a:/>.pathname = '\u0000\u0001\t\n\r\u001f !\"#$%&'()*+,-./09:;<=>?@AZ[\\]^_`az{|}~\u007f\u0080\u0081\u00c9\u00e9' UTF-8 percent encoding with the default encode set. Tabs and newlines are removed.": "FAIL",
+        "URL: Setting <non-spec:/>.pathname = '/.//p' Serialize /. in path": "FAIL",
+        "URL: Setting <non-spec:/>.pathname = '/..//p'": "FAIL",
+        "URL: Setting <non-spec:/>.pathname = '//p'": "FAIL",
+        "URL: Setting <non-spec:/.//>.pathname = 'p' Drop /. from path": "FAIL",
+        "URL: Setting <data:space ?query>.search = '' Trailing spaces and opaque paths": "FAIL",
+        "URL: Setting <sc:space ?query>.search = ''": "FAIL",
+        "URL: Setting <data:space  ?query#fragment>.search = '' Trailing spaces and opaque paths": "FAIL",
+        "URL: Setting <sc:space  ?query#fragment>.search = ''": "FAIL",
+        "URL: Setting <data:space                                                                                                                                  #fragment>.hash = '' Trailing spaces and opaque paths": "FAIL",
+        "URL: Setting <sc:space    #fragment>.hash = ''": "FAIL",
+        "URL: Setting <data:space  ?query#fragment>.hash = '' Trailing spaces and opaque paths": "FAIL",
+        "URL: Setting <sc:space  ?query#fragment>.hash = ''": "FAIL"
+      }
+    },
+    "url/url-setters.any.js?include=file": {
+      "why": "url-crate",
+      "subtests": {
+        "URL: Setting <file://monkey/>.pathname = '\\\\' File URLs and (back)slashes": "FAIL",
+        "URL: Setting <file:///unicorn>.pathname = '//\\/' File URLs and (back)slashes": "FAIL",
+        "URL: Setting <file:///unicorn>.pathname = '//monkey/..//' File URLs and (back)slashes": "FAIL"
+      }
+    },
+    "url/urlsearchparams-delete.any.js": {
+      "why": "url-crate",
+      "subtests": {
+        "Changing the query of a URL with an opaque path with trailing spaces": "FAIL",
+        "Changing the query of a URL with an opaque path with trailing spaces and a fragment": "FAIL"
+      }
+    }
+  }
+}
