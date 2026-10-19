@@ -229,7 +229,7 @@ export class WorkerProcess {
    * embedded web snapshot, it builds one in the background as it starts
    * (otherwise, when the first web VM asks).
    */
-  constructor(workerPath: string, handlers: WorkerHandlers, strict: boolean, memoryLimitBytes?: number, prepareWeb = false) {
+  constructor(workerPath: string, handlers: WorkerHandlers, strict: boolean, memoryLimitBytes?: number, prepareWeb = false, probe = false) {
     const args = ['--serve'];
     if (memoryLimitBytes !== undefined) args.push(`--memory-limit=${memoryLimitBytes}`);
     if (prepareWeb) args.push('--prepare-web');
@@ -327,9 +327,17 @@ export class WorkerProcess {
           // ISOLANE_DEV_INSECURE=1 admits a dev build of the worker (no V8
           // sandbox), outside strict mode only, for local development.
           const devInsecure = !strict && process.env.ISOLANE_DEV_INSECURE === '1';
-          if (isReady || (!msg.sandboxSecure && !devInsecure)) return this.#fail('protocol-violation', 'unexpected ready');
+          if (isReady) return this.#fail('protocol-violation', 'unexpected ready');
+          // A build without a secure V8 sandbox is a setup problem, not an
+          // attack (a probe only reports it).
+          if (!msg.sandboxSecure && !devInsecure && !probe) {
+            return this.#fail(
+              'insufficient-isolation',
+              'the worker has no secure V8 sandbox (a development build?); use a release worker, or ISOLANE_DEV_INSECURE=1 with strict: false for local development',
+            );
+          }
           const { t: _, protocol: __, ...info } = msg;
-          if (strict && !meetsStrict(info)) {
+          if (strict && !probe && !meetsStrict(info)) {
             return this.#fail(
               'insufficient-isolation',
               `strict mode: landlock=${info.lockdown.landlock}, seccomp=${info.lockdown.seccomp}`,

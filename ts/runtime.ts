@@ -214,7 +214,7 @@ export class Runtime {
    * strict mode, so it works on hosts that strict mode would refuse.
    */
   async isolationReport(): Promise<IsolationInfo & { meetsStrict: boolean }> {
-    const probe = new WorkerProcess(this.#workerPath, { onMessage: () => {}, onExit: () => {} }, false);
+    const probe = new WorkerProcess(this.#workerPath, { onMessage: () => {}, onExit: () => {} }, false, undefined, false, true);
     try {
       const info = await probe.ready;
       return { ...info, meetsStrict: meetsStrict(info) };

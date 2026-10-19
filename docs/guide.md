@@ -552,6 +552,15 @@ code: Landlock and seccomp on Linux. Strict mode (the default) refuses hosts
 where that lockdown can't be applied; `runtime.isolationReport()` shows what
 a host provides. Development setups opt out with `strict: false`.
 
+Strict mode needs a secure V8 sandbox and full seccomp, and accepts
+Landlock at `partial`: a kernel older than 6.7 enforces Landlock's
+filesystem rules but not its TCP ones (or not its newest file rights). That
+is a deliberate choice: seccomp already refuses every file open and
+`socket()` call, so Landlock is the second wall, and requiring the newest
+Landlock would refuse most LTS kernels. A worker built without the V8
+sandbox (a development build) is refused as a setup error
+(`ERR_WORKER_CRASHED`, saying so), never treated as a security event.
+
 After a security event (a crash, a protocol violation, an unresponsive
 worker), the tenant is quarantined for `quarantineMs`; `tenant.release()`
 lifts it.

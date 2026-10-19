@@ -55,10 +55,18 @@ test('a worker claiming an insecure sandbox never runs code', async (t) => {
   const dev = process.env.ISOLANE_DEV_INSECURE;
   delete process.env.ISOLANE_DEV_INSECURE;
   t.after(() => dev !== undefined && (process.env.ISOLANE_DEV_INSECURE = dev));
+  const events = [];
   const insecure = new Runtime({
     workerPath: fakeWorker(`send({ t: 'ready', protocol: 3, v8: 'fake', sandboxSecure: false, lockdown: { landlock: 'full', seccomp: 'full' } }); setInterval(() => {}, 1000);`),
+    hooks: { onSecurityEvent: (e) => events.push(e) },
   });
-  await assert.rejects(insecure.run('1', { tenant: 't' }), code('ERR_WORKER_CRASHED'));
+  await assert.rejects(insecure.run('1', { tenant: 't' }), /no secure V8 sandbox/);
+  // A development build is a setup problem: no security event, no quarantine.
+  assert.deepEqual(events, []);
+  await assert.rejects(insecure.run('1', { tenant: 't' }), /no secure V8 sandbox/);
+  // A probe reports it instead of failing.
+  const report = await insecure.isolationReport();
+  assert.deepEqual([report.sandboxSecure, report.meetsStrict], [false, false]);
   insecure.close();
 });
 
