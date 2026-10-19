@@ -178,6 +178,10 @@ randomUUID 100%. Remaining failures, by cause:
   global object"); decide which global interface to model.
 - `Event.timeStamp` is always 0 (Deno's behaviour too); `structuredClone`'s
   `transfer` option isn't supported yet.
+| — | WPT expectations file (every allowed failure listed with a reason: by-design / browser-only / environment / bug) and per-test gating in the soak: a new failure or an unexpected pass fails the job; track "unexplained failures" (goal 0) instead of the overall rate (95.9% at phase 3) | planned |
+| — | Run WPT's own server (wptserve) in the WPT soak so tests that need its Python handlers run (~100 subtests) | planned |
+| — | Optional `web: { baseUrl }` (like Deno's `--location`) so relative Request/fetch URLs resolve (~140 WPT subtests) | planned (decide) |
+| — | Fix or upstream the `url` crate's lag on newest URL-spec edge cases (url 94.9%) | planned |
 | — | test262 run (catch regressions from removed globals and flags) | planned |
 | — | List isolane on unjs/runtime-compat | idea |
 | — | Node compatibility layer (workerd's `src/node` JS/TS, Apache-2.0: `node:buffer`, `node:events`, `node:util`, ...) | idea |
