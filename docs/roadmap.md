@@ -21,6 +21,33 @@ safety posture, installable with `npm install`:
 - **Proven.** Fuzzing, WPT and test262 in CI, soak tests, and an external
   review before anyone is told it's ready for untrusted code.
 
+## Order of work
+
+Agreed October 2026:
+
+1. **Web conformance pass** (in progress): close the WPT gaps, using Deno wherever it is ahead.
+2. **The rest of the web platform**:
+   - `crypto.subtle`;
+   - the web snapshot built into the binary and a pool of pre-created web isolates, so `web` can default to on;
+   - fair CPU accounting for timers;
+   - test262;
+   - delete the old prelude.
+3. **Errors and stack traces** (section 4).
+4. **Research deployments before building them.** The pieces are wanted:
+   - warm isolates;
+   - ES modules;
+   - TypeScript and JSX through oxc;
+   - multi-file programs with `oxc_resolver`;
+   - code and wasm caches;
+   - shims.
+   The API shape is open: `tenant.deploy()` reads oddly, so find a better surface first.
+5. **Soon after, in no fixed order**:
+   - the security gates (Fuzzilli, Temporal audit, external review);
+   - more limits and worker recycling;
+   - a dedicated performance deep dive (latency, batching, transport, benchmarks);
+   - packaging and CI (arm64, macOS, first npm release).
+6. **Later milestones**: npm packages and Node compatibility.
+
 ## 1. Security
 
 | Item | Status | Notes |
