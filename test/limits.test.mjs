@@ -296,3 +296,39 @@ test('a huge unhandled error is cut to size, not a protocol violation', async ()
   assert.deepEqual(security, []);
   rt.close();
 });
+
+test('limits.pendingHostCalls and limits.hostCalls bound host-call floods', async () => {
+  let ran = 0;
+  const never = () => (ran++, new Promise(() => {}));
+  // 100,000 calls that never settle: the worker stops at the limit.
+  const flood = await pool
+    .run('for (let i = 0; i < 100000; i++) never(); 1', { ...T, host: { never }, limits: { pendingHostCalls: 50 } })
+    .catch((e) => e);
+  assert.deepEqual([flood.code, flood.limit], ['ERR_LIMIT', 'pendingHostCalls']);
+  assert.equal(ran, 50);
+  // Calls that do settle: limits.hostCalls per eval, even if the guest
+  // catches the RangeError.
+  let fast = 0;
+  const host = { one: () => (fast++, 1) };
+  const caught = await pool
+    .run(
+      `(async () => { let seen; for (let i = 0; i < 20000; i++) { try { await one(); } catch (e) { seen = [e.name, e.code, e.limit]; break; } } return seen; })()`,
+      { ...T, host, limits: { hostCalls: 300 } },
+    )
+    .catch((e) => e);
+  assert.deepEqual([caught.code, caught.limit], ['ERR_LIMIT', 'hostCalls']);
+  assert.equal(fast, 300);
+  // The count is per eval: a stateful isolate keeps working.
+  const vm = isolate({ ...T, host, limits: { hostCalls: 3 } });
+  for (let i = 0; i < 3; i++) assert.equal(await vm.eval('Promise.all([one(), one(), one()]).then((r) => r.length)'), 3);
+  vm.close();
+  // Their bytes, too: 100 calls of 1 MiB that never settle.
+  ran = 0;
+  const held = await pool
+    .run('for (let i = 0; i < 100; i++) never(new Uint8Array(1 << 20)); 1', { ...T, host: { never }, limits: { hostCallBytes: 10 << 20 } })
+    .catch((e) => e);
+  assert.deepEqual([held.code, held.limit], ['ERR_LIMIT', 'hostCallBytes']);
+  assert.equal(ran, 9);
+  // The defaults allow ordinary use.
+  assert.equal(await pool.run('Promise.all(Array.from({ length: 900 }, () => one())).then((r) => r.length)', { ...T, host }), 900);
+});

@@ -57,6 +57,10 @@ struct WatchState {
     /// The VM thread's CPU time at which to stop.
     cpu_deadline: Option<Duration>,
     fired: Fired,
+    /// Between `arm` and `disarm`: the VM is running guest code.
+    armed: bool,
+    /// The VM is being disposed: stop what it runs, now and from now on.
+    stopping: bool,
     closed: bool,
 }
 
@@ -64,15 +68,17 @@ pub(super) struct Watchdog {
     state: Mutex<WatchState>,
     cv: Condvar,
     cpu: Option<CpuClock>,
+    handle: v8::IsolateHandle,
 }
 
 impl Watchdog {
     /// Call on the VM thread (its CPU clock is the one budgets measure).
     pub(super) fn start(handle: v8::IsolateHandle) -> std::io::Result<Arc<Watchdog>> {
         let w = Arc::new(Watchdog {
-            state: Mutex::new(WatchState { deadline: None, cpu_deadline: None, fired: Fired::No, closed: false }),
+            state: Mutex::new(WatchState { deadline: None, cpu_deadline: None, fired: Fired::No, armed: false, stopping: false, closed: false }),
             cv: Condvar::new(),
             cpu: CpuClock::current(),
+            handle: handle.clone(),
         });
         let watch = w.clone();
         let spawned = std::thread::Builder::new().stack_size(WATCHDOG_STACK).spawn(move || {
@@ -121,8 +127,29 @@ impl Watchdog {
         s.deadline = deadline;
         s.cpu_deadline = cpu_deadline;
         s.fired = Fired::No;
+        s.armed = true;
+        if s.stopping {
+            s.fired = Fired::Wall;
+            self.handle.terminate_execution();
+        }
         self.cv.notify_one();
         deadline
+    }
+
+    /// The VM is being disposed: terminate what it's running, if anything,
+    /// and whatever it would run next. Like a budget running out, this only
+    /// terminates between `arm` and `disarm`, so the VM thread always sees
+    /// it (as fired) and cancels it: an idle isolate is never left with a
+    /// termination pending. Callable from any thread.
+    pub(super) fn stop(&self) {
+        let mut s = self.state.lock().unwrap();
+        s.stopping = true;
+        if s.armed {
+            s.deadline = None;
+            s.cpu_deadline = None;
+            s.fired = Fired::Wall;
+            self.handle.terminate_execution();
+        }
     }
 
     /// Has a budget run out since the last `arm`?
@@ -135,6 +162,7 @@ impl Watchdog {
         let mut s = self.state.lock().unwrap();
         s.deadline = None;
         s.cpu_deadline = None;
+        s.armed = false;
         std::mem::replace(&mut s.fired, Fired::No)
     }
 

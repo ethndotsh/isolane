@@ -41,7 +41,7 @@ export type WorkerMessage =
   | ({ t: 'result'; req: number; ok: true; value: unknown } & WorkerUsage)
   | ({ t: 'result'; req: number; ok: false; code: string; message: string; guest?: GuestErrorInfo; limit?: string; shim?: { phase: 'setup' | 'before' | 'after'; index: number } } & WorkerUsage)
   | ({ t: 'usage'; vm: number; limit?: string; message?: string } & WorkerUsage)
-  | { t: 'hostCall'; vm: number; call: number; fn: number; args: unknown[] }
+  | { t: 'hostCall'; vm: number; call: number; fn: number; args: unknown[]; /** The frame's body length. */ size: number }
   | { t: 'log'; vm: number; level: LogLevel; message: string };
 
 /** What an eval or continuation cost, as the worker reports it. */
@@ -170,7 +170,7 @@ export function parseWorkerMessage(raw: unknown, bytes?: Buffer): WorkerMessage 
     case 'hostCall': {
       if (!(isUint(m.vm) && isUint(m.call) && isUint(m.fn) && Array.isArray(m.args))) return null;
       const args = bytes === undefined ? m.args : attachArgs(m.args, m.bin, bytes);
-      return args ? { t: 'hostCall', vm: m.vm, call: m.call, fn: m.fn, args } : null;
+      return args ? { t: 'hostCall', vm: m.vm, call: m.call, fn: m.fn, args, size: 0 } : null;
     }
     case 'log':
       return isUint(m.vm) && typeof m.level === 'string' && LOG_LEVELS.has(m.level) && typeof m.message === 'string'
@@ -311,6 +311,7 @@ export class WorkerProcess {
           msg = null;
         }
         if (!msg) return this.#fail('protocol-violation', 'malformed message');
+        if (msg.t === 'hostCall') msg.size = len;
         if (msg.t === 'ready') {
           if (!isReady && msg.protocol !== PROTOCOL_VERSION) {
             return this.#fail(
@@ -383,7 +384,7 @@ export class WorkerProcess {
     return json + attached + (attached > 0 ? BINARY_HEADER : 0) <= MAX_FRAME;
   }
 
-  kill(reason: 'killed' | 'unresponsive' = 'killed', detail = 'stopped by the supervisor'): void {
+  kill(reason: 'killed' | 'unresponsive' | 'protocol-violation' = 'killed', detail = 'stopped by the supervisor'): void {
     this.#fail(reason, detail);
   }
 }

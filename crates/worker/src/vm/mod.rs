@@ -145,23 +145,23 @@ pub struct Reply {
 
 pub fn spawn(id: u64, config: VmConfig, rx: Receiver<VmMsg>, out: Output) -> std::io::Result<Stopper> {
     let stopper = Stopper(Arc::new(std::sync::OnceLock::new()));
-    let handle = stopper.0.clone();
+    let watchdog = stopper.0.clone();
     std::thread::Builder::new()
         .name(format!("vm-{id}"))
         .stack_size(VM_THREAD_STACK)
-        .spawn(move || vm_main(id, config, rx, out, handle))
+        .spawn(move || vm_main(id, config, rx, out, watchdog))
         .map(|_| stopper)
 }
 
 /// Stops whatever a VM is running, from another thread: after `Dispose`,
 /// so a VM busy in guest code (with no time limit, or a long one) doesn't
 /// keep its thread until it finishes.
-pub struct Stopper(Arc<std::sync::OnceLock<v8::IsolateHandle>>);
+pub struct Stopper(Arc<std::sync::OnceLock<Arc<Watchdog>>>);
 
 impl Stopper {
     pub fn stop(&self) {
-        if let Some(handle) = self.0.get() {
-            handle.terminate_execution();
+        if let Some(watchdog) = self.0.get() {
+            watchdog.stop();
         }
     }
 }
@@ -223,7 +223,7 @@ pub const OOM_EXIT_CODE: i32 = 6;
 
 // ---- the VM thread ----
 
-fn vm_main(id: u64, config: VmConfig, rx: Receiver<VmMsg>, out: Output, stopper: Arc<std::sync::OnceLock<v8::IsolateHandle>>) {
+fn vm_main(id: u64, config: VmConfig, rx: Receiver<VmMsg>, out: Output, stopper: Arc<std::sync::OnceLock<Arc<Watchdog>>>) {
     crate::limits::set(config.limits);
     crate::clock::set_mode(config.time);
     SEED.with(|seed| seed.set(config.seed));
@@ -250,12 +250,12 @@ fn vm_main(id: u64, config: VmConfig, rx: Receiver<VmMsg>, out: Output, stopper:
 
     let cpu_clock = CpuClock::current();
     let handle = isolate.thread_safe_handle();
-    let _ = stopper.set(handle.clone());
     let watchdog = match Watchdog::start(handle.clone()) {
         Ok(w) => w,
         Err(e) => return refuse_all(&rx, &out, format!("vm could not start: {e}")),
     };
     WATCHDOG.with(|w| *w.borrow_mut() = Some(watchdog.clone()));
+    let _ = stopper.set(watchdog.clone());
     let oom = Box::new(OomState { handle, hit: AtomicBool::new(false) });
     isolate.add_near_heap_limit_callback(near_heap_limit, &*oom as *const OomState as *mut c_void);
     // The heap limit as configured (V8's own figure, which adds young
@@ -272,8 +272,15 @@ fn vm_main(id: u64, config: VmConfig, rx: Receiver<VmMsg>, out: Output, stopper:
         next_call: Cell::new(1),
         log_budget: Cell::new(config.limits.log_bytes),
         pending: RefCell::new(HashMap::new()),
+        pending_bytes: Cell::new(0),
         deadline: Cell::new(None),
         timed_out: Cell::new(false),
+        in_eval: Cell::new(false),
+        host_calls: Cell::new(0),
+        limit_hit: RefCell::new(None),
+        // The supervisor names its brokers __isolane_* and refuses those
+        // names for the embedder's functions.
+        internal: config.functions.iter().map(|f| f.path.first().is_some_and(|n| n.starts_with("__isolane_"))).collect(),
     });
     isolate.set_slot(bridge.clone());
     // Set once the VM can't safely run again (it hit its heap limit, or its
@@ -370,8 +377,12 @@ fn vm_main(id: u64, config: VmConfig, rx: Receiver<VmMsg>, out: Output, stopper:
                 let deadline = watchdog.arm(timeout, cpu);
                 bridge.deadline.set(deadline);
                 bridge.timed_out.set(false);
+                bridge.in_eval.set(true);
+                bridge.host_calls.set(0);
+                bridge.limit_hit.replace(None);
                 let end = eval(&mut isolate, &context, &shims, &code, &bridge.mailbox, deadline);
                 pump_tasks(&isolate);
+                bridge.in_eval.set(false);
                 bridge.deadline.set(None);
                 let fired = match watchdog.disarm() {
                     Fired::No if bridge.timed_out.take() => Fired::Wall,
@@ -395,6 +406,8 @@ fn vm_main(id: u64, config: VmConfig, rx: Receiver<VmMsg>, out: Output, stopper:
                 } else if fired == Fired::Cpu {
                     let ms = config.limits.cpu_ms.unwrap_or(0);
                     Err(limit("cpuMs", format!("execution used more than {ms}ms of CPU time (limits.cpuMs)")))
+                } else if let Some(hit) = bridge.limit_hit.take() {
+                    Err(hit)
                 } else {
                     result
                 };

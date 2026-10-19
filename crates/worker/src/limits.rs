@@ -32,6 +32,15 @@ pub struct Limits {
     pub result_bytes: usize,
     /// Most output one decompression call may produce.
     pub decompressed_bytes: usize,
+    /// Async host calls waiting for a reply at once; another throws a
+    /// RangeError (and fails the eval it's in).
+    pub pending_host_calls: usize,
+    /// Host calls per eval (isolane's own fetch, connect, and fs calls
+    /// aside); another throws a RangeError and fails the eval.
+    pub host_calls: u64,
+    /// Frame bytes (arguments and all) of host calls waiting for replies
+    /// at once; a call past it throws a RangeError and fails the eval.
+    pub host_call_bytes: usize,
 }
 
 impl Default for Limits {
@@ -46,6 +55,9 @@ impl Default for Limits {
             log_line_bytes: 16 << 10,
             result_bytes: 16 << 20,
             decompressed_bytes: 128 << 20,
+            pending_host_calls: 1_000,
+            host_calls: 10_000,
+            host_call_bytes: 64 << 20,
         }
     }
 }

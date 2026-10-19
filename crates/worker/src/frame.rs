@@ -42,6 +42,16 @@ pub fn fits(json: usize, attached: usize) -> bool {
     json.saturating_add(attached).saturating_add(header) <= MAX_FRAME
 }
 
+/// The length of the frame `send_json(json, attached)` writes: its JSON,
+/// plus the binary header and the bytes when anything is attached.
+pub fn body_len(json: usize, attached: &[&[u8]]) -> usize {
+    if attached.is_empty() {
+        json
+    } else {
+        BINARY_HEADER + json + attached.iter().map(|b| b.len()).sum::<usize>()
+    }
+}
+
 /// A frame's JSON and its attached bytes (empty for a JSON frame).
 pub fn split(frame: &[u8]) -> io::Result<(&[u8], &[u8])> {
     if frame.first() != Some(&BINARY_TAG) {
@@ -79,18 +89,22 @@ impl<W: Write> Writer<W> {
     /// supervisor refuses a listed attachment in a plain frame. Callers check
     /// `fits` first.
     pub fn send_with_bytes(&self, msg: &impl serde::Serialize, attached: &[&[u8]]) {
-        let json = serde_json::to_vec(msg).expect("protocol messages serialize");
+        self.send_json(&serde_json::to_vec(msg).expect("protocol messages serialize"), attached);
+    }
+
+    /// `send_with_bytes` for a message already serialized to `json`.
+    pub fn send_json(&self, json: &[u8], attached: &[&[u8]]) {
         let bytes: usize = attached.iter().map(|b| b.len()).sum();
         let mut w = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         let ok = if attached.is_empty() {
-            w.write_all(&(json.len() as u32).to_le_bytes()).and_then(|_| w.write_all(&json))
+            w.write_all(&(json.len() as u32).to_le_bytes()).and_then(|_| w.write_all(json))
         } else {
             let total = BINARY_HEADER + json.len() + bytes;
             let mut r = w
                 .write_all(&(total as u32).to_le_bytes())
                 .and_then(|_| w.write_all(&[BINARY_TAG]))
                 .and_then(|_| w.write_all(&(json.len() as u32).to_le_bytes()))
-                .and_then(|_| w.write_all(&json));
+                .and_then(|_| w.write_all(json));
             for b in attached {
                 r = r.and_then(|_| w.write_all(b));
             }

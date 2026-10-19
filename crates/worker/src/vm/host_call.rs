@@ -11,7 +11,7 @@ use serde_json::value::RawValue;
 
 use super::mailbox::Mailbox;
 use super::{Output, Reply, VmMsg};
-use crate::proto::{Out, PathSegment};
+use crate::proto::{limit, Failure, Out, PathSegment};
 
 /// Per-isolate state reachable from host-function callbacks (isolate slot).
 pub(super) struct Bridge {
@@ -21,7 +21,10 @@ pub(super) struct Bridge {
     pub(super) next_call: Cell<u64>,
     /// Console bytes left this eval.
     pub(super) log_budget: Cell<usize>,
-    pub(super) pending: RefCell<HashMap<u64, v8::Global<v8::PromiseResolver>>>,
+    /// Async host calls waiting for replies, with each one's frame size.
+    pub(super) pending: RefCell<HashMap<u64, (v8::Global<v8::PromiseResolver>, usize)>>,
+    /// The frame bytes of host calls waiting for replies (`limits.hostCallBytes`).
+    pub(super) pending_bytes: Cell<usize>,
     /// When the running eval or continuation must stop (a sync host call
     /// waits no longer than this).
     pub(super) deadline: Cell<Option<Instant>>,
@@ -29,16 +32,38 @@ pub(super) struct Bridge {
     /// before the termination lands (or before the watchdog notices), so
     /// this, not only the watchdog, makes the eval a timeout.
     pub(super) timed_out: Cell<bool>,
+    /// An eval is running (not a timer or continuation between evals).
+    pub(super) in_eval: Cell<bool>,
+    /// Host calls the running eval has made (`limits.hostCalls`).
+    pub(super) host_calls: Cell<u64>,
+    /// A count limit the running eval hit: it fails with this even if the
+    /// guest caught the RangeError.
+    pub(super) limit_hit: RefCell<Option<Failure>>,
+    /// By function index: isolane's own brokers (fetch, connect, fs), which
+    /// `limits.hostCalls` doesn't count (their own limits bound them).
+    pub(super) internal: Vec<bool>,
 }
 
-/// Serialize a host call's arguments and send it; returns the call id.
-/// None if the arguments can't be serialized (the exception is pending).
-/// Arguments that are bytes (ArrayBuffers and views of them) cross as raw
-/// bytes, not JSON, when passed directly; nested inside other values they
-/// serialize as JSON as before. The function's data is its index in the
-/// isolate's function list.
-fn send_host_call(scope: &mut v8::PinScope, args: &v8::FunctionCallbackArguments, bridge: &Bridge) -> Option<u64> {
+/// Serialize a host call's arguments and send it; returns the call id and
+/// the frame's size. None if the call is refused or its arguments can't be
+/// serialized (the exception is pending). Arguments that are bytes
+/// (ArrayBuffers and views of them) cross as raw bytes, not JSON, when
+/// passed directly; nested inside other values they serialize as JSON as
+/// before. The function's data is its index in the isolate's function list.
+fn send_host_call(scope: &mut v8::PinScope, args: &v8::FunctionCallbackArguments, bridge: &Bridge) -> Option<(u64, usize)> {
     let function = args.data().uint32_value(scope).unwrap_or(u32::MAX);
+    let limits = crate::limits::get();
+    let internal = bridge.internal.get(function as usize).copied().unwrap_or(false);
+    let counted = bridge.in_eval.get() && !internal;
+    let pending = bridge.pending.borrow().len();
+    if pending >= limits.pending_host_calls {
+        let message = format!("{pending} host calls are already waiting for replies, the most this isolate may have (limits.pendingHostCalls)");
+        return refuse(scope, bridge, "pendingHostCalls", message);
+    }
+    if counted && bridge.host_calls.get() >= limits.host_calls {
+        let message = format!("this eval made {} host calls, the most it may make (limits.hostCalls)", limits.host_calls);
+        return refuse(scope, bridge, "hostCalls", message);
+    }
     let arr = v8::Array::new(scope, args.length());
     let mut bin: Vec<(u32, usize)> = Vec::new();
     let mut attached: Vec<Vec<u8>> = Vec::new();
@@ -63,11 +88,43 @@ fn send_host_call(scope: &mut v8::PinScope, args: &v8::FunctionCallbackArguments
         return None;
     }
     let call = bridge.next_call.get();
-    bridge.next_call.set(call + 1);
     let args = RawValue::from_string(json).expect("V8 produced JSON");
     let attached: Vec<&[u8]> = attached.iter().map(Vec::as_slice).collect();
-    bridge.out.send_with_bytes(&Out::HostCall { vm: bridge.vm, call, function, args: &args, bin: &bin }, &attached);
-    Some(call)
+    let frame = serde_json::to_vec(&Out::HostCall { vm: bridge.vm, call, function, args: &args, bin: &bin }).expect("protocol messages serialize");
+    let size = crate::frame::body_len(frame.len(), &attached);
+    let waiting = bridge.pending_bytes.get();
+    if waiting.saturating_add(size) > limits.host_call_bytes {
+        let message = format!(
+            "this call's {size} bytes, with the {waiting} bytes of calls already waiting, are more than the isolate may have waiting (limits.hostCallBytes)"
+        );
+        return refuse(scope, bridge, "hostCallBytes", message);
+    }
+    bridge.next_call.set(call + 1);
+    if counted {
+        bridge.host_calls.set(bridge.host_calls.get() + 1);
+    }
+    bridge.out.send_json(&frame, &attached);
+    Some((call, size))
+}
+
+/// Refuse a host call over `limits.<name>`: the guest gets a RangeError
+/// (code ERR_LIMIT, `limit` the name), and an eval fails with ERR_LIMIT
+/// even if the guest catches it.
+fn refuse<T>(scope: &mut v8::PinScope, bridge: &Bridge, name: &'static str, message: String) -> Option<T> {
+    if bridge.in_eval.get() && bridge.limit_hit.borrow().is_none() {
+        *bridge.limit_hit.borrow_mut() = Some(limit(name, message.clone()));
+    }
+    let msg = v8::String::new(scope, &message).unwrap();
+    let e = v8::Exception::range_error(scope, msg);
+    if let Ok(obj) = v8::Local::<v8::Object>::try_from(e) {
+        for (k, v) in [("code", "ERR_LIMIT"), ("limit", name)] {
+            let k = v8::String::new(scope, k).unwrap();
+            let v = v8::String::new(scope, v).unwrap();
+            obj.set(scope, k.into(), v.into());
+        }
+    }
+    scope.throw_exception(e);
+    None
 }
 
 /// A copy of the bytes of an ArrayBuffer or a view of one.
@@ -148,9 +205,19 @@ fn place_bytes<'s>(
 pub(super) fn host_function(scope: &mut v8::PinScope, args: v8::FunctionCallbackArguments, mut rv: v8::ReturnValue<v8::Value>) {
     let bridge = scope.get_slot::<Rc<Bridge>>().expect("bridge slot").clone();
     let Some(resolver) = v8::PromiseResolver::new(scope) else { return };
-    let Some(call) = send_host_call(scope, &args, &bridge) else { return };
-    bridge.pending.borrow_mut().insert(call, v8::Global::new(scope, resolver));
+    let Some((call, size)) = send_host_call(scope, &args, &bridge) else { return };
+    bridge.pending.borrow_mut().insert(call, (v8::Global::new(scope, resolver), size));
+    bridge.pending_bytes.set(bridge.pending_bytes.get() + size);
     rv.set(resolver.get_promise(scope).into());
+}
+
+/// Takes a sync call's bytes back off `pending_bytes` however its wait ends.
+struct Uncount<'a>(&'a Bridge, usize);
+
+impl Drop for Uncount<'_> {
+    fn drop(&mut self) {
+        self.0.pending_bytes.set(self.0.pending_bytes.get() - self.1);
+    }
 }
 
 /// Guest-facing sync host function: send a `hostCall`, then block this VM
@@ -158,7 +225,10 @@ pub(super) fn host_function(scope: &mut v8::PinScope, args: v8::FunctionCallback
 /// directly. Everything else that arrives meanwhile waits in the mailbox.
 pub(super) fn sync_host_function(scope: &mut v8::PinScope, args: v8::FunctionCallbackArguments, mut rv: v8::ReturnValue<v8::Value>) {
     let bridge = scope.get_slot::<Rc<Bridge>>().expect("bridge slot").clone();
-    let Some(call) = send_host_call(scope, &args, &bridge) else { return };
+    let Some((call, size)) = send_host_call(scope, &args, &bridge) else { return };
+    // Counted while it waits, like an async call (the supervisor holds it).
+    bridge.pending_bytes.set(bridge.pending_bytes.get() + size);
+    let _counted = Uncount(&bridge, size);
     loop {
         let left = bridge.deadline.get().map(|d| d.saturating_duration_since(Instant::now()));
         if left == Some(Duration::ZERO) {
@@ -227,7 +297,8 @@ fn settle<'s>(scope: &mut v8::PinScope<'s, '_>, reply: Reply) -> Result<v8::Loca
 
 pub(super) fn apply_host_reply(scope: &mut v8::PinScope, call: u64, reply: Reply) {
     let bridge = scope.get_slot::<Rc<Bridge>>().expect("bridge slot").clone();
-    let Some(resolver) = bridge.pending.borrow_mut().remove(&call) else { return };
+    let Some((resolver, size)) = bridge.pending.borrow_mut().remove(&call) else { return };
+    bridge.pending_bytes.set(bridge.pending_bytes.get() - size);
     // I/O completed: the guest's clock moves forward.
     crate::clock::advance();
     let resolver = v8::Local::new(scope, resolver);

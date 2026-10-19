@@ -39,6 +39,23 @@ export interface IsolateLimits {
   resultBytes?: number;
   /** Output of one decompression call (DecompressionStream). Default 128 MiB. */
   decompressedBytes?: number;
+  /**
+   * Async host calls waiting for a reply at once; another throws a
+   * RangeError in the guest and fails the eval with ERR_LIMIT. Default 1,000.
+   */
+  pendingHostCalls?: number;
+  /**
+   * Host calls per eval (isolane's own `fetch`, `connect`, and `fs` calls
+   * aside: their policies have their own limits); another throws a
+   * RangeError in the guest and fails the eval with ERR_LIMIT. Default 10,000.
+   */
+  hostCalls?: number;
+  /**
+   * Bytes of host calls waiting for replies at once (their arguments, as
+   * sent); a call past it throws a RangeError in the guest and fails the
+   * eval with ERR_LIMIT. Default 64 MiB.
+   */
+  hostCallBytes?: number;
 }
 
 /** Limits on one tenant (its worker process). Settable in `defaults` and `tenants(name)`. */
@@ -81,6 +98,9 @@ export const DEFAULT_LIMITS = Object.freeze({
   codeBytes: 16 * 1024 ** 2,
   resultBytes: 16 * 1024 ** 2,
   decompressedBytes: 128 * 1024 ** 2,
+  pendingHostCalls: 1_000,
+  hostCalls: 10_000,
+  hostCallBytes: 64 * 1024 ** 2,
   isolates: 100,
   concurrentEvals: 1_000,
   workerMemoryBytes: 2 * 1024 ** 3,
@@ -91,7 +111,7 @@ export const DEFAULT_LIMITS = Object.freeze({
 /** Every limit, with defaults filled in (`null` where a limit is off). */
 export type ResolvedLimits = { [K in keyof (Limits & RuntimeLimits)]-?: Exclude<(Limits & RuntimeLimits)[K], undefined> };
 
-const ISOLATE_LIMITS = new Set(['timeoutMs', 'cpuMs', 'heapBytes', 'timers', 'backgroundMs', 'logBytes', 'logLineBytes', 'codeBytes', 'resultBytes', 'decompressedBytes']);
+const ISOLATE_LIMITS = new Set(['timeoutMs', 'cpuMs', 'heapBytes', 'timers', 'backgroundMs', 'logBytes', 'logLineBytes', 'codeBytes', 'resultBytes', 'decompressedBytes', 'pendingHostCalls', 'hostCalls', 'hostCallBytes']);
 const TENANT_LIMITS = new Set(['isolates', 'concurrentEvals', 'workerMemoryBytes', 'idleMs']);
 const NULLABLE = new Set(['timeoutMs', 'cpuMs', 'heapBytes', 'backgroundMs', 'workerMemoryBytes']);
 const MINIMUM: Record<string, number> = { workerMemoryBytes: 64 * 1024 ** 2, heapBytes: 1024 ** 2 };
@@ -504,5 +524,8 @@ export function workerLimits(l: ResolvedLimits) {
     logLineBytes: l.logLineBytes,
     resultBytes: l.resultBytes,
     decompressedBytes: l.decompressedBytes,
+    pendingHostCalls: l.pendingHostCalls,
+    hostCalls: l.hostCalls,
+    hostCallBytes: l.hostCallBytes,
   };
 }

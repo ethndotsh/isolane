@@ -97,3 +97,25 @@ test('a worker speaking another protocol version is refused, not treated as host
     old.close();
   }
 });
+
+test('a worker that sends host calls past limits.pendingHostCalls is killed', async () => {
+  const events = [];
+  let calls = 0;
+  const hostile = new Runtime({
+    workerPath: fakeWorker(
+      `send({ t: 'ready', protocol: 2, v8: 'fake', sandboxSecure: true, lockdown: { landlock: 'full', seccomp: 'full' } });
+       process.stdin.once('data', (d) => {
+         const { vm } = JSON.parse(d.subarray(4, 4 + d.readUInt32LE(0)));
+         for (let call = 1; call <= 1000; call++) send({ t: 'hostCall', vm, call, fn: 0, args: [] });
+       });
+       setInterval(() => {}, 1000);`,
+    ),
+    hooks: { onSecurityEvent: (e) => events.push(e) },
+  });
+  const never = () => (calls++, new Promise(() => {}));
+  await assert.rejects(hostile.run('1', { tenant: 'flood', host: { never }, limits: { pendingHostCalls: 10 } }), code('ERR_WORKER_CRASHED'));
+  assert.equal(events[0]?.kind, 'protocol');
+  assert.match(events[0]?.detail, /pendingHostCalls/);
+  assert.ok(calls <= 11, `${calls} calls ran`);
+  hostile.close();
+});

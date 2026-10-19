@@ -153,11 +153,16 @@ export interface IsolateState {
   readonly codeBytes: number;
   /** The longest console line it may send (the worker cuts lines; this checks it did). */
   readonly logLineBytes: number;
+  /** Async host calls it may have waiting (the worker refuses more; this checks it did). */
+  readonly pendingHostCalls: number;
+  readonly hostCallBytes: number;
   /** Its shims, for naming the one in an `ERR_SHIM`. */
   readonly shims: ResolvedShims;
   /** When its queued evals will have run out their timeouts (they run one at a time). */
   busyUntil: number;
   readonly calls: Map<number, Call>;
+  /** The frame bytes of `calls`. */
+  callBytes: number;
   readonly dispose: () => void;
 }
 
@@ -267,9 +272,12 @@ export class TenantWorker {
       timeoutMs: config.limits.timeoutMs,
       codeBytes: config.limits.codeBytes,
       logLineBytes: config.limits.logLineBytes,
+      pendingHostCalls: config.limits.pendingHostCalls,
+      hostCallBytes: config.limits.hostCallBytes,
       shims: config.shims,
       busyUntil: 0,
       calls: new Map(),
+      callBytes: 0,
       dispose: caps.dispose,
     };
     this.#isolates.set(id, state);
@@ -360,6 +368,7 @@ export class TenantWorker {
       call.abandon(reason);
     }
     state.calls.clear();
+    state.callBytes = 0;
   }
 
   #touch(): void {
@@ -436,9 +445,21 @@ export class TenantWorker {
   }
 
   #onHostCall(state: IsolateState | undefined, msg: Extract<WorkerMessage, { t: 'hostCall' }>): void {
+    // The worker refuses a call past limits.pendingHostCalls (it counts a
+    // call until its reply lands, so never fewer than here, plus one sync
+    // call at a time). More means it isn't enforcing the limit.
+    if (state && state.calls.size > state.pendingHostCalls) {
+      this.#proc.kill('protocol-violation', `more than ${state.pendingHostCalls} host calls in flight (limits.pendingHostCalls)`);
+      return;
+    }
+    // Likewise their bytes (limits.hostCallBytes).
+    if (state && state.callBytes + msg.size > state.hostCallBytes) {
+      this.#proc.kill('protocol-violation', `more than ${state.hostCallBytes} bytes of host calls in flight (limits.hostCallBytes)`);
+      return;
+    }
     this.#usage.hostCalls++;
     const reply = (ok: boolean, value?: string, err?: unknown, parts: BinaryPart[] = []) => {
-      state?.calls.delete(msg.call);
+      if (state?.calls.delete(msg.call)) state.callBytes -= msg.size;
       const frame: Record<string, unknown> = { t: 'hostReply', vm: msg.vm, call: msg.call, ok };
       if (value !== undefined) frame.value = value; // JSON text; absent = undefined
       if (parts.length) frame.bin = parts.map((p) => [p.path, p.bytes.length]);
@@ -479,6 +500,7 @@ export class TenantWorker {
     };
     const ctx = new Call(this.tenant, state.id, state.chain);
     state.calls.set(msg.call, ctx);
+    state.callBytes += msg.size;
     // The fast path: isolane's own brokers, and functions nothing intercepts.
     if (entry.internal || !state.chain.observesHostCalls) {
       let result: unknown;
