@@ -25,6 +25,13 @@ await acme.run('getUser(42).then((u) => u.plan)', {
   hostFunctions: { getUser: async (id) => db.users.find(id) },
 });
 
+// Bytes cross as bytes: Uint8Array arguments arrive as Buffers, and
+// Buffers (or any typed array) in a result arrive as Uint8Arrays.
+await acme.run('thumbnail(new Uint8Array(image)).then((t) => t.length)', {
+  globals: { image: [/* ... */] },
+  hostFunctions: { thumbnail: async (buf) => sharp(buf).resize(64).toBuffer() },
+});
+
 // Stateful VMs keep their globals between evals.
 using vm = acme.createIsolate();
 await vm.eval('globalThis.count = 0');
@@ -39,11 +46,11 @@ code runs. Each VM can opt in to more:
 
 | Option | Default | |
 |---|---|---|
-| `webPlatform` | `false` | WinterTC's Minimum Common API, phases 1–2: `URL`, `URLSearchParams`, `TextEncoder`/`TextDecoder` (and their streams), `atob`/`btoa`, `Event`/`EventTarget`, `AbortController`/`AbortSignal.timeout`, `DOMException`, `structuredClone`, `performance`, `queueMicrotask`, `reportError`, `crypto.getRandomValues`/`randomUUID`, timers (`setTimeout`, `setInterval`), streams (`ReadableStream`, `WritableStream`, `TransformStream`), `Blob`/`File`/`FileReader`, `CompressionStream`/`DecompressionStream`. Deno's web-platform JS (vendored, MIT) on native ops; 97.2% of the WPT subset passes (`soak/wpt.mjs`). Timers advance a frozen clock when they fire; a one-shot `run()` drops timers still pending when it returns. |
+| `webPlatform` | `false` | WinterTC's Minimum Common API, phases 1–3: `fetch`, `Request`, `Response`, `Headers`, `FormData` (with a `network` policy; response bodies stream), `URL`, `URLSearchParams`, `TextEncoder`/`TextDecoder` (and their streams), `atob`/`btoa`, `Event`/`EventTarget`, `AbortController`/`AbortSignal.timeout`, `DOMException`, `structuredClone`, `performance`, `queueMicrotask`, `reportError`, `crypto.getRandomValues`/`randomUUID`, timers (`setTimeout`, `setInterval`), streams (`ReadableStream`, `WritableStream`, `TransformStream`), `Blob`/`File`/`FileReader`, `CompressionStream`/`DecompressionStream`. Deno's web-platform JS (vendored, MIT) on native ops; 95.9% of the WPT subset passes (`soak/wpt.mjs`). Timers advance a frozen clock when they fire; a one-shot `run()` drops timers still pending when it returns. |
 | `clock` | `'frozen'` | `'frozen'` moves only when an eval starts and when a host call returns (no timers for side channels). `'realtime'`, or `{ fixedMs }` for reproducible runs. |
 | `randomSeed` | none (OS randomness) | Seeds `Math.random` for reproducible runs. |
 | `allowCodeGeneration` | `false` | Allows `eval` and `new Function`. |
-| `network` | none | `fetch`, limited by a policy: `{ allow: ['api.example.com', '*.example.org'] }` or a function; methods, size, time, and request-count limits. Private and link-local addresses (cloud metadata) are refused, checked on the address actually connected to, and every redirect is re-checked. |
+| `network` | none | `fetch` (the spec one with `webPlatform`, otherwise a minimal one), limited by a policy: `{ allow: ['api.example.com', '*.example.org'] }` or a function; methods, size, time, and request-count limits. Private and link-local addresses (cloud metadata) are refused, checked on the address actually connected to, and every redirect is re-checked. |
 | `sockets` | none | `connect('db.example.com:5432', { secureTransport: 'on' })` returning `{ read, write, close }`, limited by `host:port` patterns, the same address rules as `network`, and connection and idle limits. |
 | `allowWebAssembly` | `false` | Keeps `WebAssembly`. Off by default: its compilers are a large share of V8's attack surface. |
 | `fs` | none | A promise-based `fs` (readFile, writeFile, readdir, stat, exists, mkdir, rm) confined to `{ root }`, read-only unless `write: true`. Symlinks out of the root are refused, and errors never reveal host paths. |
