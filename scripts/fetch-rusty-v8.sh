@@ -12,7 +12,7 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 RUSTY_V8_TAG=v152.2.0
-V8_TAG=15.2.124.1
+V8_TAG=15.2.124.45
 UPSTREAM=https://chromium.googlesource.com/v8/v8.git
 if [ -d build/rusty_v8/.git ]; then
   echo "build/rusty_v8 already present"
