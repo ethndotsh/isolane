@@ -7,6 +7,8 @@ name: Soak
 #   stress         VM/tenant floods, churn, leaks, noisy neighbours
 #   wpt            the WPT gate (test/wpt/run.mjs, also in CI) against main's
 #                  worker, with the full report (every subtest's result)
+#   test262        the test262 gate (test/test262/run.mjs, also in CI) against
+#                  main's worker, with the full report
 
 on:
   schedule:
@@ -26,7 +28,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        job: [protocol-fuzz, corpus-0, corpus-1, stress, wpt]
+        job: [protocol-fuzz, corpus-0, corpus-1, stress, wpt, test262]
     runs-on: ubuntu-24.04
     timeout-minutes: 90
     steps:
@@ -101,6 +103,11 @@ jobs:
               node test/wpt/run.mjs --verbose --report "$RUNNER_TEMP/wpt.json" --summary "$GITHUB_STEP_SUMMARY" >&2
               s=$?
               cat "$RUNNER_TEMP/wpt.json"
+              (exit $s) ;;
+            test262)
+              node test/test262/run.mjs --verbose --report "$RUNNER_TEMP/test262.json" --summary "$GITHUB_STEP_SUMMARY" >&2
+              s=$?
+              cat "$RUNNER_TEMP/test262.json"
               (exit $s) ;;
           esac >report.json
           status=$?

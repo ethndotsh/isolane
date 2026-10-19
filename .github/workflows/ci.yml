@@ -183,6 +183,25 @@ jobs:
           ISOLANE_WPT_DIR: ${{ runner.temp }}/wpt
         run: node test/wpt/run.mjs --report wpt-report.json --summary "$GITHUB_STEP_SUMMARY"
 
+      # test262 as a per-test gate (test/test262/expectations.json): the
+      # engine as isolane configures it (removed globals, flags, the clock).
+      - name: Pinned test262 commit
+        id: test262
+        run: echo "commit=$(sed -n "s/^export const TEST262_COMMIT = '\(.*\)';/\1/p" test/test262/run.mjs)" >>"$GITHUB_OUTPUT"
+
+      - uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}/test262
+          key: test262-${{ steps.test262.outputs.commit }}-${{ hashFiles('test/test262/run.mjs') }}
+          restore-keys: test262-${{ steps.test262.outputs.commit }}-
+
+      - name: test262 gate (strict mode, lockdown on)
+        env:
+          ISOLANE_WORKER: ${{ runner.temp }}/isolane-worker
+          ISOLANE_STRICT: '1'
+          ISOLANE_TEST262_DIR: ${{ runner.temp }}/test262
+        run: node test/test262/run.mjs --concurrency 4 --report test262-report.json --summary "$GITHUB_STEP_SUMMARY"
+
       - name: Seccomp kills (kernel log)
         if: always()
         run: sudo dmesg | grep -iE 'seccomp|audit.*sig=31' | tail -40 || true
@@ -200,6 +219,7 @@ jobs:
           path: |
             syscall-audit.txt
             wpt-report.json
+            test262-report.json
             build/logs/*.log
           if-no-files-found: ignore
 
