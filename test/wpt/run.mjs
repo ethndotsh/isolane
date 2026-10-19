@@ -439,7 +439,7 @@ const seconds = (Date.now() - started) / 1000;
 const blank = { wptCommit: WPT_COMMIT, reasons: {}, files: {} };
 const expectations = existsSync(expectationsPath) ? JSON.parse(readFileSync(expectationsPath, 'utf8')) : blank;
 const reasons = expectations.reasons ?? {};
-const CATEGORIES = ['by-design', 'browser-only', 'environment', 'bug'];
+const CATEGORIES = ['by-design', 'draft', 'browser-only', 'environment', 'bug'];
 
 /** Expected non-pass subtests of a file entry: name → reason id. */
 function expectedSubtests(entry) {
@@ -540,7 +540,7 @@ if (update) {
 
 // ---- report ----
 
-const excluded = tally.expected['by-design'] + tally.expected['browser-only'];
+const excluded = tally.expected['by-design'] + tally.expected.draft + tally.expected['browser-only'];
 const applicable = tally.subtests - excluded;
 const pct = (n, d) => (d ? `${((100 * n) / d).toFixed(1)}%` : 'n/a');
 const bugs = Object.entries(reasons)
@@ -569,7 +569,7 @@ if (reportPath) writeFileSync(reportPath, JSON.stringify(report, null, 2) + '\n'
 const lines = [
   `### web-platform-tests (WPT ${WPT_COMMIT.slice(0, 12)}, ${report.server})`,
   '',
-  `${tally.pass} of ${tally.subtests} subtests pass (${report.passRate}); **${report.applicablePassRate} of the ${applicable} that apply** (excluding by-design and browser-only).`,
+  `${tally.pass} of ${tally.subtests} subtests pass (${report.passRate}); **${report.applicablePassRate} of the ${applicable} that apply** (excluding by-design, draft, and browser-only).`,
   '',
   '| Expected failures | Subtests |',
   '|---|---|',

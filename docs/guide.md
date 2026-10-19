@@ -211,16 +211,17 @@ subtests that apply pass** (85.1% of all of them; most of the rest are
 Web Crypto algorithms from drafts beyond the standard).
 
 Every subtest that doesn't pass is listed in `test/wpt/expectations.json`
-with a reason, in one of four categories:
+with a reason, in one of five categories:
 
 | Category | Subtests | What it means |
 |---|---|---|
-| by-design | 7,341 | isolane's choices: no SharedArrayBuffer, no WebAssembly unless allowed, a global that isn't a `WorkerGlobalScope`, tentative APIs, and Web Crypto algorithms from WICG drafts (7,238: Modern Algorithms such as ML-KEM, ML-DSA, and ChaCha20-Poly1305, and Ed448), which are on the roadmap |
+| by-design | 97 | isolane's choices: no SharedArrayBuffer, no WebAssembly unless allowed, a global that isn't a `WorkerGlobalScope` |
+| draft | 7,244 | APIs from drafts, not yet in a standard: tentative "owning" streams, and Web Crypto algorithms from WICG drafts (Modern Algorithms such as ML-KEM, ML-DSA, and ChaCha20-Poly1305, and Ed448), which are on the roadmap |
 | browser-only | 487 | rules for browsers that server runtimes (Deno, workerd) don't apply either: CORS and origins, forbidden headers, referrers, the HTTP cache, `XMLHttpRequest`, the Cache API, canvas, secure contexts |
 | environment | 49 | the test setup or Node's HTTP client: no TLS or HTTP/2 in the test server, no WPT proxy, header bytes Node refuses |
 | bug | 125 | real gaps, each a row in the roadmap: mostly the `url` crate lagging the newest URL spec (112), then a patched `Object.prototype.then` seeing body reads, `Event` attributes, and a few streams and encoding edge cases |
 
-The applicable rate leaves out by-design and browser-only failures; bugs
+The applicable rate leaves out by-design, draft, and browser-only failures; bugs
 and environment failures count against it.
 
 The run is a gate, in CI after the end-to-end tests (the sandboxed worker,
