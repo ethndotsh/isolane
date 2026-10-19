@@ -419,7 +419,10 @@ test('a worker that breaks the protocol is killed', async () => {
   hostile.close();
 });
 
-test('a worker claiming an insecure sandbox never runs code', async () => {
+test('a worker claiming an insecure sandbox never runs code', async (t) => {
+  const dev = process.env.ISOLANE_DEV_INSECURE;
+  delete process.env.ISOLANE_DEV_INSECURE;
+  t.after(() => dev !== undefined && (process.env.ISOLANE_DEV_INSECURE = dev));
   const insecure = new LanePool({
     workerPath: fakeWorker(`send({ t: 'ready', v8: 'fake', sandboxSecure: false, lockdown: { landlock: 'full', seccomp: 'full' } }); setInterval(() => {}, 1000);`),
   });

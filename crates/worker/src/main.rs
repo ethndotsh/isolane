@@ -32,6 +32,7 @@ unsafe extern "C" {
     // back to a sandbox without its security properties. Linked by its
     // Itanium-mangled name: a static member taking no arguments, so the
     // symbol involves no standard-library types.
+    #[cfg(not(feature = "dev-prebuilt"))]
     #[link_name = "_ZN2v82V827IsSandboxConfiguredSecurelyEv"]
     fn v8_is_sandbox_configured_securely() -> bool;
 }
@@ -81,19 +82,29 @@ fn init_v8() {
     v8::V8::set_flags_from_string(V8_FLAGS);
     // Background threads for GC and compilation. Each tenant has its own
     // process, so keep the pool small rather than one per core.
+    #[cfg(not(feature = "dev-prebuilt"))]
     let platform = v8::Platform::new_with_clock(2, clock::platform_clock).make_shared();
+    // The prebuilt V8 lacks the clock patch: guest clocks are real time.
+    #[cfg(feature = "dev-prebuilt")]
+    let platform = v8::new_default_platform(2, false).make_shared();
+    vm::set_platform(platform.clone());
     v8::V8::initialize_platform(platform);
     v8::V8::initialize();
 }
 
+#[cfg(not(feature = "dev-prebuilt"))]
 fn sandbox_secure() -> bool {
     unsafe { v8__V8__IsSandboxEnabled() && v8_is_sandbox_configured_securely() }
+}
+#[cfg(feature = "dev-prebuilt")]
+fn sandbox_secure() -> bool {
+    false
 }
 
 fn self_check() -> ExitCode {
     init_v8();
     let enabled = unsafe { v8__V8__IsSandboxEnabled() };
-    let secure = unsafe { v8_is_sandbox_configured_securely() };
+    let secure = sandbox_secure();
     println!(
         "{{\"v8\":\"{}\",\"sandboxEnabled\":{enabled},\"sandboxSecure\":{secure}}}",
         v8::V8::get_version()
@@ -125,7 +136,7 @@ fn serve(lock_down: bool, memory_limit: Option<u64>) -> ExitCode {
         }
     }
     init_v8();
-    if !sandbox_secure() {
+    if !sandbox_secure() && !cfg!(feature = "dev-prebuilt") {
         eprintln!("isolane-worker: the V8 sandbox is not securely configured; refusing to run guest code");
         return ExitCode::from(3);
     }
@@ -141,7 +152,7 @@ fn serve(lock_down: bool, memory_limit: Option<u64>) -> ExitCode {
     let out = Arc::new(Writer::new(std::io::stdout()));
     out.send(&Out::Ready {
         v8: v8::V8::get_version(),
-        sandbox_secure: true,
+        sandbox_secure: sandbox_secure(),
         lockdown: lockdown::Report { landlock, seccomp },
     });
 

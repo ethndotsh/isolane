@@ -19,6 +19,30 @@ use crate::proto::{fail, ErrorCode, Failure, Out};
 
 pub type Output = Arc<Writer<Stdout>>;
 
+static PLATFORM: std::sync::OnceLock<v8::SharedRef<v8::Platform>> = std::sync::OnceLock::new();
+
+/// The platform V8 was initialized with, for running each isolate's
+/// foreground tasks.
+pub fn set_platform(platform: v8::SharedRef<v8::Platform>) {
+    let _ = PLATFORM.set(platform);
+}
+
+/// Run the foreground tasks V8 has posted for this isolate: the results of
+/// background work (async WebAssembly compilation) and GC steps. Returns
+/// whether any ran.
+fn pump_tasks(isolate: &v8::Isolate) -> bool {
+    let Some(platform) = PLATFORM.get() else { return false };
+    let mut ran = false;
+    while v8::Platform::pump_message_loop(platform, isolate, false) {
+        ran = true;
+    }
+    ran
+}
+
+/// How often to look for V8's foreground tasks while it has background work
+/// in flight and nothing else to wait for.
+const BACKGROUND_POLL: Duration = Duration::from_millis(1);
+
 /// Native stack for VM threads; V8's own stack limit (about 1 MiB) sits
 /// well inside it. Stacks count against the worker's memory limit, so keep
 /// them modest.
@@ -456,19 +480,32 @@ fn eval(
             }
             v8::PromiseState::Pending => {}
         }
+        if pump_tasks(tc) {
+            continue;
+        }
         let waiting = tc.get_slot::<Rc<Bridge>>().map(|b| !b.pending.borrow().is_empty()).unwrap_or(false);
-        if !waiting {
+        let background = tc.has_pending_background_tasks();
+        if !waiting && !background {
             return EvalEnd::Done(Err(fail(
                 ErrorCode::Unsettled,
                 "promise never settled: there are no timers or I/O, only host functions",
             )));
         }
-        let msg = match deadline {
-            Some(d) => match rx.recv_timeout(d.saturating_duration_since(Instant::now())) {
+        // Wait for a host reply; with V8 work in flight, only briefly, then
+        // look for its results.
+        let left = deadline.map(|d| d.saturating_duration_since(Instant::now()));
+        if left == Some(Duration::ZERO) {
+            return EvalEnd::Done(Err(fail(ErrorCode::Timeout, "timed out waiting for a host function")));
+        }
+        let wait = match (background, left) {
+            (true, Some(l)) => Some(l.min(BACKGROUND_POLL)),
+            (true, None) => Some(BACKGROUND_POLL),
+            (false, l) => l,
+        };
+        let msg = match wait {
+            Some(w) => match rx.recv_timeout(w) {
                 Ok(m) => m,
-                Err(RecvTimeoutError::Timeout) => {
-                    return EvalEnd::Done(Err(fail(ErrorCode::Timeout, "timed out waiting for a host function")))
-                }
+                Err(RecvTimeoutError::Timeout) => continue,
                 Err(RecvTimeoutError::Disconnected) => return EvalEnd::Disposed,
             },
             None => match rx.recv() {
@@ -569,6 +606,7 @@ fn vm_main(id: u64, config: VmConfig, rx: Receiver<VmMsg>, out: Output) {
                 }
                 let deadline = config.timeout.map(|t| watchdog.arm(t));
                 let end = eval(&mut isolate, &context, &code, &rx, &mut backlog, deadline);
+                pump_tasks(&isolate);
                 let fired = watchdog.disarm();
                 if isolate.is_execution_terminating() || fired || oom.hit.load(Ordering::SeqCst) {
                     isolate.cancel_terminate_execution();
@@ -602,6 +640,9 @@ fn vm_main(id: u64, config: VmConfig, rx: Receiver<VmMsg>, out: Output) {
                     v8::scope_with_context!(scope, &mut isolate, &context);
                     apply_host_reply(scope, call, ok, value, error);
                     scope.perform_microtask_checkpoint();
+                    while pump_tasks(scope) {
+                        scope.perform_microtask_checkpoint();
+                    }
                 }
                 let fired = watchdog.disarm();
                 if isolate.is_execution_terminating() || fired || oom.hit.load(Ordering::SeqCst) {

@@ -150,7 +150,10 @@ export class WorkerProcess {
         }
         if (!msg) return this.#fail('protocol-violation', 'malformed message');
         if (msg.t === 'ready') {
-          if (isReady || !msg.sandboxSecure) return this.#fail('protocol-violation', 'unexpected ready');
+          // ISOLANE_DEV_INSECURE=1 admits a dev build of the worker (no V8
+          // sandbox), outside strict mode only, for local development.
+          const devInsecure = !strict && process.env.ISOLANE_DEV_INSECURE === '1';
+          if (isReady || (!msg.sandboxSecure && !devInsecure)) return this.#fail('protocol-violation', 'unexpected ready');
           const { t: _, ...info } = msg;
           if (strict && !meetsStrict(info)) {
             return this.#fail(

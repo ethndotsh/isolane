@@ -5,6 +5,14 @@ edition.workspace = true
 license.workspace = true
 
 [features]
+default = ["sandbox"]
+sandbox = ["v8/v8_enable_sandbox"]
+# Local development only (`--no-default-features --features dev-prebuilt`):
+# build against rusty_v8's prebuilt V8, which has no sandbox and no clock
+# patch, for fast iteration where V8 can't be built. The worker reports its
+# sandbox as not secure, which supervisors refuse unless
+# ISOLANE_DEV_INSECURE=1 and strict mode is off. Never ship it.
+dev-prebuilt = []
 # Test-only: `--escape-test <probe>` locks the worker down, then attempts a
 # forbidden operation (test/lockdown.test.mjs expects it to fail). Never
 # enabled in release artifacts.
@@ -13,7 +21,7 @@ escape-tests = []
 [dependencies]
 # rusty_v8 built from source (V8_FROM_SOURCE=1): no upstream prebuilt has
 # the V8 sandbox enabled. The checkout lives in build/ (see scripts/).
-v8 = { path = "../../build/rusty_v8", features = ["v8_enable_sandbox"] }
+v8 = { path = "../../build/rusty_v8" }
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["raw_value"] }
 
