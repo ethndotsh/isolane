@@ -2,6 +2,7 @@
 // a Tenant is one tenant's handle, and an Isolate is one V8 isolate in a
 // tenant's worker.
 
+import { resolveWorkerBinary } from './worker-binary.js';
 import { resolve as resolvePath } from 'node:path';
 
 import { resolve, validateConfig, validateLimits, type IsolateConfig, type ResolvedConfig, type ResolvedLimits, type RuntimeLimits } from './config.js';
@@ -23,7 +24,10 @@ export interface RunConfig extends IsolateConfig {
 }
 
 export interface RuntimeOptions {
-  /** Path to the isolane-worker binary. Defaults to `$ISOLANE_WORKER`. */
+  /**
+   * Path to the isolane-worker binary. Defaults to `$ISOLANE_WORKER`, then
+   * the platform package npm installed with isolane (`@isolane/worker-*`).
+   */
   workerPath?: string;
   /**
    * Refuse to run guest code unless the worker reports a secure V8 sandbox,
@@ -117,8 +121,12 @@ export class Runtime {
       const hint = RUNTIME_RENAMED[key];
       throw invalidConfig(key, hint ? `is not a Runtime option; use ${hint}` : 'is not a Runtime option');
     }
-    const workerPath = options.workerPath ?? process.env.ISOLANE_WORKER;
-    if (!workerPath) throw invalidConfig('workerPath', 'is required (pass workerPath or set ISOLANE_WORKER)');
+    let workerPath = options.workerPath;
+    if (!workerPath) {
+      const found = resolveWorkerBinary();
+      if ('error' in found) throw invalidConfig('workerPath', `is unset and ${found.error}`);
+      workerPath = found.path;
+    }
     // Workers start in `/`, so a relative path must be resolved here.
     this.#workerPath = resolvePath(workerPath);
     if (options.strict !== undefined && typeof options.strict !== 'boolean') throw invalidConfig('strict', 'must be a boolean');
