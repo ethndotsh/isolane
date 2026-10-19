@@ -8,11 +8,12 @@ use std::time::{Duration, Instant};
 
 use serde_json::value::RawValue;
 
+use super::context::Shims;
 use super::host_call::{apply_host_reply, Bridge};
 use super::mailbox::Mailbox;
 use super::watchdog::CpuClock;
 use super::{pump_tasks, Output, VmMsg};
-use crate::proto::{fail, limit, ErrorCode, Failure, GuestError, Out, Usage};
+use crate::proto::{fail, limit, ErrorCode, Failure, GuestError, Out, ShimRef, Usage};
 
 /// How often to look for V8's foreground tasks while it has background work
 /// in flight and nothing else to wait for.
@@ -60,6 +61,13 @@ fn guest_failure(scope: &mut v8::PinScope, exception: v8::Local<v8::Value>) -> F
     f
 }
 
+/// `ERR_SHIM`: the embedder's shim failed, not the guest's code.
+pub(super) fn shim_failure(shim: &ShimRef, what: String) -> Failure {
+    let mut f = fail(ErrorCode::Shim, clip(format!("the {} shim {} {what}", shim.phase, shim.filename)));
+    f.shim = Some(shim.clone());
+    f
+}
+
 fn clip(mut s: String) -> String {
     if s.len() > ERROR_TEXT_MAX {
         let mut cut = ERROR_TEXT_MAX;
@@ -96,11 +104,13 @@ fn to_json(scope: &mut v8::PinScope, value: v8::Local<v8::Value>) -> Result<Stri
     }
 }
 
-/// Run one eval: compile, run, then drive microtasks and host replies until
-/// the completion value (or the promise it returned) settles.
+/// Run one eval: the `before` shims, then compile and run the code, then
+/// drive microtasks and host replies until the completion value (or the
+/// promise it returned) settles; then each `after` shim the same way.
 pub(super) fn eval(
     isolate: &mut v8::Isolate,
     context: &v8::Global<v8::Context>,
+    shims: &Shims,
     code: &str,
     mailbox: &Mailbox,
     deadline: Option<Instant>,
@@ -117,35 +127,98 @@ pub(super) fn eval(
     if let Some(bridge) = tc.get_slot::<Rc<Bridge>>() {
         bridge.log_budget.set(crate::limits::get().log_bytes);
     }
+    let shim_threw = |tc: &mut v8::PinnedRef<v8::TryCatch<v8::HandleScope>>, at: &ShimRef| {
+        let what = match tc.exception() {
+            Some(e) => format!("threw: {}", describe(tc, e)),
+            None => "failed".into(),
+        };
+        shim_failure(at, what)
+    };
+    for (script, at) in &shims.before {
+        let script = v8::Local::new(tc, script);
+        if script.run(tc).is_none() {
+            return EvalEnd::Done(Err(shim_threw(tc, at)));
+        }
+    }
     let Some(source) = v8::String::new(tc, code) else {
         return EvalEnd::Done(Err(fail(ErrorCode::Internal, "source too large")));
     };
     let Some(script) = v8::Script::compile(tc, source, None) else {
         return EvalEnd::Done(Err(guest_error(tc)));
     };
-    let Some(result) = script.run(tc) else {
+    let Some(mut value) = script.run(tc) else {
         return EvalEnd::Done(Err(guest_error(tc)));
     };
 
-    let Ok(promise) = v8::Local::<v8::Promise>::try_from(result) else {
-        tc.perform_microtask_checkpoint();
-        return EvalEnd::Done(to_json(tc, result));
-    };
+    // What's settling: the guest's value (None), or `after` shim i's promise.
+    let mut stage: Option<usize> = None;
+    let mut result = value;
+    loop {
+        let settled = match v8::Local::<v8::Promise>::try_from(value) {
+            Err(_) => {
+                tc.perform_microtask_checkpoint();
+                Ok(value)
+            }
+            Ok(promise) => match settle(tc, promise, mailbox, deadline) {
+                Settled::Fulfilled => Ok(promise.result(tc)),
+                Settled::Rejected => Err(promise.result(tc)),
+                Settled::Failed(f) => {
+                    let f = match stage {
+                        Some(i) if f.code == ErrorCode::Unsettled => shim_failure(&shims.after[i].1, "never settled".into()),
+                        _ => f,
+                    };
+                    return EvalEnd::Done(Err(f));
+                }
+                Settled::Disposed => return EvalEnd::Disposed,
+            },
+        };
+        match (settled, stage) {
+            (Err(e), None) => return EvalEnd::Done(Err(guest_failure(tc, e))),
+            (Err(e), Some(i)) => {
+                let what = format!("threw: {}", describe(tc, e));
+                return EvalEnd::Done(Err(shim_failure(&shims.after[i].1, what)));
+            }
+            (Ok(v), None) => result = v,
+            // An `after` shim's value replaces the result unless it's undefined.
+            (Ok(v), Some(_)) if !v.is_undefined() => result = v,
+            (Ok(_), Some(_)) => {}
+        }
+        let next = stage.map_or(0, |i| i + 1);
+        let Some((func, at)) = shims.after.get(next) else {
+            return EvalEnd::Done(to_json(tc, result));
+        };
+        let func = v8::Local::new(tc, func);
+        let this = v8::undefined(tc).into();
+        let Some(promise) = func.call(tc, this, &[result]) else {
+            return EvalEnd::Done(Err(shim_threw(tc, at)));
+        };
+        value = promise;
+        stage = Some(next);
+    }
+}
 
+enum Settled {
+    Fulfilled,
+    Rejected,
+    Failed(Failure),
+    Disposed,
+}
+
+/// Drive microtasks, timers, and host replies until `promise` settles.
+fn settle(
+    tc: &mut v8::PinnedRef<v8::TryCatch<v8::HandleScope>>,
+    promise: v8::Local<v8::Promise>,
+    mailbox: &Mailbox,
+    deadline: Option<Instant>,
+) -> Settled {
     loop {
         tc.perform_microtask_checkpoint();
         if tc.has_terminated() {
-            return EvalEnd::Done(Err(limit("timeoutMs", "terminated")));
+            return Settled::Failed(limit("timeoutMs", "terminated"));
         }
         match promise.state() {
-            v8::PromiseState::Fulfilled => {
-                let v = promise.result(tc);
-                return EvalEnd::Done(to_json(tc, v));
-            }
-            v8::PromiseState::Rejected => {
-                let e = promise.result(tc);
-                return EvalEnd::Done(Err(guest_failure(tc, e)));
-            }
+            v8::PromiseState::Fulfilled => return Settled::Fulfilled,
+            v8::PromiseState::Rejected => return Settled::Rejected,
             v8::PromiseState::Pending => {}
         }
         if pump_tasks(tc) {
@@ -162,16 +235,16 @@ pub(super) fn eval(
         // without listeners doesn't).
         let timers = timer.is_some_and(|(_, refed)| refed);
         if !waiting && !background && !timers {
-            return EvalEnd::Done(Err(fail(
+            return Settled::Failed(fail(
                 ErrorCode::Unsettled,
                 "promise never settled: there are no timers or I/O, only host functions",
-            )));
+            ));
         }
         // Wait for a host reply, the next timer, or (with V8 work in flight)
         // briefly, then look for its results.
         let left = deadline.map(|d| d.saturating_duration_since(Instant::now()));
         if left == Some(Duration::ZERO) {
-            return EvalEnd::Done(Err(limit("timeoutMs", "timed out waiting for a host function or timer")));
+            return Settled::Failed(limit("timeoutMs", "timed out waiting for a host function or timer"));
         }
         let mut wait = left;
         if background {
@@ -183,11 +256,11 @@ pub(super) fn eval(
         let msg = match mailbox.during_eval(wait) {
             Ok(m) => m,
             Err(RecvTimeoutError::Timeout) => continue,
-            Err(RecvTimeoutError::Disconnected) => return EvalEnd::Disposed,
+            Err(RecvTimeoutError::Disconnected) => return Settled::Disposed,
         };
         match msg {
             VmMsg::HostReply { call, reply } => apply_host_reply(tc, call, reply),
-            VmMsg::Dispose => return EvalEnd::Disposed,
+            VmMsg::Dispose => return Settled::Disposed,
             VmMsg::Eval { .. } => unreachable!("deferred by the mailbox"),
         }
     }
@@ -233,7 +306,7 @@ pub(super) fn send_result(out: &Output, req: u64, result: Result<String, Failure
     match result {
         Ok(json) => {
             let value = RawValue::from_string(json).expect("V8 produced JSON");
-            out.send(&Out::Result { req, ok: true, value: Some(&value), code: None, message: None, guest: None, limit: None, usage });
+            out.send(&Out::Result { req, ok: true, value: Some(&value), code: None, message: None, guest: None, limit: None, shim: None, usage });
         }
         Err(f) => out.send(&Out::Result {
             req,
@@ -243,6 +316,7 @@ pub(super) fn send_result(out: &Output, req: u64, result: Result<String, Failure
             message: Some(&f.message),
             guest: f.guest.as_ref(),
             limit: f.limit,
+            shim: f.shim.as_ref(),
             usage,
         }),
     }

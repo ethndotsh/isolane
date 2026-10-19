@@ -3,7 +3,7 @@
 //! across VMs.
 //!
 //! - `context`: the context: web platform, removed globals, console, host
-//!   functions in their namespaces, the prelude
+//!   functions in their namespaces, the prelude, the embedder's shims
 //! - `eval`: running guest code and sending results
 //! - `host_call`: host functions and their replies
 //! - `console`: guest console output
@@ -27,9 +27,9 @@ use std::sync::mpsc::{Receiver, RecvTimeoutError};
 use std::sync::Arc;
 
 use crate::frame::Writer;
-use crate::proto::{fail, limit, ErrorCode, Out, Usage};
+use crate::proto::{fail, limit, ErrorCode, Failure, Out, Usage};
 pub use console::guest_log;
-use context::{allow_wasm, deny_wasm, new_context};
+use context::{allow_wasm, deny_wasm, new_context, Shims};
 use eval::{eval, refuse_all, run_idle_timers, send_result, usage, EvalEnd};
 use host_call::{apply_host_reply, Bridge};
 use mailbox::Mailbox;
@@ -74,6 +74,7 @@ pub struct VmConfig {
     pub base_url: Option<String>,
     pub functions: Vec<crate::proto::FunctionSpec>,
     pub prelude: Option<String>,
+    pub shims: crate::proto::Shims,
 }
 
 // ---- seeded entropy ----
@@ -206,15 +207,30 @@ fn vm_main(id: u64, config: VmConfig, rx: Receiver<VmMsg>, out: Output) {
     });
     isolate.set_slot(bridge.clone());
     // Set once the VM can't safely run again (it hit its heap limit, or its
-    // setup failed: then it keeps a bare context and refuses every eval).
-    let mut retired: Option<String> = None;
-    let context = match new_context(&mut isolate, &config) {
-        Ok(context) => context,
-        Err(cause) => {
-            retired = Some(cause);
+    // setup failed: then it keeps a bare context and refuses every eval
+    // with this).
+    let mut retired: Option<Failure> = None;
+    let retire = |cause: String| fail(ErrorCode::IsolateRetired, cause);
+    // Setup runs the embedder's `setup` shims: under the eval budget.
+    bridge.deadline.set(watchdog.arm(timeout, cpu));
+    let created = new_context(&mut isolate, &config);
+    bridge.deadline.set(None);
+    let fired = watchdog.disarm() != Fired::No || bridge.timed_out.take();
+    if isolate.is_execution_terminating() || fired || oom.hit.load(Ordering::SeqCst) {
+        isolate.cancel_terminate_execution();
+    }
+    let (context, shims) = match created {
+        Ok(created) if !fired && !oom.hit.load(Ordering::SeqCst) => created,
+        failed => {
+            retired = Some(match failed {
+                _ if oom.hit.load(Ordering::SeqCst) => limit("heapBytes", "the isolate's setup exceeded its heap limit (limits.heapBytes)"),
+                _ if fired => limit("timeoutMs", "the isolate's setup shims ran past its time limit (limits.timeoutMs, limits.cpuMs)"),
+                Err(f) => f,
+                Ok(_) => unreachable!(),
+            });
             v8::scope!(let scope, &mut isolate);
             let bare = v8::Context::new(scope, Default::default());
-            v8::Global::new(scope, bare)
+            (v8::Global::new(scope, bare), Shims { before: Vec::new(), after: Vec::new() })
         }
     };
 
@@ -238,7 +254,7 @@ fn vm_main(id: u64, config: VmConfig, rx: Receiver<VmMsg>, out: Output) {
                     isolate.cancel_terminate_execution();
                 }
                 if oom.hit.load(Ordering::SeqCst) {
-                    retired = Some("the isolate was terminated by an earlier timer callback (heap limit); create a new one".into());
+                    retired = Some(retire("the isolate was terminated by an earlier timer callback (heap limit); create a new one".into()));
                 }
                 let spent = usage(&mut isolate, cpu_clock, cpu_start);
                 out.send(&Out::Usage { vm: id, usage: spent });
@@ -250,14 +266,14 @@ fn vm_main(id: u64, config: VmConfig, rx: Receiver<VmMsg>, out: Output) {
             VmMsg::Dispose => break,
             VmMsg::Eval { req, code, last } => {
                 if let Some(cause) = &retired {
-                    send_result(&out, req, Err(fail(ErrorCode::IsolateRetired, cause.clone())), Usage::default());
+                    send_result(&out, req, Err(cause.clone()), Usage::default());
                     continue;
                 }
                 let cpu_start = cpu_clock.map(|c| c.now()).unwrap_or_default();
                 let deadline = watchdog.arm(timeout, cpu);
                 bridge.deadline.set(deadline);
                 bridge.timed_out.set(false);
-                let end = eval(&mut isolate, &context, &code, &bridge.mailbox, deadline);
+                let end = eval(&mut isolate, &context, &shims, &code, &bridge.mailbox, deadline);
                 pump_tasks(&isolate);
                 bridge.deadline.set(None);
                 let fired = match watchdog.disarm() {
@@ -274,7 +290,7 @@ fn vm_main(id: u64, config: VmConfig, rx: Receiver<VmMsg>, out: Output) {
                 };
                 let result = if oom.hit.load(Ordering::SeqCst) {
                     let cause = "the isolate exceeded its heap limit (limits.heapBytes)";
-                    retired = Some(format!("the isolate was terminated by an earlier eval ({cause}); create a new one"));
+                    retired = Some(retire(format!("the isolate was terminated by an earlier eval ({cause}); create a new one")));
                     Err(limit("heapBytes", cause))
                 } else if fired == Fired::Wall {
                     let ms = config.limits.timeout_ms.unwrap_or(0);
@@ -314,7 +330,7 @@ fn vm_main(id: u64, config: VmConfig, rx: Receiver<VmMsg>, out: Output) {
                     isolate.cancel_terminate_execution();
                 }
                 if oom.hit.load(Ordering::SeqCst) {
-                    retired = Some("the isolate was terminated by an earlier continuation (heap limit); create a new one".into());
+                    retired = Some(retire("the isolate was terminated by an earlier continuation (heap limit); create a new one".into()));
                 }
                 let spent = usage(&mut isolate, cpu_clock, cpu_start);
                 out.send(&Out::Usage { vm: id, usage: spent });
@@ -324,6 +340,7 @@ fn vm_main(id: u64, config: VmConfig, rx: Receiver<VmMsg>, out: Output) {
     watchdog.close();
     // The isolate holds a raw pointer to `oom`, and the context handle needs
     // a live isolate: drop in that order.
+    drop(shims);
     drop(context);
     drop(isolate);
     drop(oom);

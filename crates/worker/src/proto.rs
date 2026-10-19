@@ -42,6 +42,9 @@ pub enum In {
         /// Trusted setup run in the context before guest code (the
         /// supervisor's fetch/fs/connect wrappers, and `globals`).
         prelude: Option<String>,
+        /// The embedder's shims (`shims`), in the order they run.
+        #[serde(default)]
+        shims: Shims,
     },
     Eval {
         vm: u64,
@@ -92,6 +95,34 @@ pub struct FunctionSpec {
     pub sync: bool,
 }
 
+/// Trusted embedder code run around guest code. `setup` runs once, after
+/// the prelude; `before` before each eval's code; `after` once its value
+/// settles, each as the body of `async function (result)`.
+#[derive(Deserialize, Default)]
+pub struct Shims {
+    #[serde(default)]
+    pub setup: Vec<Shim>,
+    #[serde(default)]
+    pub before: Vec<Shim>,
+    #[serde(default)]
+    pub after: Vec<Shim>,
+}
+
+#[derive(Deserialize)]
+pub struct Shim {
+    pub code: String,
+    /// Its name in stack traces and in `ERR_SHIM` errors.
+    pub filename: String,
+}
+
+/// Which shim failed, for `ERR_SHIM`.
+#[derive(Clone, Serialize)]
+pub struct ShimRef {
+    pub phase: &'static str,
+    pub index: u32,
+    pub filename: String,
+}
+
 /// A step into a JSON value: an object key or an array index.
 #[derive(Deserialize, Clone)]
 #[serde(untagged)]
@@ -102,7 +133,7 @@ pub enum PathSegment {
 
 /// Why an eval failed (`IsolaneError` codes; the supervisor adds its own
 /// for worker-level failures).
-#[derive(Clone, Copy, Serialize)]
+#[derive(Clone, Copy, PartialEq, Serialize)]
 pub enum ErrorCode {
     /// A limit ran out; `Failure::limit` names it.
     #[serde(rename = "ERR_LIMIT")]
@@ -117,6 +148,9 @@ pub enum ErrorCode {
     NotSerializable,
     #[serde(rename = "ERR_UNSETTLED")]
     Unsettled,
+    /// A shim (embedder code) threw or never settled; `Failure::shim` says which.
+    #[serde(rename = "ERR_SHIM")]
+    Shim,
     #[serde(rename = "ERR_INTERNAL")]
     Internal,
 }
@@ -140,6 +174,8 @@ pub struct Failure {
     pub guest: Option<GuestError>,
     /// For `ERR_LIMIT`: which limit, by its public name (`timeoutMs`, ...).
     pub limit: Option<&'static str>,
+    /// For `ERR_SHIM`: which shim.
+    pub shim: Option<ShimRef>,
 }
 
 pub fn fail(code: ErrorCode, message: impl Into<String>) -> Failure {
@@ -148,6 +184,7 @@ pub fn fail(code: ErrorCode, message: impl Into<String>) -> Failure {
         message: message.into(),
         guest: None,
         limit: None,
+        shim: None,
     }
 }
 
@@ -158,6 +195,7 @@ pub fn limit(limit: &'static str, message: impl Into<String>) -> Failure {
         message: message.into(),
         guest: None,
         limit: Some(limit),
+        shim: None,
     }
 }
 
@@ -200,6 +238,8 @@ pub enum Out<'a> {
         guest: Option<&'a GuestError>,
         #[serde(skip_serializing_if = "Option::is_none")]
         limit: Option<&'static str>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        shim: Option<&'a ShimRef>,
         #[serde(flatten)]
         usage: Usage,
     },

@@ -242,7 +242,7 @@ export class Runtime {
     }
     const call = validateConfig(config, '', 'call');
     const own = this.#tenantLayer(tenant);
-    const resolved = resolve([this.#runtimeLayer(), this.#defaults, own, call], this.#limits);
+    const resolved = resolve([this.#runtimeLayer(), this.#defaults, own, call], this.#limits, ['runtime', 'defaults', 'tenant', 'call']);
     const chain = new HookChain(resolved.hooks, this.#emitter);
     const worker = this.#workerFor(tenant, own);
     const id = this.#nextIsolate++;

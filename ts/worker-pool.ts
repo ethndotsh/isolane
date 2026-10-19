@@ -5,7 +5,7 @@
 
 import { splitBytes, type BinaryPart } from './binary.js';
 import { capabilities } from './capabilities.js';
-import { workerLimits, type ResolvedConfig, type ResolvedLimits } from './config.js';
+import { workerLimits, type ResolvedConfig, type ResolvedLimits, type ResolvedShims } from './config.js';
 import { IsolaneError, invalidConfig, isIsolaneErrorCode, limitError, type IsolaneErrorCode } from './errors.js';
 import type { HookChain } from './hooks.js';
 import type { HostContext, HostEntry } from './host.js';
@@ -116,6 +116,8 @@ export interface IsolateState {
   readonly chain: HookChain;
   readonly timeoutMs: number | null;
   readonly codeBytes: number;
+  /** Its shims, for naming the one in an `ERR_SHIM`. */
+  readonly shims: ResolvedShims;
   /** When its queued evals will have run out their timeouts (they run one at a time). */
   busyUntil: number;
   readonly calls: Map<number, Call>;
@@ -225,6 +227,7 @@ export class TenantWorker {
       chain,
       timeoutMs: config.limits.timeoutMs,
       codeBytes: config.limits.codeBytes,
+      shims: config.shims,
       busyUntil: 0,
       calls: new Map(),
       dispose: caps.dispose,
@@ -243,6 +246,7 @@ export class TenantWorker {
       baseUrl: config.web ? config.web.baseUrl : undefined,
       functions: functions.map((f) => ({ path: f.path, sync: f.sync })),
       prelude: caps.prelude,
+      shims: config.shims,
     });
     return state;
   }
@@ -336,7 +340,14 @@ export class TenantWorker {
       if (msg.ok) pending.resolve(msg.value);
       else {
         const code = isIsolaneErrorCode(msg.code) ? msg.code : 'ERR_INTERNAL';
-        const err = new IsolaneError(code, msg.message, { tenant: this.tenant, guest: msg.guest, limit: msg.limit });
+        const shim = code === 'ERR_SHIM' && msg.shim ? pending.isolate.shims[msg.shim.phase][msg.shim.index] : undefined;
+        const err = new IsolaneError(code, msg.message, {
+          tenant: this.tenant,
+          guest: msg.guest,
+          limit: msg.limit,
+          // The filename from our own config, not the worker's word for it.
+          shim: shim && msg.shim ? { phase: msg.shim.phase, index: msg.shim.index, filename: shim.filename } : undefined,
+        });
         if (code === 'ERR_LIMIT') {
           this.#chain.emit('limit', { tenant: this.tenant, isolate: pending.isolate.id, limit: msg.limit ?? 'unknown', message: msg.message });
           // The eval is over: its host calls have no one waiting.

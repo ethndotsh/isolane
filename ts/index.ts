@@ -13,7 +13,7 @@
 export { Runtime, Tenant, Isolate } from './runtime.js';
 export type { RunConfig, RuntimeOptions } from './runtime.js';
 export { DEFAULT_LIMITS } from './config.js';
-export type { IsolateConfig, IsolateLimits, Limits, RuntimeLimits, TenantLimits, TimeConfig, WebConfig } from './config.js';
+export type { IsolateConfig, IsolateLimits, Limits, RuntimeLimits, TenantLimits, Shim, ShimsConfig, TimeConfig, WebConfig } from './config.js';
 export { hostFunction } from './host.js';
 export type { HostContext, HostFunction, HostFunctionDefinition, HostTree } from './host.js';
 export { deny } from './hooks.js';
@@ -32,7 +32,7 @@ export type {
   WorkerEvent,
 } from './hooks.js';
 export { IsolaneError } from './errors.js';
-export type { GuestErrorInfo, IsolaneErrorCode, IsolaneErrorKind, SchemaIssue } from './errors.js';
+export type { GuestErrorInfo, IsolaneErrorCode, IsolaneErrorKind, SchemaIssue, ShimErrorInfo } from './errors.js';
 export type { ConnectPolicy, FetchPolicy, FsPolicy } from './capabilities.js';
 export type { StandardSchemaV1 } from './schema.js';
 export type { TenantUsage } from './worker-pool.js';

@@ -25,6 +25,8 @@
  *   the field). Thrown synchronously.
  * - `ERR_ISOLATE_CLOSED`: the isolate was closed (or its tenant stopped).
  * - `ERR_RUNTIME_CLOSED`: the runtime was closed.
+ * - `ERR_SHIM`: one of the embedder's `shims` threw (or, for `after`,
+ *   rejected or never settled). See `shim`; the message has its error.
  *
  * security:
  * - `ERR_DENIED`: a `beforeEval` hook refused the eval (`reason`).
@@ -50,6 +52,7 @@ export type IsolaneErrorCode =
   | 'ERR_INVALID_CONFIG'
   | 'ERR_ISOLATE_CLOSED'
   | 'ERR_RUNTIME_CLOSED'
+  | 'ERR_SHIM'
   | 'ERR_DENIED'
   | 'ERR_TENANT_QUARANTINED'
   | 'ERR_WORKER_CRASHED'
@@ -70,6 +73,7 @@ const KINDS: Record<IsolaneErrorCode, IsolaneErrorKind> = {
   ERR_INVALID_CONFIG: 'usage',
   ERR_ISOLATE_CLOSED: 'usage',
   ERR_RUNTIME_CLOSED: 'usage',
+  ERR_SHIM: 'usage',
   ERR_DENIED: 'security',
   ERR_TENANT_QUARANTINED: 'security',
   ERR_WORKER_CRASHED: 'infrastructure',
@@ -95,6 +99,15 @@ export interface GuestErrorInfo {
   stack?: string;
 }
 
+/** Which shim failed, for `ERR_SHIM`. */
+export interface ShimErrorInfo {
+  phase: 'setup' | 'before' | 'after';
+  /** Its position in that phase's resolved list (in run order). */
+  index: number;
+  /** Its name in stack traces: the one given, or `shim:<level>.<phase>.<n>`. */
+  filename: string;
+}
+
 /** A schema issue (Standard Schema), for `ERR_INVALID_RETURN`. */
 export interface SchemaIssue {
   readonly message: string;
@@ -109,6 +122,7 @@ export interface IsolaneErrorDetails {
   issues?: ReadonlyArray<SchemaIssue>;
   /** For `ERR_DENIED`: the hook's reason. */
   reason?: string;
+  shim?: ShimErrorInfo;
   /** Overrides the default for the code (worker-level memory limits are retryable). */
   retryable?: boolean;
   cause?: unknown;
@@ -129,6 +143,8 @@ export class IsolaneError extends Error {
   readonly issues?: ReadonlyArray<SchemaIssue>;
   /** For `ERR_DENIED`: why. */
   readonly reason?: string;
+  /** For `ERR_SHIM`: which shim. */
+  readonly shim?: ShimErrorInfo;
 
   constructor(code: IsolaneErrorCode, message: string, details: IsolaneErrorDetails = {}) {
     super(message, details.cause === undefined ? undefined : { cause: details.cause });
@@ -141,6 +157,7 @@ export class IsolaneError extends Error {
     if (details.limit !== undefined) this.limit = details.limit;
     if (details.issues !== undefined) this.issues = details.issues;
     if (details.reason !== undefined) this.reason = details.reason;
+    if (details.shim !== undefined) this.shim = details.shim;
   }
 }
 

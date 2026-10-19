@@ -1,10 +1,19 @@
 //! A VM's context: the web platform (if on), removed globals, console, host
-//! functions (in their namespaces), and the trusted prelude.
+//! functions (in their namespaces), the trusted prelude, and the
+//! embedder's shims.
 
 use super::console::install_console;
-use super::eval::describe;
+use super::eval::{describe, shim_failure};
 use super::host_call::{host_function, sync_host_function};
 use super::VmConfig;
+use crate::proto::{fail, ErrorCode, Failure, Shim, ShimRef};
+
+/// The `before` and `after` shims, compiled once when the VM starts: each
+/// `before` a script, each `after` an `async function (result)`.
+pub(super) struct Shims {
+    pub before: Vec<(v8::Global<v8::Script>, ShimRef)>,
+    pub after: Vec<(v8::Global<v8::Function>, ShimRef)>,
+}
 
 /// WebAssembly compilation, refused unless the VM allows it (the global is
 /// also deleted then).
@@ -19,14 +28,16 @@ pub(super) unsafe extern "C" fn allow_wasm(_: v8::Local<v8::Context>, _: v8::Loc
 /// timer from, and WebAssembly unless the VM allows it.
 const REMOVED_GLOBALS: &[&str] = &["SharedArrayBuffer", "Atomics"];
 
-pub(super) fn new_context(isolate: &mut v8::Isolate, config: &VmConfig) -> Result<v8::Global<v8::Context>, String> {
+/// The VM's context and its compiled shims. On failure, what every eval
+/// gets instead: `ERR_ISOLATE_RETIRED`, or `ERR_SHIM` when a shim failed.
+pub(super) fn new_context(isolate: &mut v8::Isolate, config: &VmConfig) -> Result<(v8::Global<v8::Context>, Shims), Failure> {
     v8::scope!(let scope, isolate);
     let context = v8::Context::new(scope, Default::default());
     context.set_allow_generation_from_strings(config.eval);
     let scope = &mut v8::ContextScope::new(scope, context);
     let global = context.global(scope);
     if config.web {
-        crate::web::install(scope, global, config.base_url.as_deref())?;
+        crate::web::install(scope, global, config.base_url.as_deref()).map_err(|e| fail(ErrorCode::IsolateRetired, e))?;
     }
     let wasm: &[&str] = if config.wasm { &[] } else { &["WebAssembly"] };
     for name in REMOVED_GLOBALS.iter().chain(wasm) {
@@ -34,7 +45,7 @@ pub(super) fn new_context(isolate: &mut v8::Isolate, config: &VmConfig) -> Resul
         global.delete(scope, key.into());
     }
     install_console(scope, global);
-    install_functions(scope, global, config)?;
+    install_functions(scope, global, config).map_err(|e| fail(ErrorCode::IsolateRetired, e))?;
     if let Some(prelude) = &config.prelude {
         v8::tc_scope!(let tc, scope);
         let ran = v8::String::new(tc, prelude)
@@ -42,7 +53,7 @@ pub(super) fn new_context(isolate: &mut v8::Isolate, config: &VmConfig) -> Resul
             .and_then(|script| script.run(tc));
         if ran.is_none() {
             let msg = tc.exception().map(|e| describe(tc, e)).unwrap_or_else(|| "unknown error".into());
-            return Err(format!("vm setup failed: {msg}"));
+            return Err(fail(ErrorCode::IsolateRetired, format!("vm setup failed: {msg}")));
         }
     }
     if config.web {
@@ -51,7 +62,63 @@ pub(super) fn new_context(isolate: &mut v8::Isolate, config: &VmConfig) -> Resul
         let key = v8::String::new(scope, crate::web::FETCH_HOOK).unwrap();
         global.delete(scope, key.into());
     }
-    Ok(v8::Global::new(scope, context))
+    let shims = compile_shims(scope, &config.shims)?;
+    Ok((v8::Global::new(scope, context), shims))
+}
+
+/// A shim's script, named in stack traces by its filename. `line_offset`
+/// makes up for lines the wrapper adds before the shim's own first line.
+fn shim_script<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    code: &str,
+    filename: &str,
+    line_offset: i32,
+) -> Option<v8::Local<'s, v8::Script>> {
+    let source = v8::String::new(scope, code)?;
+    let name = v8::String::new(scope, filename)?;
+    let origin = v8::ScriptOrigin::new(scope, name.into(), line_offset, 0, false, 0, None, false, false, false, None);
+    v8::Script::compile(scope, source, Some(&origin))
+}
+
+fn shim_ref(phase: &'static str, index: usize, shim: &Shim) -> ShimRef {
+    ShimRef { phase, index: index as u32, filename: shim.filename.clone() }
+}
+
+/// Run the `setup` shims, then compile `before` and `after`. Compiled here,
+/// by the embedder, so they work with `eval` off.
+fn compile_shims(scope: &mut v8::PinScope, shims: &crate::proto::Shims) -> Result<Shims, Failure> {
+    v8::tc_scope!(let tc, scope);
+    let threw = |tc: &mut v8::PinnedRef<v8::TryCatch<v8::HandleScope>>, at: &ShimRef| {
+        let what = match tc.exception() {
+            Some(e) => format!("threw: {}", describe(tc, e)),
+            None => "failed".into(),
+        };
+        shim_failure(at, what)
+    };
+    for (i, shim) in shims.setup.iter().enumerate() {
+        let at = shim_ref("setup", i, shim);
+        if shim_script(tc, &shim.code, &shim.filename, 0).and_then(|s| s.run(tc)).is_none() {
+            return Err(threw(tc, &at));
+        }
+    }
+    let mut before = Vec::with_capacity(shims.before.len());
+    for (i, shim) in shims.before.iter().enumerate() {
+        let at = shim_ref("before", i, shim);
+        let Some(script) = shim_script(tc, &shim.code, &shim.filename, 0) else { return Err(threw(tc, &at)) };
+        before.push((v8::Global::new(tc, script), at));
+    }
+    let mut after = Vec::with_capacity(shims.after.len());
+    for (i, shim) in shims.after.iter().enumerate() {
+        let at = shim_ref("after", i, shim);
+        // The wrapper's first line is its own: line 1 of the shim stays line 1.
+        let wrapped = format!("(async function (result) {{\n{}\n}})", shim.code);
+        let func = shim_script(tc, &wrapped, &shim.filename, -1)
+            .and_then(|s| s.run(tc))
+            .and_then(|f| v8::Local::<v8::Function>::try_from(f).ok());
+        let Some(func) = func else { return Err(threw(tc, &at)) };
+        after.push((v8::Global::new(tc, func), at));
+    }
+    Ok(Shims { before, after })
 }
 
 /// Host functions at their paths: `["db", "getUser"]` is a function on a

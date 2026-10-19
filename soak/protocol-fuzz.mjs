@@ -75,7 +75,8 @@ function message() {
   if (rand() < 0.7) m.ok = rand() < 0.8 ? rand() < 0.5 : weird();
   // `value` is JSON text (or absent); sometimes not valid JSON.
   if (rand() < 0.6) m.value = rand() < 0.7 ? values() : weird();
-  if (rand() < 0.4) m.code = pick(['ERR_LIMIT', 'ERR_GUEST_EXCEPTION', 'ERR_NOPE', weird()]);
+  if (rand() < 0.4) m.code = pick(['ERR_LIMIT', 'ERR_GUEST_EXCEPTION', 'ERR_SHIM', 'ERR_NOPE', weird()]);
+  if (rand() < 0.2) m.shim = pick([{ phase: 'after', index: 0 }, { phase: 'before', index: 7 }, { phase: 'constructor', index: 0 }, weird()]);
   if (rand() < 0.2) m.limit = pick(['timeoutMs', 'heapBytes', 'nope', weird()]);
   if (rand() < 0.4) m.message = weird();
   if (t === 'hostCall') {

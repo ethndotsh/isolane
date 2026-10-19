@@ -98,12 +98,20 @@ wss.on('connection', (socket) => {
 // ---- invocations ----
 
 // Guest code defines `async function handle(request)` and returns
-// `{ status?, headers?, body? }` (body: a string or any JSON value).
-const INVOKE = `(async () => {
-  const r = await handle(request);
-  if (r === null || typeof r !== 'object') return { status: 200, body: r };
-  return r;
-})()`;
+// `{ status?, headers?, body? }` (body: a string or any JSON value). The
+// platform's own code calls it: a shim, run after the app's code as its
+// own script (so the app's line numbers in errors are its own). A handler
+// that throws gets a 500, as on a real platform.
+const INVOKE = {
+  filename: 'platform:invoke.js',
+  code: `try {
+    const r = await handle(request);
+    return r !== null && typeof r === 'object' ? r : { status: 200, body: r };
+  } catch (e) {
+    console.error(\`handle threw: \${e?.stack ?? e}\`);
+    return { status: 500, body: { error: 'ERR_GUEST_EXCEPTION', message: String(e?.message ?? e) } };
+  }`,
+};
 
 const server = createServer(async (req, res) => {
   const url = new URL(req.url, `http://${req.headers.host}`);
@@ -127,11 +135,12 @@ const server = createServer(async (req, res) => {
 
   const started = performance.now();
   try {
-    const out = await runtime.tenant(appName).run(`${app.code}\n;${INVOKE}`, {
+    const out = await runtime.tenant(appName).run(app.code, {
       globals: { request },
       host: app.host,
       fetch: app.fetch,
       hooks: { onLog: app.log },
+      shims: { after: INVOKE },
     });
     const body = typeof out.body === 'string' ? out.body : JSON.stringify(out.body ?? null);
     res.writeHead(Number.isInteger(out.status) ? out.status : 200, {

@@ -39,7 +39,7 @@ export interface IsolationInfo {
 export type WorkerMessage =
   | ({ t: 'ready'; protocol: number } & IsolationInfo)
   | ({ t: 'result'; req: number; ok: true; value: unknown } & WorkerUsage)
-  | ({ t: 'result'; req: number; ok: false; code: string; message: string; guest?: GuestErrorInfo; limit?: string } & WorkerUsage)
+  | ({ t: 'result'; req: number; ok: false; code: string; message: string; guest?: GuestErrorInfo; limit?: string; shim?: { phase: 'setup' | 'before' | 'after'; index: number } } & WorkerUsage)
   | ({ t: 'usage'; vm: number } & WorkerUsage)
   | { t: 'hostCall'; vm: number; call: number; fn: number; args: unknown[] }
   | { t: 'log'; vm: number; level: LogLevel; message: string };
@@ -68,6 +68,16 @@ export const OOM_EXIT_CODE = 6;
 const isUint = (v: unknown): v is number => typeof v === 'number' && Number.isSafeInteger(v) && v >= 0;
 
 const optString = (v: unknown) => (typeof v === 'string' ? v : undefined);
+
+const SHIM_PHASES = new Set(['setup', 'before', 'after']);
+
+function parseShimRef(raw: unknown): { phase: 'setup' | 'before' | 'after'; index: number } | undefined {
+  if (raw === null || typeof raw !== 'object') return undefined;
+  const r = raw as Record<string, unknown>;
+  return typeof r.phase === 'string' && SHIM_PHASES.has(r.phase) && isUint(r.index)
+    ? { phase: r.phase as 'setup' | 'before' | 'after', index: r.index }
+    : undefined;
+}
 
 function parseGuestError(raw: unknown): GuestErrorInfo | undefined {
   if (raw === null || typeof raw !== 'object') return undefined;
@@ -147,6 +157,7 @@ export function parseWorkerMessage(raw: unknown, bytes?: Buffer): WorkerMessage 
         message: m.message,
         guest: parseGuestError(m.guest),
         limit: m.limit as string | undefined,
+        shim: parseShimRef(m.shim),
         ...parseUsage(m),
       };
     case 'usage':

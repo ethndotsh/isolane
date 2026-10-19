@@ -42,6 +42,9 @@ async function typed() {
   });
   const untyped: unknown = await rt.run('1', { tenant: 't' });
   const viaTenant: number = await rt.tenant('t').run('1', { returns: z.number() });
+  rt.tenant('t').isolate({ shims: { setup: 'x', before: ['y', { code: 'z', filename: 'z.js' }], after: { code: 'return result' } } });
+  // @ts-expect-error a shim is code or { code, filename }
+  rt.tenant('t').isolate({ shims: { after: { filename: 'x.js' } } });
   const off = rt.on('limit', (e) => void (e.limit satisfies string));
   off();
   void total;

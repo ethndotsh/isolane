@@ -154,6 +154,47 @@ export type TimeConfig = 'frozen' | 'real' | { fixedMs: number };
 /** The web platform: `true`, or with a base URL for relative URLs (and `location`). */
 export type WebConfig = boolean | { baseUrl?: string };
 
+/** Trusted JS for `shims`: its source, or its source and its name in stack traces. */
+export type Shim = string | { code: string; filename?: string };
+
+/**
+ * The embedder's own JS, run in the isolate around guest code: trusted,
+ * like host functions, and compiled by isolane, so it works with `eval`
+ * off. Each runs as its own script (guest line numbers are unaffected),
+ * named `shim:<level>.<phase>.<n>` in stack traces unless it has a
+ * `filename`. A shim that throws fails the eval with `ERR_SHIM`, not
+ * `ERR_GUEST_EXCEPTION`. Levels concatenate: `defaults`, then
+ * `tenants(name)`, then the call.
+ */
+export interface ShimsConfig {
+  /**
+   * Once, when the isolate is created, after the web platform, host
+   * functions, and globals are in place, so it can wrap or freeze them.
+   * A script: not awaited. If it throws, every eval fails with `ERR_SHIM`.
+   */
+  setup?: Shim | Shim[];
+  /** Before each eval's code, as a script (not awaited). */
+  before?: Shim | Shim[];
+  /**
+   * After each eval's value settles (not when it threw): the body of an
+   * `async function (result)`. A value other than undefined replaces the
+   * result. The innermost level's run first (the call's, then the
+   * tenant's, then the defaults'), each level's in order.
+   */
+  after?: Shim | Shim[];
+}
+
+export interface ResolvedShim {
+  readonly code: string;
+  readonly filename: string;
+}
+
+export interface ResolvedShims {
+  readonly setup: readonly ResolvedShim[];
+  readonly before: readonly ResolvedShim[];
+  readonly after: readonly ResolvedShim[];
+}
+
 /** Everything about an isolate except which tenant it belongs to. */
 export interface IsolateConfig {
   /**
@@ -187,6 +228,8 @@ export interface IsolateConfig {
   limits?: Limits;
   /** Interceptors and events for this level; every level's hooks run. */
   hooks?: Hooks;
+  /** Trusted JS run around guest code: once at setup, and before and after each eval. */
+  shims?: ShimsConfig;
 }
 
 export type TimeSpec = { mode: 'frozen' } | { mode: 'real' } | { mode: 'fixed'; fixedMs: number };
@@ -205,9 +248,42 @@ export interface ResolvedConfig {
   readonly limits: ResolvedLimits;
   /** Every level's hooks, outermost first. */
   readonly hooks: readonly Hooks[];
+  /** In run order. */
+  readonly shims: ResolvedShims;
 }
 
-const CONFIG_KEYS = new Set(['host', 'globals', 'eval', 'wasm', 'web', 'fetch', 'connect', 'fs', 'time', 'random', 'limits', 'hooks']);
+const CONFIG_KEYS = new Set(['host', 'globals', 'eval', 'wasm', 'web', 'fetch', 'connect', 'fs', 'time', 'random', 'limits', 'hooks', 'shims']);
+
+const SHIM_PHASES = ['setup', 'before', 'after'] as const;
+
+function validateShims(shims: unknown, path: string): void {
+  if (shims === undefined) return;
+  if (shims === null || typeof shims !== 'object' || Array.isArray(shims)) throw invalidConfig(path, 'must be { setup, before, after }');
+  for (const [phase, value] of Object.entries(shims)) {
+    if (!(SHIM_PHASES as readonly string[]).includes(phase)) throw invalidConfig(`${path}.${phase}`, 'is not a shims field (fields: setup, before, after)');
+    if (value === undefined) continue;
+    const list = Array.isArray(value) ? value : [value];
+    list.forEach((shim: unknown, i) => {
+      const at = Array.isArray(value) ? `${path}.${phase}.${i}` : `${path}.${phase}`;
+      if (typeof shim === 'string') return;
+      if (shim === null || typeof shim !== 'object') throw invalidConfig(at, 'must be code (a string) or { code, filename }');
+      for (const key of Object.keys(shim)) {
+        if (key !== 'code' && key !== 'filename') throw invalidConfig(`${at}.${key}`, 'is not a shim field (fields: code, filename)');
+      }
+      const s = shim as { code?: unknown; filename?: unknown };
+      if (typeof s.code !== 'string') throw invalidConfig(`${at}.code`, 'must be a string');
+      if (s.filename !== undefined && (typeof s.filename !== 'string' || s.filename === '')) throw invalidConfig(`${at}.filename`, 'must be a non-empty string');
+    });
+  }
+}
+
+function shimList(shims: ShimsConfig, phase: (typeof SHIM_PHASES)[number], level: string): ResolvedShim[] {
+  const value = shims[phase];
+  if (value === undefined) return [];
+  return (Array.isArray(value) ? value : [value]).map((shim, i) =>
+    Object.freeze(typeof shim === 'string' ? { code: shim, filename: `shim:${level}.${phase}.${i}` } : { code: shim.code, filename: shim.filename ?? `shim:${level}.${phase}.${i}` }),
+  );
+}
 
 function checkPolicy(path: string, value: unknown, keys: string[], limitKeys: string[]): void {
   if (value === undefined || value === false) return;
@@ -303,6 +379,7 @@ export function validateConfig(layer: unknown, where: string, level: Level): Iso
   validateLimits(c.limits, at('limits'), level);
   if (c.host !== undefined) flattenHost(c.host, at('host'));
   validateHooks(c.hooks, at('hooks'));
+  validateShims(c.shims, at('shims'));
   return c as IsolateConfig;
 }
 
@@ -318,10 +395,14 @@ function timeSpec(time: TimeConfig | undefined, path: string): TimeSpec {
 /**
  * Fold validated layers (outermost first) into one config. Later layers
  * win per field; `host` and `globals` merge by name, `limits` by field,
- * and `hooks` accumulate (every level's run).
+ * and `hooks` and `shims` accumulate (every level's run). `levels` names
+ * the layers, for shims' default filenames.
  */
-export function resolve(layers: readonly (IsolateConfig | undefined)[], runtimeLimits?: RuntimeLimits): ResolvedConfig {
+export function resolve(layers: readonly (IsolateConfig | undefined)[], runtimeLimits?: RuntimeLimits, levels: readonly string[] = []): ResolvedConfig {
   const host = new Map<string, HostEntry>();
+  const setup: ResolvedShim[] = [];
+  const before: ResolvedShim[] = [];
+  const after: ResolvedShim[][] = [];
   const globals: Record<string, unknown> = {};
   const limits: Record<string, unknown> = { ...DEFAULT_LIMITS, ...runtimeLimits };
   const hooks: Hooks[] = [];
@@ -335,12 +416,18 @@ export function resolve(layers: readonly (IsolateConfig | undefined)[], runtimeL
     time?: TimeConfig;
     seed?: number;
   } = { eval: false, wasm: false, web: false };
-  for (const layer of layers) {
+  for (const [i, layer] of layers.entries()) {
     if (!layer) continue;
     if (layer.host) for (const entry of flattenHost(layer.host, 'host')) host.set(entry.name, entry);
     if (layer.globals) Object.assign(globals, layer.globals);
     if (layer.limits) for (const [k, v] of Object.entries(layer.limits)) if (v !== undefined) limits[k] = v;
     if (layer.hooks) hooks.push(layer.hooks);
+    if (layer.shims) {
+      const level = levels[i] ?? 'config';
+      setup.push(...shimList(layer.shims, 'setup', level));
+      before.push(...shimList(layer.shims, 'before', level));
+      after.unshift(shimList(layer.shims, 'after', level));
+    }
     for (const key of ['eval', 'wasm', 'web', 'fetch', 'connect', 'fs', 'time'] as const) {
       if (layer[key] !== undefined) out = { ...out, [key]: layer[key] };
     }
@@ -367,6 +454,7 @@ export function resolve(layers: readonly (IsolateConfig | undefined)[], runtimeL
     seed: out.seed,
     limits: Object.freeze(limits) as ResolvedLimits,
     hooks: Object.freeze(hooks),
+    shims: Object.freeze({ setup: Object.freeze(setup), before: Object.freeze(before), after: Object.freeze(after.flat()) }),
   });
 }
 
