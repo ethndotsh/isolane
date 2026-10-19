@@ -1,0 +1,233 @@
+//! Host calls: guest-facing host functions (async and sync), the per-isolate
+//! bridge they share, and applying the supervisor's replies.
+
+use std::cell::{Cell, RefCell};
+use std::collections::HashMap;
+use std::rc::Rc;
+use std::sync::mpsc::RecvTimeoutError;
+use std::time::{Duration, Instant};
+
+use serde_json::value::RawValue;
+
+use super::mailbox::Mailbox;
+use super::{Output, Reply, VmMsg};
+use crate::proto::{Out, PathSegment};
+
+/// Per-isolate state reachable from host-function callbacks (isolate slot).
+pub(super) struct Bridge {
+    pub(super) vm: u64,
+    pub(super) out: Output,
+    pub(super) mailbox: Mailbox,
+    pub(super) next_call: Cell<u64>,
+    /// Console bytes left this eval.
+    pub(super) log_budget: Cell<usize>,
+    pub(super) pending: RefCell<HashMap<u64, v8::Global<v8::PromiseResolver>>>,
+    /// When the running eval or continuation must stop (a sync host call
+    /// waits no longer than this).
+    pub(super) deadline: Cell<Option<Instant>>,
+    /// A sync host call gave up at the deadline. The guest code may finish
+    /// before the termination lands (or before the watchdog notices), so
+    /// this, not only the watchdog, makes the eval a timeout.
+    pub(super) timed_out: Cell<bool>,
+}
+
+/// Serialize a host call's arguments and send it; returns the call id.
+/// None if the arguments can't be serialized (the exception is pending).
+/// Arguments that are bytes (ArrayBuffers and views of them) cross as raw
+/// bytes, not JSON, when passed directly; nested inside other values they
+/// serialize as JSON as before. The function's data is its index in the
+/// isolate's function list.
+fn send_host_call(scope: &mut v8::PinScope, args: &v8::FunctionCallbackArguments, bridge: &Bridge) -> Option<u64> {
+    let function = args.data().uint32_value(scope).unwrap_or(u32::MAX);
+    let arr = v8::Array::new(scope, args.length());
+    let mut bin: Vec<(u32, usize)> = Vec::new();
+    let mut attached: Vec<Vec<u8>> = Vec::new();
+    for i in 0..args.length() {
+        let arg = args.get(i);
+        if let Some(b) = arg_bytes(arg) {
+            bin.push((i as u32, b.len()));
+            attached.push(b);
+            let null = v8::null(scope).into();
+            arr.set_index(scope, i as u32, null);
+        } else {
+            arr.set_index(scope, i as u32, arg);
+        }
+    }
+    // A throw here (BigInt, cycles) propagates to the guest caller.
+    let json = v8::json::stringify(scope, arr.into())?.to_rust_string_lossy(scope);
+    let attached_len: usize = attached.iter().map(Vec::len).sum();
+    if !crate::frame::fits(json.len() + 128, attached_len) {
+        let msg = v8::String::new(scope, "host function arguments are larger than 64 MiB").unwrap();
+        let e = v8::Exception::range_error(scope, msg);
+        scope.throw_exception(e);
+        return None;
+    }
+    let call = bridge.next_call.get();
+    bridge.next_call.set(call + 1);
+    let args = RawValue::from_string(json).expect("V8 produced JSON");
+    let attached: Vec<&[u8]> = attached.iter().map(Vec::as_slice).collect();
+    bridge.out.send_with_bytes(&Out::HostCall { vm: bridge.vm, call, function, args: &args, bin: &bin }, &attached);
+    Some(call)
+}
+
+/// A copy of the bytes of an ArrayBuffer or a view of one.
+fn arg_bytes(value: v8::Local<v8::Value>) -> Option<Vec<u8>> {
+    if let Ok(view) = v8::Local::<v8::ArrayBufferView>::try_from(value) {
+        let mut out = vec![0u8; view.byte_length()];
+        let n = view.copy_contents(&mut out);
+        out.truncate(n);
+        return Some(out);
+    }
+    let buffer = v8::Local::<v8::ArrayBuffer>::try_from(value).ok()?;
+    let len = buffer.byte_length();
+    Some(match buffer.data() {
+        Some(p) if len > 0 => unsafe { std::slice::from_raw_parts(p.as_ptr() as *const u8, len) }.to_vec(),
+        _ => Vec::new(),
+    })
+}
+
+/// A new Uint8Array holding `data`, allocated by V8 (inside the sandbox).
+fn new_u8array<'s>(scope: &mut v8::PinScope<'s, '_>, data: &[u8]) -> v8::Local<'s, v8::Value> {
+    let buffer = v8::ArrayBuffer::new(scope, data.len());
+    if let Some(p) = buffer.data() {
+        unsafe { std::ptr::copy_nonoverlapping(data.as_ptr(), p.as_ptr() as *mut u8, data.len()) };
+    }
+    v8::Uint8Array::new(scope, buffer, 0, data.len()).unwrap().into()
+}
+
+/// Put byte values into a parsed host reply at their paths. A path the
+/// value doesn't have is ignored (the supervisor built both).
+fn place_bytes<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    mut value: v8::Local<'s, v8::Value>,
+    bytes: Vec<(Vec<PathSegment>, Vec<u8>)>,
+) -> v8::Local<'s, v8::Value> {
+    for (path, data) in bytes {
+        let u8s = new_u8array(scope, &data);
+        let Some((last, parents)) = path.split_last() else {
+            value = u8s;
+            continue;
+        };
+        let mut holder = value;
+        let key = |scope: &mut v8::PinScope<'s, '_>, seg: &PathSegment| -> v8::Local<'s, v8::Value> {
+            match seg {
+                PathSegment::Index(i) => v8::Integer::new_from_unsigned(scope, *i).into(),
+                PathSegment::Key(k) => v8::String::new(scope, k).unwrap().into(),
+            }
+        };
+        let mut ok = true;
+        for seg in parents {
+            let Ok(obj) = v8::Local::<v8::Object>::try_from(holder) else {
+                ok = false;
+                break;
+            };
+            let k = key(scope, seg);
+            match obj.get(scope, k) {
+                Some(v) => holder = v,
+                None => {
+                    ok = false;
+                    break;
+                }
+            }
+        }
+        if let (true, Ok(obj)) = (ok, v8::Local::<v8::Object>::try_from(holder)) {
+            let k = key(scope, last);
+            obj.set(scope, k, u8s);
+        }
+    }
+    value
+}
+
+/// Guest-facing host function: send a `hostCall` and return a Promise that
+/// the supervisor's reply settles.
+pub(super) fn host_function(scope: &mut v8::PinScope, args: v8::FunctionCallbackArguments, mut rv: v8::ReturnValue<v8::Value>) {
+    let bridge = scope.get_slot::<Rc<Bridge>>().expect("bridge slot").clone();
+    let Some(resolver) = v8::PromiseResolver::new(scope) else { return };
+    let Some(call) = send_host_call(scope, &args, &bridge) else { return };
+    bridge.pending.borrow_mut().insert(call, v8::Global::new(scope, resolver));
+    rv.set(resolver.get_promise(scope).into());
+}
+
+/// Guest-facing sync host function: send a `hostCall`, then block this VM
+/// until its reply arrives (or the deadline passes) and return the result
+/// directly. Everything else that arrives meanwhile waits in the mailbox.
+pub(super) fn sync_host_function(scope: &mut v8::PinScope, args: v8::FunctionCallbackArguments, mut rv: v8::ReturnValue<v8::Value>) {
+    let bridge = scope.get_slot::<Rc<Bridge>>().expect("bridge slot").clone();
+    let Some(call) = send_host_call(scope, &args, &bridge) else { return };
+    loop {
+        let left = bridge.deadline.get().map(|d| d.saturating_duration_since(Instant::now()));
+        if left == Some(Duration::ZERO) {
+            bridge.timed_out.set(true);
+            scope.terminate_execution();
+            return;
+        }
+        let msg = match left {
+            Some(l) => bridge.mailbox.rx.recv_timeout(l),
+            None => bridge.mailbox.rx.recv().map_err(|_| RecvTimeoutError::Disconnected),
+        };
+        match msg {
+            Ok(VmMsg::HostReply { call: c, reply }) if c == call => {
+                crate::clock::advance();
+                match settle(scope, reply) {
+                    Ok(v) => rv.set(v),
+                    Err(e) => {
+                        scope.throw_exception(e);
+                    }
+                }
+                return;
+            }
+            Ok(reply @ VmMsg::HostReply { .. }) => bridge.mailbox.replies.borrow_mut().push_back(reply),
+            Ok(eval @ VmMsg::Eval { .. }) => bridge.mailbox.later.borrow_mut().push_back(eval),
+            Ok(VmMsg::Dispose) | Err(RecvTimeoutError::Disconnected) => {
+                bridge.mailbox.replies.borrow_mut().push_back(VmMsg::Dispose);
+                scope.terminate_execution();
+                return;
+            }
+            Err(RecvTimeoutError::Timeout) => {}
+        }
+    }
+}
+
+/// A reply as the guest sees it: the parsed value, or the error to throw.
+fn settle<'s>(scope: &mut v8::PinScope<'s, '_>, reply: Reply) -> Result<v8::Local<'s, v8::Value>, v8::Local<'s, v8::Value>> {
+    if reply.ok {
+        let parsed = match &reply.value {
+            None => Some(v8::undefined(scope).into()),
+            Some(json) => v8::String::new(scope, json).and_then(|s| v8::json::parse(scope, s)),
+        };
+        return match parsed {
+            Some(v) => Ok(place_bytes(scope, v, reply.bytes)),
+            None => {
+                let msg = v8::String::new(scope, "host function returned invalid JSON").unwrap();
+                Err(v8::Exception::error(scope, msg))
+            }
+        };
+    }
+    let msg = v8::String::new(scope, reply.error.as_deref().unwrap_or("host function failed")).unwrap();
+    let e = match reply.error_name.as_deref() {
+        Some("TypeError") => v8::Exception::type_error(scope, msg),
+        Some("RangeError") => v8::Exception::range_error(scope, msg),
+        Some("SyntaxError") => v8::Exception::syntax_error(scope, msg),
+        _ => v8::Exception::error(scope, msg),
+    };
+    if let Ok(obj) = v8::Local::<v8::Object>::try_from(e) {
+        if let Some(code) = &reply.error_code {
+            let key = v8::String::new(scope, "code").unwrap();
+            let val = v8::String::new(scope, code).unwrap();
+            obj.set(scope, key.into(), val.into());
+        }
+    }
+    Err(e)
+}
+
+pub(super) fn apply_host_reply(scope: &mut v8::PinScope, call: u64, reply: Reply) {
+    let bridge = scope.get_slot::<Rc<Bridge>>().expect("bridge slot").clone();
+    let Some(resolver) = bridge.pending.borrow_mut().remove(&call) else { return };
+    // I/O completed: the guest's clock moves forward.
+    crate::clock::advance();
+    let resolver = v8::Local::new(scope, resolver);
+    match settle(scope, reply) {
+        Ok(v) => resolver.resolve(scope, v),
+        Err(e) => resolver.reject(scope, e),
+    };
+}

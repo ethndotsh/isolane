@@ -162,7 +162,7 @@
   lazy("ProgressEvent", () => eventModule().ProgressEvent);
   lazy("CompressionStream", from(COMPRESSION_JS, "CompressionStream"));
   lazy("DecompressionStream", from(COMPRESSION_JS, "DecompressionStream"));
-  // Fetch. The network itself is the VM's network policy: the prelude
+  // Fetch. The network itself is the isolate's fetch policy: the prelude
   // (ts/capabilities.ts) hands its broker's host function to this hook,
   // which the worker deletes before guest code runs. Without a policy,
   // fetch() rejects with a TypeError.

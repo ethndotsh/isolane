@@ -5,43 +5,39 @@
 use serde::{Deserialize, Serialize};
 use serde_json::value::RawValue;
 
+/// The protocol version. The worker reports it in `ready`; a supervisor
+/// that speaks another version refuses the worker.
+pub const PROTOCOL_VERSION: u32 = 2;
+
 /// Supervisor → worker.
 #[derive(Deserialize)]
 #[serde(tag = "t", rename_all = "camelCase")]
 pub enum In {
+    /// A new isolate. Fields are named as in the public config.
     #[serde(rename_all = "camelCase")]
     Create {
         vm: u64,
-        /// Cap on the isolate's heap. Exceeding it retires the VM.
-        heap_bytes: Option<u64>,
-        /// Wall-clock budget for each eval, and for each host-reply
-        /// continuation that runs between evals.
-        timeout_ms: Option<u64>,
-        /// CPU-time budget for each eval and continuation.
-        cpu_time_limit_ms: Option<u64>,
         #[serde(default)]
-        host_functions: Vec<String>,
-        /// Host functions that return directly instead of a Promise.
+        limits: crate::limits::Limits,
+        /// The guest's wall clock.
         #[serde(default)]
-        sync_host_functions: Vec<String>,
+        time: crate::clock::Mode,
         #[serde(default)]
-        clock: crate::clock::Mode,
-        /// Seeds the isolate's entropy (Math.random, hash seeds).
-        random_seed: Option<u64>,
-        /// eval and new Function.
+        random: Random,
+        /// `eval` and `new Function`.
         #[serde(default)]
-        allow_code_generation: bool,
+        eval: bool,
         /// Keep the WebAssembly global and allow compiling modules.
         #[serde(default)]
-        allow_web_assembly: bool,
-        /// Limits enforced inside the guest.
-        #[serde(default)]
-        limits: crate::limits::GuestLimits,
+        wasm: bool,
         /// Install the WinterTC web platform globals (src/web/).
         #[serde(default)]
-        web_platform: bool,
+        web: bool,
+        /// Host functions, in the order host calls name them (by index).
+        #[serde(default)]
+        functions: Vec<FunctionSpec>,
         /// Trusted setup run in the context before guest code (the
-        /// supervisor's fetch/fs wrappers).
+        /// supervisor's fetch/fs/connect wrappers, and `globals`).
         prelude: Option<String>,
     },
     Eval {
@@ -77,6 +73,22 @@ pub enum In {
     },
 }
 
+#[derive(Deserialize, Default)]
+pub struct Random {
+    /// Seeds the isolate's entropy (Math.random, crypto, hash seeds).
+    pub seed: Option<u64>,
+}
+
+/// A host function: where it goes in the guest's global scope
+/// (`["db", "getUser"]` is `db.getUser`), and whether the guest calls it
+/// synchronously.
+#[derive(Deserialize)]
+pub struct FunctionSpec {
+    pub path: Vec<String>,
+    #[serde(default)]
+    pub sync: bool,
+}
+
 /// A step into a JSON value: an object key or an array index.
 #[derive(Deserialize, Clone)]
 #[serde(untagged)]
@@ -89,20 +101,15 @@ pub enum PathSegment {
 /// for worker-level failures).
 #[derive(Clone, Copy, Serialize)]
 pub enum ErrorCode {
-    #[serde(rename = "ERR_TIMEOUT")]
-    Timeout,
-    #[serde(rename = "ERR_CPU_LIMIT")]
-    CpuLimit,
-    #[serde(rename = "ERR_RESOURCE_LIMIT")]
-    ResourceLimit,
+    /// A limit ran out; `Failure::limit` names it.
+    #[serde(rename = "ERR_LIMIT")]
+    Limit,
     #[serde(rename = "ERR_GUEST_EXCEPTION")]
     GuestException,
-    #[serde(rename = "ERR_MEMORY_LIMIT")]
-    MemoryLimit,
     #[serde(rename = "ERR_ISOLATE_RETIRED")]
     IsolateRetired,
-    #[serde(rename = "ERR_ISOLATE_DISPOSED")]
-    IsolateDisposed,
+    #[serde(rename = "ERR_ISOLATE_CLOSED")]
+    IsolateClosed,
     #[serde(rename = "ERR_NOT_SERIALIZABLE")]
     NotSerializable,
     #[serde(rename = "ERR_UNSETTLED")]
@@ -128,6 +135,8 @@ pub struct Failure {
     pub code: ErrorCode,
     pub message: String,
     pub guest: Option<GuestError>,
+    /// For `ERR_LIMIT`: which limit, by its public name (`timeoutMs`, ...).
+    pub limit: Option<&'static str>,
 }
 
 pub fn fail(code: ErrorCode, message: impl Into<String>) -> Failure {
@@ -135,6 +144,17 @@ pub fn fail(code: ErrorCode, message: impl Into<String>) -> Failure {
         code,
         message: message.into(),
         guest: None,
+        limit: None,
+    }
+}
+
+/// `ERR_LIMIT` for the limit named `limit`.
+pub fn limit(limit: &'static str, message: impl Into<String>) -> Failure {
+    Failure {
+        code: ErrorCode::Limit,
+        message: message.into(),
+        guest: None,
+        limit: Some(limit),
     }
 }
 
@@ -159,6 +179,7 @@ pub struct Usage {
 pub enum Out<'a> {
     #[serde(rename_all = "camelCase")]
     Ready {
+        protocol: u32,
         v8: &'a str,
         sandbox_secure: bool,
         lockdown: crate::lockdown::Report,
@@ -174,6 +195,8 @@ pub enum Out<'a> {
         message: Option<&'a str>,
         #[serde(skip_serializing_if = "Option::is_none")]
         guest: Option<&'a GuestError>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        limit: Option<&'static str>,
         #[serde(flatten)]
         usage: Usage,
     },
@@ -193,7 +216,9 @@ pub enum Out<'a> {
     HostCall {
         vm: u64,
         call: u64,
-        name: &'a str,
+        /// The host function, by its index in `Create::functions`.
+        #[serde(rename = "fn")]
+        function: u32,
         args: &'a RawValue,
         /// Arguments sent as bytes, in the order their bytes follow the
         /// frame's JSON: `[argument index, length]`. `args` has null there.

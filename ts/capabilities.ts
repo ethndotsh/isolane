@@ -1,9 +1,9 @@
 // Network and filesystem access for guest code, brokered by the supervisor.
-// The worker can't open sockets or files (seccomp, Landlock); a VM given a
-// policy gets `fetch` or `fs` globals that are host calls, and this module
-// checks every request against the policy before doing it on the guest's
-// behalf. A policy is only as wide as it says: the defaults are no network
-// and no files.
+// The worker can't open sockets or files (seccomp, Landlock); an isolate
+// given a policy gets `fetch`, `connect`, or `fs` globals that are host
+// calls, and this module checks every request against the policy before
+// doing it on the guest's behalf. A policy is named for the guest API it
+// enables and is only as wide as it says: by default there are none.
 
 import { lookup as dnsLookup, type LookupAddress } from 'node:dns';
 import { constants as fsConstants } from 'node:fs';
@@ -14,20 +14,25 @@ import { BlockList, connect as netConnect, isIP, type Socket } from 'node:net';
 import { connect as tlsConnect } from 'node:tls';
 import { join, posix, sep } from 'node:path';
 
+import { internalEntry, type HostEntry } from './host.js';
+
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type HostFunction = (...args: any[]) => unknown;
+
+/** Called when a policy refuses a request (for `onPolicyDenial`). */
+export type DenialReporter = (api: 'fetch' | 'connect' | 'fs', target: string, reason: string) => void;
 
 const MiB = 1 << 20;
 
 // ---- network ----
 
-export interface NetworkPolicy {
+export interface FetchPolicy {
   /**
    * Hostnames the guest may fetch from: exact (`api.example.com`) or any
    * subdomain (`*.example.com`, not the apex). Ports aren't restricted.
    * Or a function that decides each request (and each redirect hop).
    */
-  allow: readonly string[] | ((url: URL, method: string) => boolean | Promise<boolean>);
+  hosts: readonly string[] | ((url: URL, method: string) => boolean | Promise<boolean>);
   /** Allowed methods. Default: GET, HEAD, POST, PUT, PATCH, DELETE. */
   methods?: readonly string[];
   /**
@@ -36,17 +41,19 @@ export interface NetworkPolicy {
    * on. Default false, checked on the addresses actually connected to, so
    * DNS can't be used to point an allowed name at them.
    */
-  allowPrivateNetworks?: boolean;
-  /** Per response body. Default 10 MiB. */
-  maxResponseBytes?: number;
-  /** Per request body. Default 10 MiB. */
-  maxRequestBytes?: number;
-  /** Per fetch, across redirects. Default 30 s. */
-  timeoutMs?: number;
-  /** Default 5. Each hop is checked against the policy. */
-  maxRedirects?: number;
-  /** Fetches per VM over its lifetime. Default unlimited. */
-  maxRequests?: number;
+  privateNetworks?: boolean;
+  limits?: {
+    /** Fetches per isolate over its lifetime. Default unlimited. */
+    requests?: number;
+    /** Per request body. Default 10 MiB. */
+    requestBytes?: number;
+    /** Per response body. Default 10 MiB. */
+    responseBytes?: number;
+    /** Default 5. Each hop is checked against the policy. */
+    redirects?: number;
+    /** Per fetch, across redirects, body included. Default 30 s. */
+    timeoutMs?: number;
+  };
 }
 
 const DEFAULT_METHODS = ['GET', 'HEAD', 'POST', 'PUT', 'PATCH', 'DELETE'];
@@ -194,16 +201,17 @@ interface InFlight {
  * Every failure reaches the guest as a TypeError, as the Fetch standard
  * has it.
  */
-export function networkBroker(policy: NetworkPolicy): { fn: HostFunction; dispose: () => void } {
-  if (!policy || (!Array.isArray(policy.allow) && typeof policy.allow !== 'function')) {
-    throw new TypeError('isolane: network.allow must be a list of hostnames or a function');
+export function fetchBroker(policy: FetchPolicy, denied: DenialReporter = () => {}): { fn: HostFunction; dispose: () => void } {
+  if (!policy || (!Array.isArray(policy.hosts) && typeof policy.hosts !== 'function')) {
+    throw new TypeError('isolane: fetch.hosts must be a list of hostnames or a function');
   }
   const methods = new Set((policy.methods ?? DEFAULT_METHODS).map((m) => m.toUpperCase()));
-  const maxResponse = policy.maxResponseBytes ?? 10 * MiB;
-  const maxRequest = policy.maxRequestBytes ?? 10 * MiB;
-  const timeoutMs = policy.timeoutMs ?? 30_000;
-  const maxRedirects = policy.maxRedirects ?? 5;
-  const allowPrivate = policy.allowPrivateNetworks === true;
+  const maxResponse = policy.limits?.responseBytes ?? 10 * MiB;
+  const maxRequest = policy.limits?.requestBytes ?? 10 * MiB;
+  const timeoutMs = policy.limits?.timeoutMs ?? 30_000;
+  const maxRedirects = policy.limits?.redirects ?? 5;
+  const maxRequests = policy.limits?.requests;
+  const allowPrivate = policy.privateNetworks === true;
   let requests = 0;
   const inFlight = new Map<number, InFlight>();
 
@@ -215,11 +223,15 @@ export function networkBroker(policy: NetworkPolicy): { fn: HostFunction; dispos
     }
     const host = url.hostname.replace(/^\[|\]$/g, '');
     if (!allowPrivate && isIP(host) && !isPublicAddress(host)) {
+      denied('fetch', url.href, 'not a public address');
       throw new Error(`fetch to ${url.origin} is not allowed: not a public address`);
     }
     const allowed =
-      typeof policy.allow === 'function' ? await policy.allow(new URL(url), method) : hostAllowed(policy.allow, host);
-    if (allowed !== true) throw new Error(`fetch to ${url.origin} is not allowed by the network policy`);
+      typeof policy.hosts === 'function' ? await policy.hosts(new URL(url), method) : hostAllowed(policy.hosts, host);
+    if (allowed !== true) {
+      denied('fetch', url.href, 'not allowed by the fetch policy');
+      throw new Error(`fetch to ${url.origin} is not allowed by the fetch policy`);
+    }
   };
 
   // One hop: resolves when the response's headers arrive (its body unread).
@@ -262,8 +274,9 @@ export function networkBroker(policy: NetworkPolicy): { fn: HostFunction; dispos
     if (body !== undefined && !(body instanceof Uint8Array)) throw new TypeError('fetch: malformed request body');
     if (body && body.length > maxRequest) throw new TypeError(`fetch: request body larger than ${maxRequest} bytes`);
     if (inFlight.size >= MAX_OPEN_FETCHES) throw new TypeError(`fetch: more than ${MAX_OPEN_FETCHES} fetches in flight`);
-    if (policy.maxRequests !== undefined && requests >= policy.maxRequests) {
-      throw new TypeError(`fetch: this VM has used its ${policy.maxRequests} requests`);
+    if (maxRequests !== undefined && requests >= maxRequests) {
+      denied('fetch', String((rawMeta as { url?: unknown } | null)?.url ?? ''), `used its ${maxRequests} requests`);
+      throw new TypeError(`fetch: this isolate has used its ${maxRequests} requests (fetch.limits.requests)`);
     }
     requests++;
     let url: URL;
@@ -273,7 +286,10 @@ export function networkBroker(policy: NetworkPolicy): { fn: HostFunction; dispos
       throw new TypeError(`fetch: invalid URL ${JSON.stringify(meta.url.slice(0, 200))}`);
     }
     let method = meta.method.toUpperCase();
-    if (!methods.has(method)) throw new TypeError(`fetch: method ${method} is not allowed`);
+    if (!methods.has(method)) {
+      denied('fetch', url.href, `method ${method} is not allowed`);
+      throw new TypeError(`fetch: method ${method} is not allowed`);
+    }
     const headers: Record<string, string> = {};
     for (const [k, v] of meta.headers) {
       const name = k.toLowerCase();
@@ -409,21 +425,23 @@ export function networkBroker(policy: NetworkPolicy): { fn: HostFunction; dispos
 
 // ---- sockets ----
 
-export interface SocketPolicy {
+export interface ConnectPolicy {
   /**
    * `host:port` pairs the guest may connect to: `db.example.com:5432`,
    * `*.example.com:443` (subdomains), `cache.example.com:*` (any port), or
    * `[2001:db8::1]:80`. Or a function deciding each connection.
    */
-  allow: readonly string[] | ((hostname: string, port: number) => boolean | Promise<boolean>);
-  /** As for `NetworkPolicy`: non-public addresses are refused by default. */
-  allowPrivateNetworks?: boolean;
-  /** Sockets a VM may have open at once. Default 8. */
-  maxConnections?: number;
-  /** Default 10 s. */
-  connectTimeoutMs?: number;
-  /** Close a socket with no traffic for this long. Default 60 s. */
-  idleTimeoutMs?: number;
+  hosts: readonly string[] | ((hostname: string, port: number) => boolean | Promise<boolean>);
+  /** As for `FetchPolicy`: non-public addresses are refused by default. */
+  privateNetworks?: boolean;
+  limits?: {
+    /** Sockets an isolate may have open at once. Default 8. */
+    connections?: number;
+    /** Default 10 s. */
+    connectMs?: number;
+    /** Close a socket with no traffic for this long. Default 60 s. */
+    idleMs?: number;
+  };
 }
 
 /** Buffered, unread bytes per socket before reading from the network pauses. */
@@ -449,15 +467,15 @@ interface GuestSocket {
   wake?: () => void;
 }
 
-export function socketBroker(policy: SocketPolicy): { fn: HostFunction; dispose: () => void } {
-  if (!policy || (!Array.isArray(policy.allow) && typeof policy.allow !== 'function')) {
-    throw new TypeError('isolane: sockets.allow must be a list of host:port patterns or a function');
+export function connectBroker(policy: ConnectPolicy, denied: DenialReporter = () => {}): { fn: HostFunction; dispose: () => void } {
+  if (!policy || (!Array.isArray(policy.hosts) && typeof policy.hosts !== 'function')) {
+    throw new TypeError('isolane: connect.hosts must be a list of host:port patterns or a function');
   }
-  const allowPrivate = policy.allowPrivateNetworks === true;
+  const allowPrivate = policy.privateNetworks === true;
   const lookup = pinnedLookup(allowPrivate);
-  const maxConnections = policy.maxConnections ?? 8;
-  const connectTimeoutMs = policy.connectTimeoutMs ?? 10_000;
-  const idleTimeoutMs = policy.idleTimeoutMs ?? 60_000;
+  const maxConnections = policy.limits?.connections ?? 8;
+  const connectTimeoutMs = policy.limits?.connectMs ?? 10_000;
+  const idleTimeoutMs = policy.limits?.idleMs ?? 60_000;
   const sockets = new Map<number, GuestSocket>();
   let nextId = 1;
   let disposed = false;
@@ -475,12 +493,19 @@ export function socketBroker(policy: SocketPolicy): { fn: HostFunction; dispose:
     }
     const host = r.hostname.replace(/^\[|\]$/g, '').toLowerCase();
     const port = r.port as number;
-    if (sockets.size >= maxConnections) throw new Error(`connect: this VM already has ${maxConnections} sockets open`);
+    if (sockets.size >= maxConnections) {
+      denied('connect', `${host}:${port}`, `already has ${maxConnections} sockets open`);
+      throw new Error(`connect: this isolate already has ${maxConnections} sockets open (connect.limits.connections)`);
+    }
     if (!allowPrivate && isIP(host) && !isPublicAddress(host)) {
+      denied('connect', `${host}:${port}`, 'not a public address');
       throw new Error(`connect to ${host}:${port} is not allowed: not a public address`);
     }
-    const allowed = typeof policy.allow === 'function' ? await policy.allow(host, port) : socketAllowed(policy.allow, host, port);
-    if (allowed !== true) throw new Error(`connect to ${host}:${port} is not allowed by the socket policy`);
+    const allowed = typeof policy.hosts === 'function' ? await policy.hosts(host, port) : socketAllowed(policy.hosts, host, port);
+    if (allowed !== true) {
+      denied('connect', `${host}:${port}`, 'not allowed by the connect policy');
+      throw new Error(`connect to ${host}:${port} is not allowed by the connect policy`);
+    }
 
     const socket = await new Promise<Socket>((resolve, reject) => {
       const s =
@@ -590,8 +615,10 @@ export interface FsPolicy {
   root: string;
   /** Allow writeFile, mkdir, and rm. Default false (read-only). */
   write?: boolean;
-  /** Largest file the guest may read or write. Default 10 MiB. */
-  maxFileBytes?: number;
+  limits?: {
+    /** Largest file the guest may read or write. Default 10 MiB. */
+    fileBytes?: number;
+  };
 }
 
 /** An fs failure as the guest sees it: a message naming the guest path and
@@ -621,9 +648,9 @@ function fsFailure(op: string, path: string, err: unknown): FsError {
   return new FsError(`fs.${op} ${JSON.stringify(path)}: ${what[code ?? ''] ?? code ?? 'failed'}`, code ?? 'EIO');
 }
 
-export function fsBroker(policy: FsPolicy): HostFunction {
+export function fsBroker(policy: FsPolicy, denied: DenialReporter = () => {}): HostFunction {
   if (!policy || typeof policy.root !== 'string') throw new TypeError('isolane: fs.root must be a directory path');
-  const maxBytes = policy.maxFileBytes ?? 10 * MiB;
+  const maxBytes = policy.limits?.fileBytes ?? 10 * MiB;
   let rootReal: Promise<string> | undefined;
   const root = () => (rootReal ??= realpath(policy.root));
   const inside = (r: string, p: string) => p === r || p.startsWith(r + sep);
@@ -634,7 +661,10 @@ export function fsBroker(policy: FsPolicy): HostFunction {
   const resolveExisting = async (path: string) => {
     const r = await root();
     const real = await realpath(join(r, posix.normalize('/' + path)));
-    if (!inside(r, real)) throw new FsError(`fs: ${JSON.stringify(path)} is outside the root`, 'EACCES');
+    if (!inside(r, real)) {
+      denied('fs', path, 'outside the root');
+      throw new FsError(`fs: ${JSON.stringify(path)} is outside the root`, 'EACCES');
+    }
     return real;
   };
   // For creating or removing an entry: its parent must resolve inside the
@@ -652,7 +682,7 @@ export function fsBroker(policy: FsPolicy): HostFunction {
       try {
         const st = await fh.stat();
         if (!st.isFile()) throw new FsError(`fs.readFile ${JSON.stringify(path)}: not a file`, 'EISDIR');
-        if (st.size > maxBytes) throw new FsError(`fs.readFile ${JSON.stringify(path)}: larger than ${maxBytes} bytes`, 'EFBIG');
+        if (st.size > maxBytes) throw new FsError(`fs.readFile ${JSON.stringify(path)}: larger than ${maxBytes} bytes (fs.limits.fileBytes)`, 'EFBIG');
         return await fh.readFile();
       } finally {
         await fh.close();
@@ -676,7 +706,7 @@ export function fsBroker(policy: FsPolicy): HostFunction {
     async writeFile(path, data) {
       if (!(data instanceof Uint8Array)) throw new FsError('fs.writeFile: malformed data', 'EINVAL');
       const bytes = data;
-      if (bytes.length > maxBytes) throw new FsError(`fs.writeFile ${JSON.stringify(path)}: larger than ${maxBytes} bytes`, 'EFBIG');
+      if (bytes.length > maxBytes) throw new FsError(`fs.writeFile ${JSON.stringify(path)}: larger than ${maxBytes} bytes (fs.limits.fileBytes)`, 'EFBIG');
       const flags = fsConstants.O_WRONLY | fsConstants.O_CREAT | fsConstants.O_TRUNC | fsConstants.O_NOFOLLOW;
       const fh = await open(await resolveEntry(path), flags, 0o644);
       try {
@@ -719,7 +749,10 @@ export function fsBroker(policy: FsPolicy): HostFunction {
   return async (op: unknown, path: unknown, arg: unknown) => {
     if (typeof op !== 'string' || !Object.hasOwn(ops, op)) throw new FsError('fs: unknown operation', 'EINVAL');
     if (typeof path !== 'string' || path.includes('\0')) throw new FsError(`fs.${op}: path must be a string`, 'EINVAL');
-    if (writes.has(op) && policy.write !== true) throw new FsError(`fs.${op}: the filesystem is read-only`, 'EROFS');
+    if (writes.has(op) && policy.write !== true) {
+      denied('fs', path, `fs.${op}: the filesystem is read-only`);
+      throw new FsError(`fs.${op}: the filesystem is read-only`, 'EROFS');
+    }
     try {
       return await ops[op](path, arg);
     } catch (err) {
@@ -735,7 +768,7 @@ export const FS_HOST_FUNCTION = '__isolane_fs';
 export const SOCKET_HOST_FUNCTION = '__isolane_socket';
 
 /**
- * The hook a VM's web platform (`webPlatform`) leaves for the prelude: the
+ * The hook an isolate's web platform (`web`) leaves for the prelude: the
  * prelude hands it the raw fetch host function, and the spec `fetch` uses
  * it. The worker deletes the hook before guest code runs.
  */
@@ -926,56 +959,59 @@ export const PRELUDE = String.raw`(() => {
 })();`;
 
 export interface Capabilities {
-  hostFunctions: Record<string, HostFunction>;
+  /** The brokers, as host functions. */
+  entries: HostEntry[];
   prelude?: string;
-  /** Release what the VM holds open (sockets, fetches) when it goes away. */
+  /** Release what the isolate holds open (sockets, fetches) when it goes away. */
   dispose(): void;
 }
 
-/** The host functions, setup script, and cleanup for a VM's policies. */
+/**
+ * The brokers, setup script, and cleanup for an isolate's policies.
+ * `topLevel`: the guest-global names its host functions take (they can't
+ * collide with the policies' globals or `globals`).
+ */
 export function capabilities(
-  opts: { network?: NetworkPolicy; fs?: FsPolicy; sockets?: SocketPolicy; globals?: Record<string, unknown> },
-  userHostFunctions: Record<string, HostFunction>,
+  config: { fetch?: FetchPolicy; fs?: FsPolicy; connect?: ConnectPolicy; globals: Readonly<Record<string, unknown>> },
+  topLevel: ReadonlySet<string>,
+  denied: DenialReporter,
 ): Capabilities {
-  const hostFunctions: Record<string, HostFunction> = {};
-  const reserved = new Set<string>();
+  const entries: HostEntry[] = [];
+  const reserved = new Map<string, string>();
   const disposers: (() => void)[] = [];
-  if (opts.network) {
-    const broker = networkBroker(opts.network);
-    hostFunctions[FETCH_HOST_FUNCTION] = broker.fn;
+  if (config.fetch) {
+    const broker = fetchBroker(config.fetch, denied);
+    entries.push(internalEntry(FETCH_HOST_FUNCTION, broker.fn));
     disposers.push(broker.dispose);
-    for (const n of ['fetch', 'Headers', 'Response']) reserved.add(n);
+    for (const n of ['fetch', 'Headers', 'Response']) reserved.set(n, 'fetch');
   }
-  if (opts.fs) {
-    hostFunctions[FS_HOST_FUNCTION] = fsBroker(opts.fs);
-    reserved.add('fs');
+  if (config.fs) {
+    entries.push(internalEntry(FS_HOST_FUNCTION, fsBroker(config.fs, denied)));
+    reserved.set('fs', 'fs');
   }
-  if (opts.sockets) {
-    const broker = socketBroker(opts.sockets);
-    hostFunctions[SOCKET_HOST_FUNCTION] = broker.fn;
+  if (config.connect) {
+    const broker = connectBroker(config.connect, denied);
+    entries.push(internalEntry(SOCKET_HOST_FUNCTION, broker.fn));
     disposers.push(broker.dispose);
-    reserved.add('connect');
+    reserved.set('connect', 'connect');
   }
-  for (const name of Object.keys(userHostFunctions)) {
-    if (reserved.has(name) || name.startsWith('__isolane_')) {
-      throw new TypeError(`isolane: host function name ${name} is reserved by the network, fs, or sockets policy`);
-    }
+  for (const name of topLevel) {
+    const policy = reserved.get(name);
+    if (policy) throw new TypeError(`host.${name} is taken by the ${policy} policy's global`);
   }
   let prelude = reserved.size ? PRELUDE : '';
-  if (opts.globals !== undefined) {
-    if (opts.globals === null || typeof opts.globals !== 'object') throw new TypeError('isolane: globals must be an object');
-    for (const name of Object.keys(opts.globals)) {
-      if (name === '__proto__' || reserved.has(name) || Object.hasOwn(userHostFunctions, name)) {
-        throw new TypeError(`isolane: global name ${name} is reserved or already a host function`);
-      }
+  const globalNames = Object.keys(config.globals);
+  if (globalNames.length) {
+    for (const name of globalNames) {
+      if (reserved.has(name)) throw new TypeError(`globals.${name} is taken by the ${reserved.get(name)} policy's global`);
+      if (topLevel.has(name)) throw new TypeError(`globals.${name} is also a host function or namespace`);
     }
     // JSON text inside a JS string literal: values arrive as plain data.
-    const json = JSON.stringify(opts.globals);
-    if (json === undefined) throw new TypeError('isolane: globals must be JSON-serializable');
+    const json = JSON.stringify(config.globals);
     prelude = `Object.assign(globalThis, JSON.parse(${JSON.stringify(json)}));\n` + prelude;
   }
   return {
-    hostFunctions,
+    entries,
     prelude: prelude || undefined,
     dispose: () => disposers.forEach((d) => d()),
   };

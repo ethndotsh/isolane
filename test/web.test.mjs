@@ -1,4 +1,4 @@
-// The web platform (webPlatform: true): WinterTC Minimum Common API phases 1
+// The web platform (web: true): WinterTC Minimum Common API phases 1
 // to 3, end to end through a real worker. Needs ISOLANE_WORKER.
 import { test, after } from 'node:test';
 import assert from 'node:assert/strict';
@@ -6,10 +6,10 @@ import { createServer } from 'node:http';
 import { Runtime } from '../dist/index.js';
 
 const logs = [];
-const runtime = new Runtime({ strict: process.env.ISOLANE_STRICT === '1', onLog: (e) => logs.push(e) });
+const runtime = new Runtime({ strict: process.env.ISOLANE_STRICT === '1', hooks: { onLog: (e) => logs.push(e) } });
 const devBuild = process.env.ISOLANE_DEV_INSECURE === '1' && 'the dev build has no clock patch';
 after(() => runtime.close());
-const W = { tenant: 'web', webPlatform: true };
+const W = { tenant: 'web', web: true };
 const run = (code, opts = {}) => runtime.run(code, { ...W, ...opts });
 
 test('off by default: plain ECMAScript', async () => {
@@ -48,7 +48,7 @@ test('the runtime internals are unreachable', async () => {
 });
 
 test('works with code generation off', async () => {
-  assert.equal(await run('new URL("https://x.y/z").pathname + typeof eval("1")', { allowCodeGeneration: true }), '/znumber');
+  assert.equal(await run('new URL("https://x.y/z").pathname + typeof eval("1")', { eval: true }), '/znumber');
   assert.equal(await run('new URL("https://x.y/z").pathname'), '/z');
   await assert.rejects(run('eval("1")'), /EvalError/);
 });
@@ -137,7 +137,7 @@ test('performance', async () => {
       [typeof performance.now(), performance.timeOrigin > 1e12, performance.getEntriesByType("measure").length]`),
     ['number', true, 1],
   );
-  assert.deepEqual(await run('[performance.now(), performance.timeOrigin]', { clock: { fixedMs: 1e12 } }), [0, 1e12]);
+  assert.deepEqual(await run('[performance.now(), performance.timeOrigin]', { time: { fixedMs: 1e12 } }), [0, 1e12]);
 });
 
 test('performance.now follows the frozen clock', { skip: process.env.ISOLANE_DEV_INSECURE === '1' && 'the dev build has no clock patch' }, async () => {
@@ -166,7 +166,7 @@ test('crypto.getRandomValues and randomUUID', async () => {
   assert.equal(await run('try { crypto.getRandomValues(new Float32Array(1)) } catch (e) { e.name }'), 'TypeMismatchError');
   assert.equal(await run('try { crypto.getRandomValues(new Uint8Array(65537)) } catch (e) { e.name }'), 'QuotaExceededError');
   const draw = '[crypto.randomUUID(), [...crypto.getRandomValues(new Uint8Array(4))], Math.random()]';
-  assert.deepEqual(await run(draw, { randomSeed: 9 }), await run(draw, { randomSeed: 9 }));
+  assert.deepEqual(await run(draw, { random: { seed: 9 } }), await run(draw, { random: { seed: 9 } }));
   assert.notDeepEqual(await run(draw), await run(draw));
 });
 
@@ -177,8 +177,8 @@ test('self and navigator', async () => {
 test('lone surrogates in code or host errors no longer crash the worker', async () => {
   // A raw lone surrogate can't cross the UTF-8 protocol; it becomes U+FFFD.
   assert.equal(await runtime.run('"\ud800"', { tenant: 'web' }), '�');
-  const hostFunctions = { bad: () => { throw new Error('bad \udc00'); } };
-  assert.equal(await runtime.run('bad().catch((e) => e.message)', { tenant: 'web', hostFunctions }), 'bad �');
+  const host = { bad: () => { throw new Error('bad \udc00'); } };
+  assert.equal(await runtime.run('bad().catch((e) => e.message)', { tenant: 'web', host }), 'bad �');
 });
 
 // ---- phase 2: timers and the event loop ----
@@ -225,7 +225,7 @@ test('nested timers are clamped to 4 ms past nesting level 5', async () => {
     const at = [];
     const tick = () => { at.push(performance.now()); if (at.length < 10) setTimeout(tick, 0); else done(at); };
     setTimeout(tick, 0);
-  })`, { clock: 'realtime' });
+  })`, { time: 'real' });
   const late = gaps.slice(6).map((t, i) => t - gaps[5 + i]);
   assert.ok(late.every((g) => g >= 3.5), `gaps past level 5: ${late.map((g) => g.toFixed(1))}`);
 });
@@ -249,7 +249,7 @@ test('an isolate holds at most 10,000 timers', async () => {
 
 test('a pending eval waits for timers, within timeoutMs', async () => {
   assert.equal(await run('new Promise((r) => setTimeout(() => r(1), 30))'), 1);
-  await assert.rejects(run('new Promise((r) => setTimeout(r, 5000))', { timeoutMs: 100 }), (e) => e.code === 'ERR_TIMEOUT');
+  await assert.rejects(run('new Promise((r) => setTimeout(r, 5000))', { limits: { timeoutMs: 100 } }), (e) => e.code === 'ERR_LIMIT' && e.limit === 'timeoutMs');
   // Only a timer nobody waits on (an unobserved AbortSignal.timeout) is not enough.
   await assert.rejects(run('AbortSignal.timeout(10); new Promise(() => {})'), (e) => e.code === 'ERR_UNSETTLED');
 });
@@ -269,13 +269,13 @@ test('timers left when run() returns never fire', async () => {
 });
 
 test('a stateful isolate keeps its timers between evals', async () => {
-  const vm = runtime.createIsolate({ ...W, timeoutMs: 1000 });
+  const vm = runtime.tenant(W.tenant).isolate({ web: true, limits: { timeoutMs: 1000 } });
   await vm.eval('globalThis.hits = 0; globalThis.id = setInterval(() => hits++, 10); setTimeout(() => { globalThis.later = true }, 20)');
   await sleep(150);
   const [hits, later] = await vm.eval('clearInterval(id); [hits, later]');
   assert.ok(hits >= 5, `${hits} interval ticks while idle`);
   assert.equal(later, true);
-  vm.dispose();
+  vm.close();
 });
 
 test('timers advance the frozen clock', { skip: devBuild }, async () => {
@@ -285,12 +285,12 @@ test('timers advance the frozen clock', { skip: devBuild }, async () => {
   assert.equal(await run('const t0 = Date.now(); let x = 0; for (let i = 0; i < 3e7; i++) x += i; Date.now() - t0'), 0);
 });
 
-test('setTimeout with a string needs allowCodeGeneration', async () => {
+test('setTimeout with a string needs eval', async () => {
   // HTML reports the timer task's error rather than throwing it anywhere.
   const before = logs.length;
   await assert.rejects(run(`new Promise((r) => { globalThis.r = r; setTimeout("r(1)", 0); })`), (e) => e.code === 'ERR_UNSETTLED');
   assert.ok(logs.slice(before).some((e) => e.level === 'error' && /EvalError/.test(e.message)));
-  assert.equal(await run(`new Promise((r) => { globalThis.r = r; setTimeout("r(1)", 0); })`, { allowCodeGeneration: true }), 1);
+  assert.equal(await run(`new Promise((r) => { globalThis.r = r; setTimeout("r(1)", 0); })`, { eval: true }), 1);
 });
 
 // ---- phase 2: streams ----
@@ -461,7 +461,7 @@ const server = createServer((req, res) => {
 await new Promise((r) => server.listen(0, '127.0.0.1', r));
 after(() => server.close());
 const base = `http://localhost:${server.address().port}`;
-const NET = { network: { allow: ['localhost'], allowPrivateNetworks: true }, timeoutMs: 5000 };
+const NET = { fetch: { hosts: ['localhost'], privateNetworks: true }, limits: { timeoutMs: 5000 } };
 const fetchRun = (body, opts = {}) => run(`(async () => { ${body} })()`, { ...NET, ...opts });
 
 test('Headers, Request, Response, and FormData follow the spec', async () => {
@@ -580,7 +580,7 @@ test('fetch: aborting cancels the request at the broker', async () => {
   assert.equal(closedEarly, before + 1);
 });
 
-test('fetch: the network policy still decides, and failures are TypeErrors', async () => {
+test('fetch: the fetch policy still decides, and failures are TypeErrors', async () => {
   assert.deepEqual(
     await fetchRun(`
       const denied = await fetch('https://not-allowed.example/').catch((e) => [e instanceof TypeError, e.message]);
@@ -588,19 +588,19 @@ test('fetch: the network policy still decides, and failures are TypeErrors', asy
       const port = await fetch('http://localhost:22/').catch((e) => [e instanceof TypeError, e.message]);
       return [denied, scheme, port];`),
     [
-      [true, 'fetch to https://not-allowed.example is not allowed by the network policy'],
+      [true, 'fetch to https://not-allowed.example is not allowed by the fetch policy'],
       true,
       [true, 'Fetch failed: Requests to port 22 are blocked'],
     ],
   );
-  // No network policy: fetch exists, and rejects.
+  // No fetch policy: fetch exists, and rejects.
   assert.deepEqual(
     await run(`fetch('${base}/json').catch((e) => [e instanceof TypeError, e.message])`),
-    [true, 'fetch is not available: this isolate has no network policy'],
+    [true, 'fetch is not available: this isolate has no fetch policy'],
   );
-  // A private address without allowPrivateNetworks.
+  // A private address without privateNetworks.
   await assert.rejects(
-    run(`fetch('${base}/json')`, { network: { allow: ['localhost'] } }),
+    run(`fetch('${base}/json')`, { fetch: { hosts: ['localhost'] } }),
     /no public address/,
   );
 });
@@ -619,7 +619,7 @@ test('fetch: data: and blob: URLs', async () => {
   );
 });
 
-test('without webPlatform, a network policy still gives the minimal fetch', async () => {
+test('without web, a fetch policy still gives the minimal fetch', async () => {
   assert.deepEqual(
     await runtime.run(`fetch('${base}/json').then(async (r) => [typeof Request, r.status, await r.json()])`, { tenant: 'web', ...NET }),
     ['undefined', 200, { hi: 'wörld' }],

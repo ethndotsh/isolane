@@ -38,18 +38,21 @@ function resultToGuest(value, GuestUint8Array) {
   return out;
 }
 
+/** Policy denials the brokers reported (for onPolicyDenial), most recent last. */
+const denials = [];
+
 /** A guest context with the policies installed; returns an async eval. */
 function guest(policies, track) {
-  const caps = capabilities(policies, {});
+  const caps = capabilities({ globals: {}, ...policies }, new Set(), (api, target, reason) => denials.push({ api, target, reason }));
   track?.(caps);
   const ctx = vm.createContext({});
   const GuestError = vm.runInContext('Error', ctx);
   const GuestTypeError = vm.runInContext('TypeError', ctx);
   const GuestUint8Array = vm.runInContext('Uint8Array', ctx);
-  for (const [name, fn] of Object.entries(caps.hostFunctions)) {
-    ctx[name] = (...args) =>
+  for (const entry of caps.entries) {
+    ctx[entry.name] = (...args) =>
       Promise.resolve()
-        .then(() => fn(...argsToHost(args)))
+        .then(() => entry.run({}, argsToHost(args)))
         .then((v) => resultToGuest(v, GuestUint8Array))
         .catch((e) => {
           const err = new (e instanceof TypeError ? GuestTypeError : GuestError)(e.message);
@@ -84,7 +87,7 @@ const server = createServer((req, res) => {
 await new Promise((r) => server.listen(0, '127.0.0.1', r));
 after(() => server.close());
 const base = `http://localhost:${server.address().port}`;
-const local = { allow: ['localhost'], allowPrivateNetworks: true };
+const local = { hosts: ['localhost'], privateNetworks: true };
 
 test('public and non-public addresses', () => {
   for (const a of ['8.8.8.8', '1.1.1.1', '2606:4700:4700::1111']) assert.equal(isPublicAddress(a), true, a);
@@ -94,7 +97,7 @@ test('public and non-public addresses', () => {
 });
 
 test('fetch: text, json, status, headers', async () => {
-  const run = guest({ network: local });
+  const run = guest({ fetch: local });
   assert.deepEqual(
     await run(`const r = await fetch('${base}/json'); return [r.status, r.ok, r.headers.get('X-A'), (await r.json()).hi, r.bodyUsed];`),
     [200, true, '1', 'wörld', true],
@@ -103,7 +106,7 @@ test('fetch: text, json, status, headers', async () => {
 });
 
 test('fetch: request bodies and headers cross intact, and the broker controls Host', async () => {
-  const run = guest({ network: local });
+  const run = guest({ fetch: local });
   const out = await run(`
     const bytes = new Uint8Array([0, 255, 128, 10]);
     const r = await fetch('${base}/echo', { method: 'post', headers: { 'X-Thing': 'é', Host: 'evil.example' }, body: bytes });
@@ -117,14 +120,14 @@ test('fetch: request bodies and headers cross intact, and the broker controls Ho
 });
 
 test('fetch: hosts outside the allowlist are refused', async () => {
-  const run = guest({ network: { allow: ['api.example.com', '*.example.org'] } });
-  await assert.rejects(run(`await fetch('${base}/json')`), /not allowed by the network policy/);
-  await assert.rejects(run(`await fetch('https://example.org/')`), /not allowed by the network policy/);
+  const run = guest({ fetch: { hosts: ['api.example.com', '*.example.org'] } });
+  await assert.rejects(run(`await fetch('${base}/json')`), /not allowed by the fetch policy/);
+  await assert.rejects(run(`await fetch('https://example.org/')`), /not allowed by the fetch policy/);
   await assert.rejects(run(`await fetch('file:///etc/passwd')`), /not supported/);
 });
 
 test('fetch: private addresses are refused unless allowed, even for allowed names', async () => {
-  const run = guest({ network: { allow: ['localhost', '127.0.0.1', '169.254.169.254'] } });
+  const run = guest({ fetch: { hosts: ['localhost', '127.0.0.1', '169.254.169.254'] } });
   await assert.rejects(run(`await fetch('${base}/json')`), /no public address/);
   await assert.rejects(run(`await fetch('http://127.0.0.1:1/')`), /not a public address/);
   await assert.rejects(run(`await fetch('http://169.254.169.254/latest/meta-data/')`), /not a public address/);
@@ -132,29 +135,29 @@ test('fetch: private addresses are refused unless allowed, even for allowed name
 });
 
 test('fetch: redirects are followed and re-checked', async () => {
-  const run = guest({ network: local });
+  const run = guest({ fetch: local });
   assert.deepEqual(await run(`const r = await fetch('${base}/to-json'); return [r.redirected, r.url.endsWith('/json'), (await r.json()).hi];`), [true, true, 'wörld']);
   await assert.rejects(run(`await fetch('${base}/to-evil')`), /evil\.example is not allowed/);
   const kept = await run(`const r = await fetch('${base}/to-echo', { method: 'POST', body: 'x', headers: { authorization: 'secret' } }); return await r.json();`);
   assert.equal(kept.method, 'POST'); // 307 keeps the method
   assert.equal(kept.headers.authorization, 'secret'); // same origin: credentials stay
-  const both = guest({ network: { allow: ['localhost', '127.0.0.1'], allowPrivateNetworks: true } });
+  const both = guest({ fetch: { hosts: ['localhost', '127.0.0.1'], privateNetworks: true } });
   const moved = await both(`const r = await fetch('${base}/to-other-origin', { headers: { authorization: 'secret' } }); return await r.json();`);
   assert.equal(moved.headers.authorization, undefined); // another origin: dropped
 });
 
 test('fetch: limits', async () => {
-  await assert.rejects(guest({ network: { ...local, maxResponseBytes: 1000 } })(`await fetch('${base}/big')`), /larger than 1000 bytes/);
-  await assert.rejects(guest({ network: { ...local, methods: ['GET'] } })(`await fetch('${base}/echo', { method: 'DELETE' })`), /method DELETE is not allowed/);
-  await assert.rejects(guest({ network: { ...local, timeoutMs: 200 } })(`await fetch('${base}/slow')`), /timed out/);
-  const counted = guest({ network: { ...local, maxRequests: 1 } });
+  await assert.rejects(guest({ fetch: { ...local, limits: { responseBytes: 1000 } } })(`await fetch('${base}/big')`), /larger than 1000 bytes/);
+  await assert.rejects(guest({ fetch: { ...local, methods: ['GET'] } })(`await fetch('${base}/echo', { method: 'DELETE' })`), /method DELETE is not allowed/);
+  await assert.rejects(guest({ fetch: { ...local, limits: { timeoutMs: 200 } } })(`await fetch('${base}/slow')`), /timed out/);
+  const counted = guest({ fetch: { ...local, limits: { requests: 1 } } });
   await counted(`await fetch('${base}/json')`);
   await assert.rejects(counted(`await fetch('${base}/json')`), /used its 1 requests/);
 });
 
 test('fetch: a policy function decides each hop', async () => {
   const seen = [];
-  const run = guest({ network: { allow: (url, method) => (seen.push(`${method} ${url.pathname}`), url.pathname !== '/json'), allowPrivateNetworks: true } });
+  const run = guest({ fetch: { hosts: (url, method) => (seen.push(`${method} ${url.pathname}`), url.pathname !== '/json'), privateNetworks: true } });
   await assert.rejects(run(`await fetch('${base}/to-json')`), /not allowed/);
   assert.deepEqual(seen, ['GET /to-json', 'GET /json']);
 });
@@ -171,8 +174,8 @@ await new Promise((r) => tcp.listen(0, '127.0.0.1', r));
 after(() => tcp.close());
 const tcpPort = tcp.address().port;
 
-test('sockets: connect, write, read, end of stream', async () => {
-  const run = guest({ sockets: { allow: [`localhost:${tcpPort}`], allowPrivateNetworks: true } });
+test('connect: connect, write, read, end of stream', async () => {
+  const run = guest({ connect: { hosts: [`localhost:${tcpPort}`], privateNetworks: true } });
   const out = await run(`
     const s = await connect('localhost:${tcpPort}');
     await s.write('hi ✓');
@@ -184,18 +187,18 @@ test('sockets: connect, write, read, end of stream', async () => {
   assert.deepEqual(out, [Buffer.byteLength('echo:hi ✓'), 'ok bye']);
 });
 
-test('sockets: the allowlist and private-address rules apply', async () => {
-  const run = guest({ sockets: { allow: ['localhost:1', '*.example.com:443', 'db.example.com:*'] } });
-  await assert.rejects(run(`await connect('localhost:${tcpPort}')`), /not allowed by the socket policy/);
+test('connect: the allowlist and private-address rules apply', async () => {
+  const run = guest({ connect: { hosts: ['localhost:1', '*.example.com:443', 'db.example.com:*'] } });
+  await assert.rejects(run(`await connect('localhost:${tcpPort}')`), /not allowed by the connect policy/);
   await assert.rejects(run(`await connect('localhost:1')`), /no public address/);
   await assert.rejects(run(`await connect({ hostname: '10.0.0.1', port: 5432 })`), /not a public address/);
   await assert.rejects(run(`await connect('example.com:443')`), /not allowed/); // apex isn't a subdomain
   await assert.rejects(run(`await connect('localhost:99999')`), /port from 1 to 65535/);
 });
 
-test('sockets: connection cap, and disposal closes them', async () => {
+test('connect: connection cap, and disposal closes them', async () => {
   let caps;
-  const run = guest({ sockets: { allow: [`localhost:${tcpPort}`], allowPrivateNetworks: true, maxConnections: 1 } }, (c) => (caps = c));
+  const run = guest({ connect: { hosts: [`localhost:${tcpPort}`], privateNetworks: true, limits: { connections: 1 } } }, (c) => (caps = c));
   await run(`globalThis.s = await connect('localhost:${tcpPort}')`);
   await assert.rejects(run(`await connect('localhost:${tcpPort}')`), /already has 1 sockets open/);
   caps.dispose();
@@ -205,12 +208,11 @@ test('sockets: connection cap, and disposal closes them', async () => {
 // ---- globals ----
 
 test('globals arrive as plain data', async () => {
-  const caps = capabilities({ globals: { input: { n: 21, s: '"); throw 1; ("' } } }, {});
+  const caps = capabilities({ globals: { input: { n: 21, s: '"); throw 1; ("' } } }, new Set(), () => {});
   const ctx = vm.createContext({});
   vm.runInContext(caps.prelude, ctx);
   assert.equal(vm.runInContext('input.n * 2 + input.s.length', ctx), 42 + 15);
-  assert.throws(() => capabilities({ globals: JSON.parse('{"__proto__": 1}') }, {}), /reserved/);
-  assert.throws(() => capabilities({ globals: { f: 1 } }, { f: () => 1 }), /reserved or already a host function/);
+  assert.throws(() => capabilities({ globals: { f: 1 } }, new Set(['f']), () => {}), /also a host function/);
 });
 
 // ---- fs ----
@@ -258,7 +260,7 @@ test('fs: read-only unless write is set', async () => {
 });
 
 test('fs: writes, directories, removal, and size limits', async () => {
-  const run = guest({ fs: { root, write: true, maxFileBytes: 16 } });
+  const run = guest({ fs: { root, write: true, limits: { fileBytes: 16 } } });
   await run(`await fs.mkdir('/out/a/b', { recursive: true }); await fs.writeFile('/out/a/b/f.txt', 'ünïcode');`);
   assert.equal(readFileSync(join(root, 'out/a/b/f.txt'), 'utf8'), 'ünïcode');
   await assert.rejects(run(`await fs.writeFile('/out/big', 'x'.repeat(17))`), /larger than 16 bytes/);
@@ -268,9 +270,23 @@ test('fs: writes, directories, removal, and size limits', async () => {
 });
 
 test('policy names are reserved', () => {
-  assert.throws(() => capabilities({ network: { allow: [] } }, { fetch: () => 1 }), /reserved/);
-  assert.throws(() => capabilities({ fs: { root } }, { fs: () => 1 }), /reserved/);
-  assert.throws(() => capabilities({ network: {} }, {}), /network.allow/);
+  const none = () => {};
+  assert.throws(() => capabilities({ globals: {}, fetch: { hosts: [] } }, new Set(['fetch']), none), /taken by the fetch policy/);
+  assert.throws(() => capabilities({ globals: {}, fs: { root } }, new Set(['fs']), none), /taken by the fs policy/);
+  assert.throws(() => capabilities({ globals: { connect: 1 }, connect: { hosts: [] } }, new Set(), none), /globals\.connect is taken/);
+  assert.throws(() => capabilities({ globals: {}, fetch: {} }, new Set(), none), /fetch\.hosts/);
+});
+
+test('refusals are reported as policy denials', async () => {
+  denials.length = 0;
+  await assert.rejects(guest({ fetch: { hosts: ['api.example.com'] } })(`await fetch('https://nope.example/x')`), /not allowed/);
+  await assert.rejects(guest({ connect: { hosts: ['db.example.com:5432'] } })(`await connect('10.0.0.1:5432')`), /not a public address/);
+  await assert.rejects(guest({ fs: { root } })(`await fs.writeFile('/x', 'y')`), /read-only/);
+  assert.deepEqual(denials.map((d) => [d.api, d.target]), [
+    ['fetch', 'https://nope.example/x'],
+    ['connect', '10.0.0.1:5432'],
+    ['fs', '/x'],
+  ]);
 });
 
 // ---- binary frames ----
@@ -287,7 +303,7 @@ test('splitBytes finds bytes wherever JSON goes, with their paths', () => {
 });
 
 test('byte attachments from a worker are parsed strictly', () => {
-  const call = (args, bin) => ({ t: 'hostCall', vm: 1, call: 1, name: 'f', args, bin });
+  const call = (args, bin) => ({ t: 'hostCall', vm: 1, call: 1, fn: 0, args, bin });
   const ok = parseWorkerMessage(call([null, 'x', null], [[0, 2], [2, 1]]), Buffer.from([9, 8, 7]));
   assert.deepEqual(ok.args.map((a) => (Buffer.isBuffer(a) ? [...a] : a)), [[9, 8], 'x', [7]]);
   const bad = [

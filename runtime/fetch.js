@@ -5,7 +5,7 @@
 // vendored classes, unchanged; this file replaces only the part that talks
 // to the network, which here is a host function handed over by the
 // prelude (ts/capabilities.ts). The broker sends each request, follows
-// redirects (each hop checked against the VM's network policy), and streams
+// redirects (each hop checked against the isolate's fetch policy), and streams
 // the response body: open(id, meta, body) → status and headers, then
 // read(id) → the next bytes (null at the end), cancel(id) to abort.
 //
@@ -206,7 +206,7 @@ async function mainFetch(req, terminator) {
     return networkError(`fetching ${url.protocol} URLs is not supported`);
   }
   if (transport === null) {
-    throw new TypeError("fetch is not available: this isolate has no network policy");
+    throw new TypeError("fetch is not available: this isolate has no fetch policy");
   }
 
   // The request body, buffered.
