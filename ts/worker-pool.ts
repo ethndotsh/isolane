@@ -161,6 +161,10 @@ export interface IsolateState {
   readonly codeBytes: number;
   /** The longest console line it may send (the worker cuts lines; this checks it did). */
   readonly logLineBytes: number;
+  /** Log bytes it may send per second, however many evals it runs (the worker holds each eval to logBytes; this bounds a worker that doesn't). */
+  readonly logBytesPerSecond: number;
+  /** The current one-second window: when it started, and its bytes. */
+  logWindow: { start: number; bytes: number; dropped: boolean };
   /** Async host calls it may have waiting (the worker refuses more; this checks it did). */
   readonly pendingHostCalls: number;
   readonly hostCallBytes: number;
@@ -284,6 +288,8 @@ export class TenantWorker {
       timeoutMs: config.limits.timeoutMs,
       codeBytes: config.limits.codeBytes,
       logLineBytes: config.limits.logLineBytes,
+      logBytesPerSecond: Math.max(4 * config.limits.logBytes, 4 * 1024 ** 2),
+      logWindow: { start: 0, bytes: 0, dropped: false },
       pendingHostCalls: config.limits.pendingHostCalls,
       hostCallBytes: config.limits.hostCallBytes,
       shims: config.shims,
@@ -469,6 +475,20 @@ export class TenantWorker {
       const max = Math.max(state.logLineBytes, 1024);
       if (Buffer.byteLength(message) > max + 3) {
         message = `${Buffer.from(message).subarray(0, max).toString('utf8').replace(/\uFFFD$/, '')}…`;
+      }
+      // A worker floods only if it's compromised: past the per-second
+      // bound, lines are dropped, with one notice per window.
+      const now = Date.now();
+      const window = state.logWindow;
+      if (now - window.start >= 1000) Object.assign(window, { start: now, bytes: 0, dropped: false });
+      window.bytes += Buffer.byteLength(message);
+      if (window.bytes > state.logBytesPerSecond) {
+        if (!window.dropped) {
+          window.dropped = true;
+          const notice = `[isolane] log output dropped: more than ${state.logBytesPerSecond} bytes in a second from this isolate`;
+          state.chain.emit('log', { tenant: this.tenant, isolate: msg.vm, level: 'warn', message: notice, source: 'guest' });
+        }
+        return;
       }
       this.#usage.logBytes += message.length;
       state.chain.emit('log', { tenant: this.tenant, isolate: msg.vm, level: msg.level, message, source: 'guest' });

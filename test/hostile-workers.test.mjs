@@ -18,6 +18,34 @@ test('a crashing worker rejects in-flight evals and raises a security event', as
   crashy.close();
 });
 
+test('a worker that exits cleanly by itself is a security event too', async () => {
+  const events = [];
+  const quiet = new Runtime({
+    workerPath: fakeWorker(`send({ t: 'ready', protocol: 2, v8: 'fake', sandboxSecure: true, lockdown: { landlock: 'full', seccomp: 'full' } }); process.stdin.once('data', () => process.exit(0));`),
+    hooks: { onSecurityEvent: (e) => events.push(e) },
+  });
+  await assert.rejects(quiet.run('1', { tenant: 'quiet' }), code('ERR_WORKER_CRASHED'));
+  assert.deepEqual([events.length, events[0]?.kind, events[0]?.detail], [1, 'crash', 'exit code 0']);
+  quiet.close();
+});
+
+test('a worker flooding log lines is cut off at a per-second bound', async () => {
+  const logs = [];
+  const line = 'x'.repeat(1000);
+  const flood = new Runtime({
+    workerPath: fakeWorker(`send({ t: 'ready', protocol: 2, v8: 'fake', sandboxSecure: true, lockdown: { landlock: 'full', seccomp: 'full' } });
+      process.stdin.once('data', () => { for (let i = 0; i < 10000; i++) send({ t: 'log', vm: 1, level: 'log', message: '${line}' }); });
+      setInterval(() => {}, 1000);`),
+    hooks: { onLog: (e) => logs.push(e) },
+  });
+  const vm = flood.tenant('loud').isolate({ limits: { logBytes: 1024, timeoutMs: 1000 } });
+  await vm.eval('1').catch(() => {});
+  // 4 MiB a second at most (logBytes is 1 KiB here), then one notice.
+  assert.ok(logs.length < 4300, `${logs.length} lines`);
+  assert.equal(logs.filter((l) => /log output dropped/.test(l.message)).length, 1);
+  flood.close();
+});
+
 test('a security event quarantines the tenant', async () => {
   const events = [];
   const rt = new Runtime({

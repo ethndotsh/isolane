@@ -380,9 +380,10 @@ export class Runtime {
     if (this.#workers.get(tenant) === gone) this.#workers.delete(tenant);
     // Expected ends: stopped by us, refused (strict, incompatible), or out of memory.
     if (exit.reason === 'killed' || exit.reason === 'insufficient-isolation' || exit.reason === 'incompatible' || isOutOfMemory(exit)) return;
-    // A clean exit only happens when stdin closes; anything else from a
-    // worker that ran guest code is treated as a possible exploit.
-    if (exit.reason === 'protocol-violation' || exit.reason === 'unresponsive' || exit.signal || exit.code !== 0) {
+    // A worker exits by itself only when its stdin closes, which the
+    // supervisor never does without killing it: any other end, a clean
+    // exit (code 0) included, is treated as a possible exploit.
+    if (exit.reason === 'protocol-violation' || exit.reason === 'unresponsive' || exit.reason === 'exited' || exit.signal || exit.code !== 0) {
       this.#usageOf(tenant).securityEvents++;
       const quarantinedUntil = this.#quarantineMs === null ? undefined : Date.now() + this.#quarantineMs;
       if (quarantinedUntil !== undefined) {
