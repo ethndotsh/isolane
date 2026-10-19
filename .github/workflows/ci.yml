@@ -27,6 +27,15 @@ jobs:
       CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER: /usr/lib/llvm-21/bin/clang
       CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUSTFLAGS: -C link-arg=-fuse-ld=lld
       CARGO_INCREMENTAL: '0'
+    # For test/postgres.test.mjs: postgres.js from a guest, over connect().
+    # Trust auth until crypto.subtle lands (postgres.js's SCRAM uses it).
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_HOST_AUTH_METHOD: trust
+        ports: ['5432:5432']
+        options: --health-cmd pg_isready --health-interval 5s --health-timeout 5s --health-retries 20
     steps:
       - uses: actions/checkout@v4
         with:
@@ -145,6 +154,7 @@ jobs:
         env:
           ISOLANE_WORKER: ${{ runner.temp }}/isolane-worker
           ISOLANE_STRICT: '1'
+          ISOLANE_PG_URL: postgres://postgres@localhost:5432/postgres
         run: node --test --test-reporter=spec $(ls test/*.test.mjs | grep -v lockdown)
 
       # web-platform-tests as a per-subtest gate (test/wpt/expectations.json),
