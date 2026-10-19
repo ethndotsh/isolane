@@ -37,7 +37,11 @@ jobs:
           node-version: 22
 
       - name: Fetch rusty_v8
-        run: scripts/fetch-rusty-v8.sh
+        run: |
+          scripts/fetch-rusty-v8.sh
+          # A fresh checkout makes every source newer than the cached objects,
+          # so ninja would rebuild all of V8. Backdate the sources instead.
+          find build/rusty_v8 -exec touch -h -d '2000-01-01 00:00:00' {} +
 
       - name: Restore V8 build
         id: v8-cache
