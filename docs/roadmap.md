@@ -200,7 +200,8 @@ Measured against isolated-vm (Linux x64 under Rosetta; re-measure natively):
 | Item | Status |
 |---|---|
 | Stress soak: VM floods, tenant floods, crash churn, VM/eval leaks, noisy neighbours, memory bombs | done (weekly; first results pending) |
-| Per-tenant isolate cap with graceful refusal. First soak: one tenant's worker crashed (V8 `Check failed: success`, SIGTRAP) between 300 and 400 live isolates (~600 threads, 270 MB RSS) under the 2 GiB worker cap; cap well below that, configurable | planned (next) |
+| Unified, configurable limits (`limits` on the runtime, `tenantLimits(tenant)`, and per isolate): timeoutMs (now 30 s by default), cpuTimeMs, heapBytes (now 128 MiB by default), timers, logBytesPerEval, logMessageBytes, codeBytes, resultBytes, decompressedBytes, isolates (100), concurrentEvals, workerMemoryBytes, tenants (LRU eviction of idle tenants); `ERR_RESOURCE_LIMIT` with `err.limit`. Prompted by the first soak, where one tenant's worker crashed between 300 and 400 live isolates | done |
+| More limits: pending host calls per isolate, host calls per eval, host-call payload bytes (after binary frames land), sockets/fetch totals per tenant, worker lifetime / evals per worker (recycling) | planned |
 | One watchdog thread per worker instead of per isolate (halves thread count: each isolate is 2 threads today) | planned |
 | First soak results (Linux x64, 2-core runner): no leaks (3,000 isolate create/dispose cycles 19→21 MB; 20,000 evals in one isolate 20→24 MB, flat); crash churn leaks no fds or zombies; noisy neighbour raises another tenant's p99 from 0.9 to 4.5 ms (same worker: 6 ms); 20 isolates hitting a 64 MB heap limit at once all get ERR_MEMORY_LIMIT and the worker keeps serving; 150 tenants at once: all succeed, 16 MB RSS each, cold start p50 721 ms under that contention | done |
 | Worker recycling: max lifetime / max requests | planned |

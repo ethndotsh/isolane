@@ -309,6 +309,9 @@ macro_rules! set_fns {
 
 fn native_object<'s>(scope: &mut v8::PinScope<'s, '_>) -> v8::Local<'s, v8::Object> {
     let native = v8::Object::new(scope);
+    let key = v8::String::new(scope, "maxTimers").unwrap();
+    let max_timers = v8::Integer::new_from_unsigned(scope, crate::limits::get().timers);
+    native.set(scope, key.into(), max_timers.into());
     set_fns!(scope, native, {
         "compileExt" => compile_ext,
         "isArrayBuffer" => is_array_buffer,

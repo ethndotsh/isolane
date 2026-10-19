@@ -76,6 +76,38 @@ before running guest code: Landlock and seccomp on Linux. In strict mode the
 pool refuses hosts where that lockdown can't be applied
 (`pool.isolationReport()` shows what a host provides).
 
+### Limits
+
+Every resource has a cap, set in one `limits` object at three levels: the
+runtime's defaults, each tenant's (`tenantLimits(tenant)`, e.g. by plan),
+and each isolate's. Later levels override earlier ones, field by field.
+
+```js
+const runtime = new Runtime({
+  limits: { tenants: 500, isolates: 50, timeoutMs: 10_000 },
+  tenantLimits: (tenant) => (isPro(tenant) ? { isolates: 200, workerMemoryBytes: 4 << 30 } : undefined),
+});
+await runtime.run(code, { tenant: 'acme', limits: { timeoutMs: 500, timers: 100 } });
+```
+
+| Limit | Default | Scope |
+|---|---|---|
+| `timeoutMs` | 30 s | isolate (per eval) |
+| `cpuTimeMs` | none | isolate (per eval; Linux) |
+| `heapBytes` | 128 MiB | isolate |
+| `timers` | 10,000 | isolate (RangeError in the guest) |
+| `logBytesPerEval` / `logMessageBytes` | 1 MiB / 16 KiB | isolate |
+| `codeBytes` / `resultBytes` | 16 MiB each | isolate (per eval) |
+| `decompressedBytes` | 128 MiB | isolate (per decompression call) |
+| `isolates` | 100 | tenant |
+| `concurrentEvals` | 1,000 | tenant |
+| `workerMemoryBytes` | 2 GiB | tenant (Linux; beyond V8's baseline) |
+| `tenants` | 1,000 | runtime (evicts the least recently used idle tenant) |
+
+Hitting a cap outside the guest fails with `ERR_RESOURCE_LIMIT` (and
+`err.limit` names it), or with `ERR_TIMEOUT`, `ERR_CPU_LIMIT`, or
+`ERR_MEMORY_LIMIT`. Network, socket, and fs policies carry their own limits.
+
 ### Known limits
 
 - **Time still moves at I/O.** A frozen clock stops guest code from timing

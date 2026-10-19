@@ -8,6 +8,14 @@ import { resolve as resolvePath } from 'node:path';
 import { capabilities, type FsPolicy, type NetworkPolicy, type SocketPolicy } from './capabilities.js';
 import { IsolaneError, invalidOption, isIsolaneErrorCode, type IsolaneErrorCode } from './errors.js';
 import {
+  guestLimits,
+  resolveLimits,
+  validateLimits,
+  type IsolateLimits,
+  type Limits,
+  type ResolvedLimits,
+} from './limits.js';
+import {
   OOM_EXIT_CODE,
   WorkerProcess,
   meetsStrict,
@@ -22,6 +30,8 @@ import {
 export type { IsolationInfo, LockdownLevel, LogLevel } from './worker.js';
 export type { FsPolicy, NetworkPolicy, SocketPolicy } from './capabilities.js';
 export { IsolaneError } from './errors.js';
+export { DEFAULT_LIMITS } from './limits.js';
+export type { IsolateLimits, Limits, RuntimeLimits, TenantLimits } from './limits.js';
 export type { GuestErrorInfo, IsolaneErrorCode, IsolaneErrorKind } from './errors.js';
 
 /**
@@ -81,18 +91,15 @@ export interface LogEntry {
 /** Everything about a VM except which tenant it belongs to. */
 export interface IsolateOptions {
   /**
-   * CPU time an eval (or a host-reply continuation) may use, separately from
-   * the wall clock, so time spent waiting on host calls doesn't count.
-   * Exceeding it fails the eval with `ERR_CPU_LIMIT`. Linux only.
+   * This isolate's limits (see `IsolateLimits`); they override the
+   * runtime's and the tenant's, field by field.
    */
+  limits?: IsolateLimits;
+  /** Shorthand for `limits.cpuTimeMs`: CPU time per eval (Linux; `ERR_CPU_LIMIT`). */
   cpuTimeLimitMs?: number;
-  /** Wall-clock budget per eval (and per host-reply continuation). */
+  /** Shorthand for `limits.timeoutMs`: wall-clock budget per eval. */
   timeoutMs?: number;
-  /**
-   * Cap on the VM's V8 heap. Exceeding it retires the VM. (ArrayBuffer and
-   * WebAssembly memory live outside the heap; the tenant's worker as a
-   * whole is capped by `workerMemoryLimitBytes`.)
-   */
+  /** Shorthand for `limits.heapBytes`: the V8 heap; exceeding it retires the isolate. */
   memoryLimitBytes?: number;
   /**
    * Functions installed as guest globals, by name. Async in the guest
@@ -162,11 +169,37 @@ export interface RunOptions extends IsolateOptions {
 
 /** Later options win; host functions and globals merge by name. */
 function mergeOptions<T extends IsolateOptions>(base: IsolateOptions | undefined, over: T): T {
+  over = withLimits(over);
   if (!base) return over;
+  base = withLimits(base);
   const merged = { ...base, ...over } as T;
   if (base.hostFunctions || over.hostFunctions) merged.hostFunctions = { ...base.hostFunctions, ...over.hostFunctions };
   if (base.globals || over.globals) merged.globals = { ...base.globals, ...over.globals };
+  if (base.limits || over.limits) merged.limits = { ...base.limits, ...over.limits };
   return merged;
+}
+
+/** Fold the limit shorthands (timeoutMs, ...) into `limits`, at one level. */
+function withLimits<T extends IsolateOptions>(opts: T): T {
+  const limits: IsolateLimits = { ...validateLimits(opts.limits, 'limits', true) };
+  const shorthand = [
+    ['timeoutMs', 'timeoutMs'],
+    ['cpuTimeLimitMs', 'cpuTimeMs'],
+    ['memoryLimitBytes', 'heapBytes'],
+  ] as const;
+  let changed = false;
+  for (const [short, key] of shorthand) {
+    const v = opts[short];
+    if (v === undefined) continue;
+    if (limits[key] !== undefined && limits[key] !== v) throw invalidOption(`${short} and limits.${key} disagree`);
+    limits[key] = v;
+    changed = true;
+  }
+  if (!changed) return opts;
+  const out = { ...opts, limits };
+  for (const [short] of shorthand) delete out[short];
+  validateLimits(limits, 'limits', true);
+  return out;
 }
 
 type ClockSpec = { mode: 'frozen' } | { mode: 'realtime' } | { mode: 'fixed'; fixedMs: number };
@@ -255,6 +288,17 @@ export interface RuntimeOptions {
    * call starts a fresh one. Default 2 GiB; `null` for no cap.
    */
   workerMemoryLimitBytes?: number | null;
+  /**
+   * Defaults for every limit: per isolate, per tenant, and for the runtime
+   * (see `Limits` and `DEFAULT_LIMITS`). `workerMemoryLimitBytes` above is
+   * shorthand for `limits.workerMemoryBytes`.
+   */
+  limits?: Limits;
+  /**
+   * Per-tenant limits (e.g. by plan), over the runtime's `limits`. Called
+   * when the tenant's worker starts and for each new isolate.
+   */
+  tenantLimits?: (tenant: string) => Limits | undefined;
   /** Options every VM starts from; a tenant's and a call's options override them. */
   defaults?: IsolateOptions;
   /**
@@ -275,8 +319,6 @@ export interface RuntimeOptions {
 /** Stop prewarming after this many spares in a row die before being used. */
 const MAX_SPARE_FAILURES = 3;
 
-const DEFAULT_WORKER_MEMORY_LIMIT = 2 * 1024 ** 3;
-const MIN_WORKER_MEMORY_LIMIT = 64 * 1024 ** 2;
 
 interface Pending {
   resolve(value: unknown): void;
@@ -336,6 +378,11 @@ class TenantWorker {
   #onGone: (exit: WorkerExit) => void;
   #idleTimeoutMs: number;
   #usage: TenantUsage;
+  /** Its tenant-level limits (isolates, concurrentEvals), fixed at start. */
+  readonly limits: ResolvedLimits;
+  #codeBytes = new Map<number, number>();
+  /** When it last had nothing running (for evicting idle tenants). */
+  idleSince = Date.now();
 
   constructor(
     tenant: string,
@@ -345,10 +392,12 @@ class TenantWorker {
     memoryLimitBytes: number | undefined,
     onGone: (worker: TenantWorker, exit: WorkerExit) => void,
     usage: TenantUsage,
+    limits: ResolvedLimits,
     spare?: SpareWorker,
   ) {
     this.tenant = tenant;
     this.#usage = usage;
+    this.limits = limits;
     this.#idleTimeoutMs = idleTimeoutMs;
     this.#onGone = (exit) => onGone(this, exit);
     const handlers: WorkerHandlers = {
@@ -371,19 +420,39 @@ class TenantWorker {
     return this.#proc.pid;
   }
 
-  createIsolate(vm: number, opts: IsolateOptions, setup: VmSetup, onLog: ((entry: LogEntry) => void) | undefined): void {
+  /** No isolates and nothing in flight. */
+  get idle(): boolean {
+    return this.#vmCount === 0 && this.#requests.size === 0;
+  }
+
+  createIsolate(
+    vm: number,
+    opts: IsolateOptions,
+    setup: VmSetup,
+    onLog: ((entry: LogEntry) => void) | undefined,
+    limits: ResolvedLimits,
+  ): void {
+    if (this.#vmCount >= this.limits.isolates) {
+      throw new IsolaneError(
+        'ERR_RESOURCE_LIMIT',
+        `isolane: tenant ${this.tenant} already has ${this.limits.isolates} isolates (limits.isolates)`,
+        { tenant: this.tenant, limit: 'isolates' },
+      );
+    }
     this.#hostFunctions.set(vm, setup.hostFunctions);
     this.#disposers.set(vm, setup.dispose);
     this.#loggers.set(vm, onLog);
-    this.#timeouts.set(vm, opts.timeoutMs);
+    this.#timeouts.set(vm, limits.timeoutMs ?? undefined);
+    this.#codeBytes.set(vm, limits.codeBytes);
     this.#vmCount++;
     this.#touch();
     this.#proc.send({
       t: 'create',
       vm,
-      timeoutMs: opts.timeoutMs,
-      cpuTimeLimitMs: opts.cpuTimeLimitMs,
-      heapBytes: opts.memoryLimitBytes,
+      timeoutMs: limits.timeoutMs ?? undefined,
+      cpuTimeLimitMs: limits.cpuTimeMs ?? undefined,
+      heapBytes: limits.heapBytes ?? undefined,
+      limits: guestLimits(limits),
       hostFunctions: Object.keys(setup.hostFunctions).filter((n) => !setup.syncHostFunctions.includes(n)),
       syncHostFunctions: setup.syncHostFunctions,
       clock: setup.clock,
@@ -402,6 +471,26 @@ class TenantWorker {
     return new Promise((resolve, reject) => {
       if (!this.#proc.alive) {
         reject(new IsolaneError('ERR_WORKER_CRASHED', `worker for tenant ${this.tenant} is gone`, { tenant: this.tenant }));
+        return;
+      }
+      const codeBytes = this.#codeBytes.get(vm);
+      if (codeBytes !== undefined && Buffer.byteLength(code, 'utf8') > codeBytes) {
+        reject(
+          new IsolaneError('ERR_RESOURCE_LIMIT', `isolane: the code is larger than ${codeBytes} bytes (limits.codeBytes)`, {
+            tenant: this.tenant,
+            limit: 'codeBytes',
+          }),
+        );
+        return;
+      }
+      if (this.#requests.size >= this.limits.concurrentEvals) {
+        reject(
+          new IsolaneError(
+            'ERR_RESOURCE_LIMIT',
+            `isolane: tenant ${this.tenant} already has ${this.limits.concurrentEvals} evals in flight (limits.concurrentEvals)`,
+            { tenant: this.tenant, limit: 'concurrentEvals' },
+          ),
+        );
         return;
       }
       const pending: Pending = { resolve, reject };
@@ -427,6 +516,7 @@ class TenantWorker {
     this.#disposers.delete(vm);
     this.#loggers.delete(vm);
     this.#timeouts.delete(vm);
+    this.#codeBytes.delete(vm);
     this.#busyUntil.delete(vm);
     this.#vmCount--;
     this.#proc.send({ t: 'dispose', vm });
@@ -441,6 +531,7 @@ class TenantWorker {
   #touch(): void {
     clearTimeout(this.#idleTimer);
     if (this.#vmCount === 0 && this.#requests.size === 0) {
+      this.idleSince = Date.now();
       this.#idleTimer = setTimeout(() => this.kill(), this.#idleTimeoutMs);
       this.#idleTimer.unref();
     }
@@ -468,7 +559,9 @@ class TenantWorker {
       if (msg.ok) pending.resolve(msg.value);
       else {
         const code = isIsolaneErrorCode(msg.code) ? msg.code : 'ERR_INTERNAL';
-        pending.reject(new IsolaneError(code, msg.message, { tenant: this.tenant, guest: msg.guest }));
+        // Worker-enforced limits name themselves as "(limits.<name>)".
+        const limit = code === 'ERR_RESOURCE_LIMIT' ? /\(limits\.(\w+)\)/.exec(msg.message)?.[1] : undefined;
+        pending.reject(new IsolaneError(code, msg.message, { tenant: this.tenant, guest: msg.guest, limit }));
       }
       this.#touch();
       return;
@@ -559,7 +652,7 @@ class TenantWorker {
 const isOutOfMemory = (exit: WorkerExit) => exit.reason === 'exited' && exit.code === OOM_EXIT_CODE;
 
 function describeExit(exit: WorkerExit): string {
-  if (isOutOfMemory(exit)) return 'ran out of memory (workerMemoryLimitBytes)';
+  if (isOutOfMemory(exit)) return 'ran out of memory (limits.workerMemoryBytes)';
   if (exit.reason === 'protocol-violation') return `broke the protocol (${exit.detail})`;
   if (exit.reason === 'insufficient-isolation') return `was refused (${exit.detail})`;
   if (exit.reason === 'unresponsive') return `stopped responding and was killed (${exit.detail})`;
@@ -578,7 +671,8 @@ export class Runtime {
   #idleTimeoutMs: number;
   #onSecurityEvent: ((e: SecurityEvent) => void) | undefined;
   #onLog: ((e: LogEntry) => void) | undefined;
-  #memoryLimit: number | undefined;
+  #limits: Limits;
+  #tenantLimits: ((tenant: string) => Limits | undefined) | undefined;
   #defaults: IsolateOptions | undefined;
   #quarantineMs: number | null;
   #quarantined = new Map<string, number>();
@@ -607,17 +701,36 @@ export class Runtime {
     this.#quarantineMs = options.quarantineMs === undefined ? 60_000 : options.quarantineMs;
     this.#prewarm = options.prewarm ?? 0;
     if (!(Number.isSafeInteger(this.#prewarm) && this.#prewarm >= 0)) throw invalidOption('prewarm must be a non-negative integer');
-    const limit = options.workerMemoryLimitBytes === undefined ? DEFAULT_WORKER_MEMORY_LIMIT : options.workerMemoryLimitBytes;
-    if (limit !== null && !(Number.isSafeInteger(limit) && limit >= MIN_WORKER_MEMORY_LIMIT)) {
-      throw invalidOption('workerMemoryLimitBytes must be at least 64 MiB, or null');
+    const limits = { ...validateLimits(options.limits, 'limits') };
+    if (options.workerMemoryLimitBytes !== undefined) {
+      if (limits.workerMemoryBytes !== undefined && limits.workerMemoryBytes !== options.workerMemoryLimitBytes) {
+        throw invalidOption('workerMemoryLimitBytes and limits.workerMemoryBytes disagree');
+      }
+      limits.workerMemoryBytes = options.workerMemoryLimitBytes;
+      validateLimits(limits, 'limits');
     }
-    this.#memoryLimit = limit ?? undefined;
+    this.#limits = limits;
+    this.#tenantLimits = options.tenantLimits;
+    if (this.#tenantLimits !== undefined && typeof this.#tenantLimits !== 'function') {
+      throw invalidOption('tenantLimits must be a function');
+    }
     this.#refill();
+  }
+
+  /** The runtime's and the tenant's limits, before any isolate's own. */
+  #limitsFor(tenant: string): ResolvedLimits {
+    const own = this.#tenantLimits ? validateLimits(this.#tenantLimits(tenant), `tenantLimits(${JSON.stringify(tenant)})`) : undefined;
+    return resolveLimits(this.#limits, own);
+  }
+
+  /** The memory cap a worker is started with (undefined: none). */
+  #workerMemory(limits: ResolvedLimits): number | undefined {
+    return limits.workerMemoryBytes ?? undefined;
   }
 
   #refill(): void {
     while (!this.#closed && this.#spares.length < this.#prewarm && this.#spareFailures < MAX_SPARE_FAILURES) {
-      const spare = new SpareWorker(this.#workerPath, this.#strict, this.#memoryLimit, (gone) => {
+      const spare = new SpareWorker(this.#workerPath, this.#strict, this.#workerMemory(resolveLimits(this.#limits)), (gone) => {
         // Died before anyone used it (it never ran guest code).
         this.#spares = this.#spares.filter((s) => s !== gone);
         this.#spareFailures++;
@@ -631,7 +744,9 @@ export class Runtime {
     }
   }
 
-  #takeSpare(): SpareWorker | undefined {
+  /** A spare, if one was started with this memory cap. */
+  #takeSpare(memory: number | undefined): SpareWorker | undefined {
+    if (memory !== this.#workerMemory(resolveLimits(this.#limits))) return undefined;
     const spare = this.#spares.shift();
     if (spare) setImmediate(() => this.#refill());
     return spare;
@@ -689,10 +804,17 @@ export class Runtime {
       this.#quarantined.delete(options.tenant);
     }
     const opts = mergeOptions(this.#defaults, options);
+    const tenantLevel = this.#limitsFor(opts.tenant);
+    const limits = resolveLimits(tenantLevel, opts.limits);
     const setup = vmSetup(opts);
-    const worker = this.#workerFor(opts.tenant);
+    const worker = this.#workerFor(opts.tenant, tenantLevel);
     const id = this.#nextVm++;
-    worker.createIsolate(id, opts, setup, opts.onLog ?? this.#onLog);
+    try {
+      worker.createIsolate(id, opts, setup, opts.onLog ?? this.#onLog, limits);
+    } catch (err) {
+      setup.dispose();
+      throw err;
+    }
     return new Isolate(worker, id, () => this.#nextReq++);
   }
 
@@ -735,10 +857,28 @@ export class Runtime {
     this.#quarantined.delete(tenant);
   }
 
-  #workerFor(tenant: string): TenantWorker {
+  /** Make room for one more tenant's worker, evicting the least recently used idle one. */
+  #makeRoom(limits: ResolvedLimits, tenant: string): void {
+    if (this.#workers.size < limits.tenants) return;
+    let lru: TenantWorker | undefined;
+    for (const w of this.#workers.values()) if (w.idle && (!lru || w.idleSince < lru.idleSince)) lru = w;
+    if (!lru) {
+      throw new IsolaneError(
+        'ERR_RESOURCE_LIMIT',
+        `isolane: ${limits.tenants} tenants already have running workers, none idle (limits.tenants)`,
+        { tenant, limit: 'tenants' },
+      );
+    }
+    this.#workers.delete(lru.tenant);
+    lru.kill();
+  }
+
+  #workerFor(tenant: string, limits: ResolvedLimits): TenantWorker {
     let w = this.#workers.get(tenant);
     if (!w) {
-      w = new TenantWorker(tenant, this.#workerPath, this.#idleTimeoutMs, this.#strict, this.#memoryLimit, (gone, exit) => {
+      this.#makeRoom(limits, tenant);
+      const memory = this.#workerMemory(limits);
+      w = new TenantWorker(tenant, this.#workerPath, this.#idleTimeoutMs, this.#strict, memory, (gone, exit) => {
         if (this.#workers.get(tenant) === gone) this.#workers.delete(tenant);
         // Expected ends: stopped by us, refused by strict mode, or out of memory.
         if (exit.reason === 'killed' || exit.reason === 'insufficient-isolation' || isOutOfMemory(exit)) return;
@@ -762,7 +902,7 @@ export class Runtime {
             detail: exit.detail,
           });
         }
-      }, this.#usageOf(tenant), this.#takeSpare());
+      }, this.#usageOf(tenant), limits, this.#takeSpare(memory));
       this.#workers.set(tenant, w);
     }
     return w;

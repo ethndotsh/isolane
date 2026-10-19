@@ -18,6 +18,8 @@
  *   restarts on the next call).
  * - `ERR_ISOLATE_RETIRED`: an earlier failure retired this isolate; create
  *   a new one.
+ * - `ERR_RESOURCE_LIMIT`: another limit (see `limit` for which: isolates,
+ *   tenants, concurrentEvals, codeBytes, resultBytes, ...).
  *
  * usage (the calling code's mistake):
  * - `ERR_INVALID_OPTION`: an option is malformed. Thrown synchronously.
@@ -43,6 +45,7 @@ export type IsolaneErrorCode =
   | 'ERR_CPU_LIMIT'
   | 'ERR_MEMORY_LIMIT'
   | 'ERR_ISOLATE_RETIRED'
+  | 'ERR_RESOURCE_LIMIT'
   | 'ERR_INVALID_OPTION'
   | 'ERR_ISOLATE_DISPOSED'
   | 'ERR_RUNTIME_CLOSED'
@@ -62,6 +65,7 @@ const KINDS: Record<IsolaneErrorCode, IsolaneErrorKind> = {
   ERR_CPU_LIMIT: 'limit',
   ERR_MEMORY_LIMIT: 'limit',
   ERR_ISOLATE_RETIRED: 'limit',
+  ERR_RESOURCE_LIMIT: 'limit',
   ERR_INVALID_OPTION: 'usage',
   ERR_ISOLATE_DISPOSED: 'usage',
   ERR_RUNTIME_CLOSED: 'usage',
@@ -90,6 +94,8 @@ export interface GuestErrorInfo {
 
 export interface IsolaneErrorDetails {
   tenant?: string;
+  /** For `ERR_RESOURCE_LIMIT`: which limit (a key of `Limits`). */
+  limit?: string;
   guest?: GuestErrorInfo;
   /** Overrides the default for the code (worker-level memory limits are retryable). */
   retryable?: boolean;
@@ -105,6 +111,8 @@ export class IsolaneError extends Error {
   readonly tenant?: string;
   /** What the guest threw, for `ERR_GUEST_EXCEPTION`. */
   readonly guest?: GuestErrorInfo;
+  /** For `ERR_RESOURCE_LIMIT`: which limit was hit. */
+  readonly limit?: string;
 
   constructor(code: IsolaneErrorCode, message: string, details: IsolaneErrorDetails = {}) {
     super(message, details.cause === undefined ? undefined : { cause: details.cause });
@@ -114,6 +122,7 @@ export class IsolaneError extends Error {
     this.retryable = details.retryable ?? RETRYABLE.has(code);
     if (details.tenant !== undefined) this.tenant = details.tenant;
     if (details.guest !== undefined) this.guest = details.guest;
+    if (details.limit !== undefined) this.limit = details.limit;
   }
 }
 

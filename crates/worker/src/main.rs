@@ -8,6 +8,7 @@
 
 mod clock;
 mod frame;
+mod limits;
 mod lockdown;
 mod proto;
 mod vm;
@@ -244,6 +245,7 @@ fn serve(lock_down: bool, memory_limit: Option<u64>) -> ExitCode {
                 allow_code_generation,
                 allow_web_assembly,
                 web_platform,
+                limits,
                 prelude,
             } => {
                 let (tx, rx) = mpsc::channel();
@@ -258,6 +260,7 @@ fn serve(lock_down: bool, memory_limit: Option<u64>) -> ExitCode {
                     allow_code_generation,
                     allow_web_assembly,
                     web_platform,
+                    limits,
                     prelude,
                 };
                 match vm::spawn(vm, config, rx, out.clone()) {

@@ -49,10 +49,6 @@ const BACKGROUND_POLL: Duration = Duration::from_millis(1);
 const VM_THREAD_STACK: usize = 4 << 20;
 const WATCHDOG_STACK: usize = 64 << 10;
 
-/// Bytes of console output a VM may send per eval; the rest is dropped.
-const LOG_BUDGET: usize = 1 << 20;
-/// Longest single console message.
-const LOG_MESSAGE_MAX: usize = 16 << 10;
 
 pub struct VmConfig {
     pub heap_bytes: Option<u64>,
@@ -67,6 +63,7 @@ pub struct VmConfig {
     pub allow_code_generation: bool,
     pub allow_web_assembly: bool,
     pub web_platform: bool,
+    pub limits: crate::limits::GuestLimits,
     pub prelude: Option<String>,
 }
 
@@ -451,6 +448,7 @@ fn apply_host_reply(scope: &mut v8::PinScope, call: u64, reply: Reply) {
 /// log frame. Output past the VM's per-eval budget is dropped.
 fn console_method(scope: &mut v8::PinScope, args: v8::FunctionCallbackArguments, _rv: v8::ReturnValue<v8::Value>) {
     let level = args.data().to_rust_string_lossy(scope);
+    let max_message = crate::limits::get().log_message_bytes;
     let Some(bridge) = scope.get_slot::<Rc<Bridge>>().cloned() else { return };
     if bridge.log_budget.get() == 0 {
         return;
@@ -476,12 +474,12 @@ fn console_method(scope: &mut v8::PinScope, args: v8::FunctionCallbackArguments,
             }
         };
         message.push_str(&part);
-        if message.len() >= LOG_MESSAGE_MAX {
+        if message.len() >= max_message {
             break;
         }
     }
-    if message.len() > LOG_MESSAGE_MAX {
-        let mut cut = LOG_MESSAGE_MAX;
+    if message.len() > max_message {
+        let mut cut = max_message;
         while !message.is_char_boundary(cut) {
             cut -= 1;
         }
@@ -638,6 +636,13 @@ fn to_json(scope: &mut v8::PinScope, value: v8::Local<v8::Value>) -> Result<Stri
     match v8::json::stringify(tc, value) {
         Some(s) => {
             let s = s.to_rust_string_lossy(tc);
+            let max = crate::limits::get().result_bytes;
+            if s.len() > max {
+                return Err(fail(
+                    ErrorCode::ResourceLimit,
+                    format!("the result is {} bytes as JSON, more than the {max}-byte limit (limits.resultBytes)", s.len()),
+                ));
+            }
             Ok(if s == "undefined" { "null".into() } else { s })
         }
         None => {
@@ -666,7 +671,7 @@ fn eval(
 
     crate::clock::advance();
     if let Some(bridge) = tc.get_slot::<Rc<Bridge>>() {
-        bridge.log_budget.set(LOG_BUDGET);
+        bridge.log_budget.set(crate::limits::get().log_bytes_per_eval);
     }
     let Some(source) = v8::String::new(tc, code) else {
         return EvalEnd::Done(Err(fail(ErrorCode::Internal, "source too large")));
@@ -801,6 +806,7 @@ fn usage(isolate: &mut v8::Isolate, clock: Option<CpuClock>, start: Duration) ->
 }
 
 fn vm_main(id: u64, config: VmConfig, rx: Receiver<VmMsg>, out: Output) {
+    crate::limits::set(config.limits);
     crate::clock::set_mode(config.clock);
     SEED.with(|seed| seed.set(config.random_seed));
     let mut params = v8::CreateParams::default();
@@ -826,7 +832,7 @@ fn vm_main(id: u64, config: VmConfig, rx: Receiver<VmMsg>, out: Output) {
         out: out.clone(),
         mailbox: Mailbox { rx, replies: RefCell::new(VecDeque::new()), later: RefCell::new(VecDeque::new()) },
         next_call: Cell::new(1),
-        log_budget: Cell::new(LOG_BUDGET),
+        log_budget: Cell::new(crate::limits::get().log_bytes_per_eval),
         pending: RefCell::new(HashMap::new()),
         deadline: Cell::new(None),
         timed_out: Cell::new(false),

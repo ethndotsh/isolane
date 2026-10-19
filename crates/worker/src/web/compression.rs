@@ -23,7 +23,10 @@ use flate2::Compression;
 use super::{bytes, new_u8array, string_arg, throw_type, Args, Rv};
 
 /// Most bytes one write (or the finish) may produce.
-const MAX_OUTPUT: usize = 128 << 20;
+/// Most output one call may produce (limits.decompressedBytes).
+fn max_output() -> usize {
+    crate::limits::get().decompressed_bytes
+}
 /// Input is fed in slices this big, checking the output size in between.
 const INPUT_SLICE: usize = 64 << 10;
 
@@ -73,8 +76,8 @@ impl RawBrotliEncoder {
                 return Ok(output);
             }
             if output_offset == output.len() {
-                if output.len() > MAX_OUTPUT {
-                    return Err(std::io::Error::other(format!("output larger than {MAX_OUTPUT} bytes")));
+                if output.len() > max_output() {
+                    return Err(std::io::Error::other(format!("output larger than {} bytes", max_output())));
                 }
                 output.resize(output.len() + 64 * 1024, 0);
             }
@@ -201,9 +204,9 @@ pub fn compression_write(scope: &mut v8::PinScope, args: Args, mut rv: Rv) {
                     }
                 }
             }
-            if out.len() > MAX_OUTPUT {
+            if out.len() > max_output() {
                 s.remove(&id);
-                return Err(format!("output larger than {MAX_OUTPUT} bytes from one chunk"));
+                return Err(format!("output larger than {} bytes from one chunk", max_output()));
             }
         }
         Ok(out)
@@ -246,8 +249,8 @@ pub fn compression_finish(scope: &mut v8::PinScope, args: Args, mut rv: Rv) {
         Inner::BrotliEncoder(mut e) => e.compress(&[], BrotliEncoderOperation::BROTLI_OPERATION_FINISH),
     };
     match out {
-        Ok(out) if out.len() <= MAX_OUTPUT => rv.set(new_u8array(scope, &out).into()),
-        Ok(_) if report => throw_type(scope, &format!("output larger than {MAX_OUTPUT} bytes")),
+        Ok(out) if out.len() <= max_output() => rv.set(new_u8array(scope, &out).into()),
+        Ok(_) if report => throw_type(scope, &format!("output larger than {} bytes", max_output())),
         Err(e) if report => throw_type(scope, &e.to_string()),
         _ => rv.set(new_u8array(scope, &[]).into()),
     }

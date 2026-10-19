@@ -34,6 +34,9 @@ pub enum In {
         /// Keep the WebAssembly global and allow compiling modules.
         #[serde(default)]
         allow_web_assembly: bool,
+        /// Limits enforced inside the guest.
+        #[serde(default)]
+        limits: crate::limits::GuestLimits,
         /// Install the WinterTC web platform globals (src/web/).
         #[serde(default)]
         web_platform: bool,
@@ -77,6 +80,8 @@ pub enum ErrorCode {
     Timeout,
     #[serde(rename = "ERR_CPU_LIMIT")]
     CpuLimit,
+    #[serde(rename = "ERR_RESOURCE_LIMIT")]
+    ResourceLimit,
     #[serde(rename = "ERR_GUEST_EXCEPTION")]
     GuestException,
     #[serde(rename = "ERR_MEMORY_LIMIT")]

@@ -6,7 +6,7 @@ import { chmodSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { createServer } from 'node:http';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { Runtime, IsolaneError } from '../dist/index.js';
+import { Runtime, IsolaneError, DEFAULT_LIMITS } from '../dist/index.js';
 
 // ISOLANE_STRICT=1 runs everything under strict mode (CI on native Linux).
 const pool = new Runtime({ strict: process.env.ISOLANE_STRICT === '1' });
@@ -475,6 +475,83 @@ test('usage is accounted per tenant', async () => {
   rt.resetUsage('billed');
   assert.equal(rt.usage('billed').evals, 0);
   assert.equal(rt.usage('nobody').evals, 0);
+  rt.close();
+});
+
+test('limits: defaults, levels, and validation', async () => {
+  assert.equal(DEFAULT_LIMITS.timeoutMs, 30_000);
+  assert.equal(DEFAULT_LIMITS.heapBytes, 128 << 20);
+  const rt = new Runtime({
+    strict: process.env.ISOLANE_STRICT === '1',
+    limits: { timeoutMs: 5000, isolates: 3 },
+    tenantLimits: (t) => (t === 'small' ? { isolates: 1, timeoutMs: 100 } : undefined),
+  });
+  const limitOf = (f) => {
+    try {
+      f();
+    } catch (e) {
+      return [e.code, e.limit];
+    }
+  };
+  // Tenant-level caps come from the runtime, then tenantLimits.
+  const big = [rt.createIsolate({ tenant: 'big' }), rt.createIsolate({ tenant: 'big' }), rt.createIsolate({ tenant: 'big' })];
+  assert.deepEqual(limitOf(() => rt.createIsolate({ tenant: 'big' })), ['ERR_RESOURCE_LIMIT', 'isolates']);
+  big[0].dispose();
+  rt.createIsolate({ tenant: 'big' }).dispose();
+  big.forEach((v) => v.dispose());
+  const small = rt.createIsolate({ tenant: 'small' });
+  assert.deepEqual(limitOf(() => rt.createIsolate({ tenant: 'small' })), ['ERR_RESOURCE_LIMIT', 'isolates']);
+  // ...and isolate-level ones from the tenant, then the call (shorthand or limits).
+  await assert.rejects(small.eval('for (;;) {}'), code('ERR_TIMEOUT'));
+  small.dispose();
+  await assert.rejects(rt.run('for (;;) {}', { tenant: 'small', limits: { timeoutMs: 50 } }), code('ERR_TIMEOUT'));
+  assert.deepEqual(limitOf(() => rt.createIsolate({ tenant: 'big', limits: { isolates: 9 } })), ['ERR_INVALID_OPTION', undefined]);
+  assert.deepEqual(limitOf(() => rt.createIsolate({ tenant: 'big', limits: { nope: 1 } })), ['ERR_INVALID_OPTION', undefined]);
+  assert.deepEqual(limitOf(() => rt.createIsolate({ tenant: 'big', timeoutMs: 5, limits: { timeoutMs: 6 } })), ['ERR_INVALID_OPTION', undefined]);
+  assert.throws(() => new Runtime({ limits: { tenants: 0 } }), code('ERR_INVALID_OPTION'));
+  rt.close();
+});
+
+test('limits: code, results, timers, console, concurrency', async () => {
+  const L = (limits) => ({ ...T, limits });
+  const err = (p) => p.then(() => null, (e) => [e.code, e.limit]);
+  assert.deepEqual(await err(pool.run('1 + 1 // ' + 'x'.repeat(200), L({ codeBytes: 100 }))), ['ERR_RESOURCE_LIMIT', 'codeBytes']);
+  assert.deepEqual(await err(pool.run('"x".repeat(1000)', L({ resultBytes: 100 }))), ['ERR_RESOURCE_LIMIT', 'resultBytes']);
+  assert.equal(
+    await pool.run('let n = 0; try { for (;;) { setTimeout(() => {}, 1e6); n++; } } catch (e) { [n, e instanceof RangeError] }', {
+      ...L({ timers: 5 }),
+      webPlatform: true,
+    }).then(JSON.stringify),
+    '[5,true]',
+  );
+  const logs = [];
+  await pool.run('console.log("y".repeat(100)); for (let i = 0; i < 50; i++) console.log("z".repeat(10))', {
+    ...L({ logMessageBytes: 20, logBytesPerEval: 100 }),
+    onLog: (e) => logs.push(e.message),
+  });
+  assert.ok(logs[0].length <= 22, logs[0]);
+  assert.match(logs.at(-1), /output limit reached/);
+  const rt = new Runtime({ strict: process.env.ISOLANE_STRICT === '1', limits: { concurrentEvals: 2 } });
+  const vm = rt.createIsolate({ tenant: 'c', hostFunctions: { wait: () => new Promise((r) => setTimeout(r, 100)) } });
+  const running = [vm.eval('wait()'), vm.eval('wait()')];
+  await assert.rejects(vm.eval('1'), (e) => e.code === 'ERR_RESOURCE_LIMIT' && e.limit === 'concurrentEvals');
+  await Promise.all(running);
+  vm.dispose();
+  rt.close();
+});
+
+test('limits.tenants evicts the least recently used idle tenant', async () => {
+  const rt = new Runtime({ strict: process.env.ISOLANE_STRICT === '1', limits: { tenants: 2 } });
+  await rt.run('1', { tenant: 'a' });
+  await rt.run('1', { tenant: 'b' });
+  const pidA = rt._workerPid('a');
+  await rt.run('1', { tenant: 'c' }); // evicts a (idle longest)
+  assert.equal(rt._workerPid('a'), undefined);
+  assert.ok(rt._workerPid('b') && rt._workerPid('c'));
+  assert.notEqual(pidA, undefined);
+  const busy = [rt.createIsolate({ tenant: 'b' }), rt.createIsolate({ tenant: 'c' })];
+  assert.throws(() => rt.createIsolate({ tenant: 'd' }), (e) => e.code === 'ERR_RESOURCE_LIMIT' && e.limit === 'tenants');
+  busy.forEach((v) => v.dispose());
   rt.close();
 });
 

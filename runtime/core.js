@@ -98,7 +98,7 @@
   // the ref'd count through native.timerState, and calls runTimer(now) to
   // run one due timer per task. Cancelled timers stay in the heap until
   // they surface, or until there are more dead entries than live ones.
-  const MAX_TIMERS = 10000;
+  const MAX_TIMERS = native.maxTimers; // limits.timers
   const TIMEOUT_MAX = 2 ** 31 - 1;
   const heap = [];
   let order = 0;
