@@ -16,7 +16,7 @@
 
 mod base64;
 mod snapshot;
-pub use snapshot::{external_references, snapshot};
+pub use snapshot::{embedded_status as snapshot_status, external_references, make as make_snapshot, snapshot};
 mod clone;
 mod compression;
 mod encoding;

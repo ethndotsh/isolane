@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Build the worker with V8 compiled from source, V8 sandbox enabled.
+# Build the worker with V8 compiled from source, V8 sandbox enabled, and the
+# web platform's startup snapshot embedded.
 # rusty_v8 publishes no prebuilt with v8_enable_sandbox, so every target
 # builds V8 itself. Expects the rusty_v8 checkout at build/rusty_v8.
 # Logs to build/logs/<os>-<arch>.log.
@@ -48,7 +49,8 @@ GN_ARGS="${GN_ARGS:-$(scripts/gn-args.sh)}"
 export GN_ARGS
 
 start=$(date +%s)
-if V8_FROM_SOURCE=1 cargo build --release -p isolane-worker -vv >"$log" 2>&1; then
+# Two passes, to embed the web platform's snapshot (scripts/build-worker.sh).
+if V8_FROM_SOURCE=1 scripts/build-worker.sh release -vv >"$log" 2>&1; then
   echo "built in $(( $(date +%s) - start ))s; log: $log"
 else
   echo "build failed after $(( $(date +%s) - start ))s; log: $log" >&2

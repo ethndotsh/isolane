@@ -158,8 +158,9 @@ fn self_check() -> ExitCode {
     drop(isolate);
     let kib = |v: Option<u64>| v.map(|k| k.to_string()).unwrap_or_else(|| "null".into());
     println!(
-        "{{\"v8\":\"{}\",\"sandboxEnabled\":{enabled},\"sandboxSecure\":{secure},\"vmDataKiB\":{{\"start\":{},\"afterInit\":{},\"withIsolate\":{}}}}}",
+        "{{\"v8\":\"{}\",\"sandboxEnabled\":{enabled},\"sandboxSecure\":{secure},\"webSnapshot\":\"{}\",\"vmDataKiB\":{{\"start\":{},\"afterInit\":{},\"withIsolate\":{}}}}}",
         v8::V8::get_version(),
+        web::snapshot_status(),
         kib(before),
         kib(after_init),
         kib(with_isolate)
@@ -168,6 +169,21 @@ fn self_check() -> ExitCode {
         ExitCode::SUCCESS
     } else {
         ExitCode::FAILURE
+    }
+}
+
+/// Build time (scripts/build-worker.sh): write the web platform's snapshot
+/// for the next build of this same source to embed. Set up like `serve`
+/// (time zone, V8 flags), so the snapshot is the one serve would build.
+fn make_web_snapshot(path: &str) -> ExitCode {
+    std::env::set_var("TZ", "UTC");
+    init_v8();
+    match web::make_snapshot(path) {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(e) => {
+            eprintln!("isolane-worker: couldn't make the web platform snapshot: {e}");
+            ExitCode::FAILURE
+        }
     }
 }
 
@@ -422,6 +438,9 @@ fn main() -> ExitCode {
     if args.first().map(String::as_str) == Some("--escape-test") {
         return escape_test(args.get(1).map(String::as_str).unwrap_or_default());
     }
+    if let Some(path) = args.first().and_then(|a| a.strip_prefix("--make-web-snapshot=")) {
+        return make_web_snapshot(path);
+    }
     let mut mode = None;
     let mut memory_limit = None;
     let mut web_background = false;
@@ -448,7 +467,7 @@ fn main() -> ExitCode {
         Some("--no-lockdown") => serve(false, memory_limit, web_background),
         Some(other) => {
             eprintln!(
-                "usage: isolane-worker [--serve | --self-check | --no-lockdown] [--memory-limit=BYTES] [--prepare-web] (got {other})"
+                "usage: isolane-worker [--serve | --self-check | --no-lockdown] [--memory-limit=BYTES] [--prepare-web] | --make-web-snapshot=FILE (got {other})"
             );
             ExitCode::from(2)
         }
