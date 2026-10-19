@@ -65,6 +65,21 @@ and the kernel (minimized by seccomp). **Untrusted:** everything inside a
 worker after the first line of guest code runs. Once it has executed guest
 code, the worker is treated as potentially compromised.
 
+**Accepted risks** (recorded so a review can sign them off):
+
+- RSA in `crypto.subtle` isn't constant-time (the `rsa` crate,
+  RUSTSEC-2023-0071, the Marvin attack): a guest that can time many
+  private-key operations with one key could learn it. The constant-time
+  alternative parses guest-supplied keys in C outside the V8 sandbox.
+- Native work that V8 can't interrupt (RSA key generation, up to 4,096
+  bits; URLPattern parsing, bounded by size) runs on the isolate's thread,
+  so it can overrun the time limit by its bounded cost.
+- Background work is budgeted per isolate (`backgroundMs`), so a tenant
+  with many stateful isolates gets that many budgets; a tenant-wide budget
+  is planned.
+- Landlock at `partial` (kernels before 6.7) meets strict mode; seccomp is
+  the first wall for files and sockets.
+
 ## Architecture
 
 ```

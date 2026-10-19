@@ -38,7 +38,7 @@ jobs:
         ports: ['5432:5432']
         options: --health-cmd pg_isready --health-interval 5s --health-timeout 5s --health-retries 20
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           ref: ${{ inputs.ref || github.ref }}
 
@@ -54,7 +54,7 @@ jobs:
           sudo ./llvm.sh 21
           sudo apt-get install -y -q libclang-21-dev libglib2.0-dev strace
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: 22
 
@@ -69,7 +69,7 @@ jobs:
       # inside it is in the V8 build cache instead.)
       - name: Restore rusty_v8 sources
         id: v8-src
-        uses: actions/cache/restore@v4
+        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
           path: |
             build/rusty_v8
@@ -81,7 +81,7 @@ jobs:
 
       - name: Save rusty_v8 sources
         if: steps.v8-src.outputs.cache-hit != 'true'
-        uses: actions/cache/save@v4
+        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
           path: |
             build/rusty_v8
@@ -90,7 +90,7 @@ jobs:
 
       - name: Restore V8 build
         id: v8-cache
-        uses: actions/cache/restore@v4
+        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
           path: |
             target
@@ -116,7 +116,7 @@ jobs:
       # in the final steps still leaves hours of compiled V8 worth keeping).
       - name: Save V8 build
         if: always() && steps.v8-cache.outputs.cache-hit != 'true'
-        uses: actions/cache/save@v4
+        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
           path: |
             target
@@ -160,7 +160,7 @@ jobs:
 
       # web-platform-tests as a per-subtest gate (test/wpt/expectations.json),
       # served by WPT's own server (Python), against the sandboxed worker.
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
         with:
           python-version: '3.12'
 
@@ -170,7 +170,7 @@ jobs:
 
       # Keyed by the commit; the runner's hash too, since it lists the
       # directories to check out (it adds missing ones to a restored copy).
-      - uses: actions/cache@v4
+      - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
           path: ${{ runner.temp }}/wpt
           key: wpt-${{ steps.wpt.outputs.commit }}-${{ hashFiles('test/wpt/run.mjs') }}
@@ -189,7 +189,7 @@ jobs:
         id: test262
         run: echo "commit=$(sed -n "s/^export const TEST262_COMMIT = '\(.*\)';/\1/p" test/test262/run.mjs)" >>"$GITHUB_OUTPUT"
 
-      - uses: actions/cache@v4
+      - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
           path: ${{ runner.temp }}/test262
           key: test262-${{ steps.test262.outputs.commit }}-${{ hashFiles('test/test262/run.mjs') }}
@@ -216,7 +216,7 @@ jobs:
           { echo '### Syscalls after ready'; echo '```'; cat syscall-audit.txt; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
           exit "$status"
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         if: always()
         with:
           name: linux-x64
@@ -228,9 +228,28 @@ jobs:
           if-no-files-found: ignore
 
       # For soak.yml (fuzzing and stress), which runs against main's build.
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: worker-linux-x64
           path: |
             ${{ runner.temp }}/isolane-worker
             ${{ runner.temp }}/isolane-escape-worker
+
+  # Known advisories in dependencies: a gate, apart from the long build.
+  audit:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          ref: ${{ inputs.ref || github.ref }}
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 22
+      # What the published package installs (dev tools aren't shipped).
+      - name: npm audit
+        run: npm audit --omit=dev --audit-level=moderate
+      - name: cargo audit
+        run: |
+          cargo install cargo-audit --locked --version 0.22.2
+          cargo audit

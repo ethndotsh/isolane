@@ -13,6 +13,10 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 RUSTY_V8_TAG=v152.2.0
 V8_TAG=15.2.124.45
+# The commits those tags name, checked after fetching: a tag that moved
+# fails the build instead of building other code.
+RUSTY_V8_COMMIT=2768994f664e8a6e3aba27503606c58339136e2a
+V8_COMMIT=e51a6bf02e52f3dec9fee502db2594c0f5f51b37
 UPSTREAM=https://chromium.googlesource.com/v8/v8.git
 
 # Git hosts (Chromium's especially) return transient 5xx errors; retry with
@@ -39,6 +43,10 @@ else
   mv build/rusty_v8.partial build/rusty_v8
   echo "fetched rusty_v8 $RUSTY_V8_TAG"
 fi
+if [ "$(git -C build/rusty_v8 rev-parse HEAD)" != "$RUSTY_V8_COMMIT" ]; then
+  echo "rusty_v8 $RUSTY_V8_TAG is $(git -C build/rusty_v8 rev-parse HEAD), not the pinned $RUSTY_V8_COMMIT" >&2
+  exit 1
+fi
 v8_version() { # <git rev> -> V8 version at that commit
   git -C build/rusty_v8/v8 show "$1:include/v8-version.h" |
     sed -nE 's/^#define V8_(MAJOR_VERSION|MINOR_VERSION|BUILD_NUMBER|PATCH_LEVEL) ([0-9]+)/\2/p' | paste -sd. -
@@ -56,6 +64,11 @@ if [ "$(v8_version HEAD)" != "$V8_TAG" ]; then
   git -C build/rusty_v8/v8 checkout -q --detach "$V8_TAG"
   git -C build/rusty_v8/v8 -c user.name=isolane -c user.email=isolane@localhost cherry-pick "$base..$fork" >/dev/null
   echo "rebased rusty_v8's V8 patches from $base onto $V8_TAG ($(git -C build/rusty_v8/v8 rev-list --count "$V8_TAG..HEAD") patches)"
+fi
+if ! git -C build/rusty_v8/v8 merge-base --is-ancestor "$V8_COMMIT" HEAD 2>/dev/null ||
+  [ "$(git -C build/rusty_v8/v8 rev-parse "refs/tags/$V8_TAG^{commit}" 2>/dev/null || echo "$V8_COMMIT")" != "$V8_COMMIT" ]; then
+  echo "V8 $V8_TAG isn't the pinned $V8_COMMIT" >&2
+  exit 1
 fi
 
 for p in "$PWD"/patches/rusty_v8-*.patch; do

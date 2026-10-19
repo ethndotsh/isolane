@@ -23,8 +23,7 @@ jobs:
       branch: ${{ steps.bump.outputs.branch }}
       tag: ${{ steps.bump.outputs.tag }}
     steps:
-      - uses: actions/checkout@v4
-
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - name: Bump V8_TAG to the newest patch release
         id: bump
         run: |
@@ -38,7 +37,10 @@ jobs:
             echo "$branch already exists"
             exit 0
           fi
-          sed -i "s/^V8_TAG=.*/V8_TAG=$latest/" scripts/fetch-rusty-v8.sh
+          # The commit the tag names (an annotated tag's ^{} line, else the tag's own).
+          commit=$(git ls-remote --tags https://chromium.googlesource.com/v8/v8.git "refs/tags/$latest^{}" "refs/tags/$latest" |
+            sort -k2 -r | head -1 | cut -f1)
+          sed -i "s/^V8_TAG=.*/V8_TAG=$latest/; s/^V8_COMMIT=.*/V8_COMMIT=$commit/" scripts/fetch-rusty-v8.sh
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
           git switch -c "$branch"

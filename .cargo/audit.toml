@@ -1,0 +1,10 @@
+# cargo audit's configuration (CI's audit job).
+[advisories]
+ignore = [
+  # rsa: the Marvin timing attack (no fixed release). Accepted for now: RSA
+  # private-key operations in crypto.subtle aren't constant-time, so a guest
+  # that times many decryptions or signatures with one key could learn it.
+  # The alternative (aws-lc-rs) parses guest keys in C outside the V8
+  # sandbox; see docs/roadmap.md and the guide's known limits.
+  "RUSTSEC-2023-0071",
+]
