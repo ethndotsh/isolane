@@ -1,0 +1,86 @@
+name: V8 update
+
+# Daily: if upstream V8 has a newer patch release on the branch we build
+# (security backports land there), bump V8_TAG on a branch, run CI on it,
+# and open a PR when CI passes. Also opens an issue when the branch itself
+# leaves Chrome's support window, which needs a rusty_v8 upgrade by hand.
+
+on:
+  schedule:
+    - cron: '23 5 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+  issues: write
+  actions: read
+
+jobs:
+  check:
+    runs-on: ubuntu-24.04
+    outputs:
+      branch: ${{ steps.bump.outputs.branch }}
+      tag: ${{ steps.bump.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Bump V8_TAG to the newest patch release
+        id: bump
+        run: |
+          current=$(sed -n 's/^V8_TAG=//p' scripts/fetch-rusty-v8.sh)
+          latest=$(git ls-remote --tags https://chromium.googlesource.com/v8/v8.git "refs/tags/${current%.*}.*" |
+            sed -nE 's|.*refs/tags/([0-9]+\.[0-9]+\.[0-9]+\.[0-9]+)$|\1|p' | sort -V | tail -1)
+          echo "pinned $current, newest $latest"
+          if [ -z "$latest" ] || [ "$latest" = "$current" ]; then exit 0; fi
+          branch="v8-$latest"
+          if git ls-remote --exit-code origin "refs/heads/$branch" >/dev/null; then
+            echo "$branch already exists"
+            exit 0
+          fi
+          sed -i "s/^V8_TAG=.*/V8_TAG=$latest/" scripts/fetch-rusty-v8.sh
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git switch -c "$branch"
+          git commit -qam "Update V8 to $latest"
+          git push -q origin "$branch"
+          echo "branch=$branch" >>"$GITHUB_OUTPUT"
+          echo "tag=$latest" >>"$GITHUB_OUTPUT"
+
+      - name: Check that the branch is still supported
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          # V8 x.y ships in Chrome xy, and gets backports while Chrome Stable
+          # or Extended Stable is on that milestone.
+          v8=$(sed -n 's/^V8_TAG=//p' scripts/fetch-rusty-v8.sh)
+          milestone=$(echo "$v8" | awk -F. '{print $1 $2}')
+          major() { curl -fsS "https://chromiumdash.appspot.com/fetch_releases?channel=$1&platform=$2&num=1" | jq -r '.[0].version' | cut -d. -f1; }
+          stable=$(major Stable Linux)
+          extended=$(major Extended Windows)
+          rusty=$(gh release list -R denoland/rusty_v8 -L 1 --json tagName --jq '.[0].tagName')
+          echo "building V8 $v8 (M$milestone); Chrome Stable M$stable, Extended Stable M$extended; newest rusty_v8 $rusty"
+          if [ "$milestone" = "$stable" ] || [ "$milestone" = "$extended" ]; then exit 0; fi
+          title="V8 $(echo "$v8" | cut -d. -f1-2) is out of support"
+          if [ -n "$(gh issue list --state open --search "in:title \"$title\"" --json number --jq '.[].number')" ]; then exit 0; fi
+          gh issue create --title "$title" --body "Chrome Stable is M$stable and Extended Stable is M$extended, so V8 $v8 (M$milestone) no longer gets security backports. Move to a rusty_v8 release on a supported milestone (newest: $rusty), update RUSTY_V8_TAG, V8_TAG, and the v8 crate, and refresh patches/."
+
+  ci:
+    needs: check
+    if: needs.check.outputs.branch != ''
+    uses: ./.github/workflows/ci.yml
+    with:
+      ref: ${{ needs.check.outputs.branch }}
+
+  pr:
+    needs: [check, ci]
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Open a PR
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BRANCH: ${{ needs.check.outputs.branch }}
+          TAG: ${{ needs.check.outputs.tag }}
+        run: |
+          gh pr create -R "$GITHUB_REPOSITORY" --head "$BRANCH" --title "Update V8 to $TAG" \
+            --body "Upstream V8 $TAG is the newest patch release on our branch. rusty_v8's V8 patches were rebased onto it and CI passed (sandbox self-check, lockdown, end-to-end): $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
