@@ -34,6 +34,10 @@ call: `returns` (a Standard Schema the result must match; it types the
 result) and `filename` (the code's name in stack traces, default
 `<tenant>/eval-<n>.js`, where n counts the isolate's evals from 1).
 
+Tenant names are yours to choose, not the guest's: the runtime keeps each
+name's usage until `resetUsage()` (a few hundred bytes each), so a platform
+that takes names from requests should check them against its own list.
+
 ```js
 using vm = runtime.tenant('acme').isolate();
 await vm.eval('globalThis.count = 0');

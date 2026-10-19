@@ -385,7 +385,13 @@ export class Runtime {
     if (exit.reason === 'protocol-violation' || exit.reason === 'unresponsive' || exit.signal || exit.code !== 0) {
       this.#usageOf(tenant).securityEvents++;
       const quarantinedUntil = this.#quarantineMs === null ? undefined : Date.now() + this.#quarantineMs;
-      if (quarantinedUntil !== undefined) this.#quarantined.set(tenant, quarantinedUntil);
+      if (quarantinedUntil !== undefined) {
+        // Expired entries go when a new one comes, so a flood of crashing
+        // tenant names doesn't keep growing the map.
+        const now = Date.now();
+        for (const [name, until] of this.#quarantined) if (until <= now) this.#quarantined.delete(name);
+        this.#quarantined.set(tenant, quarantinedUntil);
+      }
       const what = exit.signal ? `killed by ${exit.signal}` : exit.code !== null ? `exit code ${exit.code}` : exit.reason;
       chain.emit('securityEvent', {
         kind: exit.reason === 'protocol-violation' ? 'protocol' : exit.reason === 'unresponsive' ? 'unresponsive' : 'crash',
