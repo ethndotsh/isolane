@@ -94,6 +94,14 @@ export interface IsolateOptions {
    */
   allowWebAssembly?: boolean;
   /**
+   * Install the WinterTC web platform globals: URL, URLSearchParams,
+   * TextEncoder/TextDecoder, atob/btoa, Event/EventTarget, AbortController,
+   * DOMException, structuredClone, performance, queueMicrotask,
+   * reportError, crypto.getRandomValues/randomUUID, navigator, self.
+   * Default false (plain ECMAScript).
+   */
+  webPlatform?: boolean;
+  /**
    * Give guest code `fetch` (with `Response` and `Headers`), brokered by
    * this process under the policy. Default: no network.
    */
@@ -293,6 +301,7 @@ class TenantWorker {
       randomSeed: opts.randomSeed,
       allowCodeGeneration: opts.allowCodeGeneration === true,
       allowWebAssembly: opts.allowWebAssembly === true,
+      webPlatform: opts.webPlatform === true,
       prelude: setup.prelude,
     });
   }

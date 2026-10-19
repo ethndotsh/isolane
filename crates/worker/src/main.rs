@@ -11,6 +11,7 @@ mod frame;
 mod lockdown;
 mod proto;
 mod vm;
+mod web;
 
 use std::collections::HashMap;
 use std::io::BufReader;
@@ -187,6 +188,7 @@ fn serve(lock_down: bool, memory_limit: Option<u64>) -> ExitCode {
                 random_seed,
                 allow_code_generation,
                 allow_web_assembly,
+                web_platform,
                 prelude,
             } => {
                 let (tx, rx) = mpsc::channel();
@@ -199,6 +201,7 @@ fn serve(lock_down: bool, memory_limit: Option<u64>) -> ExitCode {
                     random_seed,
                     allow_code_generation,
                     allow_web_assembly,
+                    web_platform,
                     prelude,
                 };
                 match vm::spawn(vm, config, rx, out.clone()) {

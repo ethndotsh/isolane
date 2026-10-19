@@ -39,6 +39,7 @@ code runs. Each VM can opt in to more:
 
 | Option | Default | |
 |---|---|---|
+| `webPlatform` | `false` | WinterTC's Minimum Common API, phase 1: `URL`, `URLSearchParams`, `TextEncoder`/`TextDecoder`, `atob`/`btoa`, `Event`/`EventTarget`, `AbortController`, `DOMException`, `structuredClone`, `performance`, `queueMicrotask`, `reportError`, `crypto.getRandomValues`/`randomUUID`. Deno's web-platform JS (vendored, MIT) on native ops; 97.3% of the WPT subset passes (`soak/wpt.mjs`). |
 | `clock` | `'frozen'` | `'frozen'` moves only when an eval starts and when a host call returns (no timers for side channels). `'realtime'`, or `{ fixedMs }` for reproducible runs. |
 | `randomSeed` | none (OS randomness) | Seeds `Math.random` for reproducible runs. |
 | `allowCodeGeneration` | `false` | Allows `eval` and `new Function`. |

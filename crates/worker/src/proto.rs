@@ -32,6 +32,9 @@ pub enum In {
         /// Keep the WebAssembly global and allow compiling modules.
         #[serde(default)]
         allow_web_assembly: bool,
+        /// Install the WinterTC web platform globals (src/web/).
+        #[serde(default)]
+        web_platform: bool,
         /// Trusted setup run in the context before guest code (the
         /// supervisor's fetch/fs wrappers).
         prelude: Option<String>,

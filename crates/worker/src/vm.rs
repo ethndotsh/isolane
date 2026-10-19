@@ -64,6 +64,7 @@ pub struct VmConfig {
     pub random_seed: Option<u64>,
     pub allow_code_generation: bool,
     pub allow_web_assembly: bool,
+    pub web_platform: bool,
     pub prelude: Option<String>,
 }
 
@@ -426,6 +427,18 @@ fn console_method(scope: &mut v8::PinScope, args: v8::FunctionCallbackArguments,
     bridge.out.send(&Out::Log { vm: bridge.vm, level: &level, message: &message });
 }
 
+/// A console line from the runtime itself (the web platform's unhandled
+/// errors), subject to the same per-eval budget as guest console output.
+pub(crate) fn guest_log(scope: &mut v8::PinScope, level: &str, message: &str) {
+    let Some(bridge) = scope.get_slot::<Rc<Bridge>>().cloned() else { return };
+    let left = bridge.log_budget.get();
+    if left == 0 {
+        return;
+    }
+    bridge.log_budget.set(left.saturating_sub(message.len()));
+    bridge.out.send(&Out::Log { vm: bridge.vm, level, message });
+}
+
 fn install_console(scope: &mut v8::PinScope, global: v8::Local<v8::Object>) {
     let console = v8::Object::new(scope);
     for (name, level) in [("log", "log"), ("info", "info"), ("debug", "debug"), ("warn", "warn"), ("error", "error"), ("trace", "debug")] {
@@ -477,6 +490,9 @@ fn new_context(isolate: &mut v8::Isolate, config: &VmConfig) -> Result<v8::Globa
     context.set_allow_generation_from_strings(config.allow_code_generation);
     let scope = &mut v8::ContextScope::new(scope, context);
     let global = context.global(scope);
+    if config.web_platform {
+        crate::web::install(scope, global)?;
+    }
     let wasm: &[&str] = if config.allow_web_assembly { &[] } else { &["WebAssembly"] };
     for name in REMOVED_GLOBALS.iter().chain(wasm) {
         let key = v8::String::new(scope, name).unwrap();
