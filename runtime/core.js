@@ -101,7 +101,9 @@
   // the ref'd count through native.timerState, and calls runTimer(now) to
   // run one due timer per task. Cancelled timers stay in the heap until
   // they surface, or until there are more dead entries than live ones.
-  const MAX_TIMERS = native.maxTimers; // limits.timers
+  // limits.timers is the isolate's, read when a timer is created (this
+  // script may run once, for a snapshot shared by many isolates).
+  const maxTimers = () => native.maxTimers();
   const TIMEOUT_MAX = 2 ** 31 - 1;
   const heap = [];
   let order = 0;
@@ -173,8 +175,8 @@
 
   // core.createTimer, as Deno's ext/web/02_timers.js calls it.
   function createTimer(callback, after, args, isRepeat, isRefed) {
-    if (live >= MAX_TIMERS) {
-      throw new RangeError(`isolane: more than ${MAX_TIMERS} active timers in this isolate`);
+    if (live >= maxTimers()) {
+      throw new RangeError(`isolane: more than ${maxTimers()} active timers in this isolate`);
     }
     after = MathTrunc(+after);
     if (!NumberIsFinite(after) || after < 0) after = 0;
@@ -248,7 +250,7 @@
       report();
     }
   }
-  native.setTimerRunner(runTimer);
+  // native.setTimerRunner(runTimer) is per isolate: see configure() below.
 
   // ---- blobs ----
   // Deno keeps blob parts in a native store; here they're Uint8Arrays in
@@ -290,7 +292,7 @@
     },
     op_blob_create_object_url(mediaType, ids) {
       // The origin is the isolate's base URL's (web.baseUrl), else opaque.
-      const url = `blob:${blobOrigin}/${native.randomUUID()}`;
+      const url = `blob:${blobOrigin()}/${native.randomUUID()}`;
       MapPrototypeSet(objectUrls, url, { mediaType, parts: ArrayPrototypeMap(ids, getPart) });
       return url;
     },
@@ -376,7 +378,7 @@
     // The location is the isolate's base URL (`web.baseUrl`), if it has one:
     // relative URLs in Request/Response.redirect resolve against it, and
     // throw without one, as in a worker without a base URL.
-    "ext:deno_web/12_location.js": ObjectFreeze({ getLocationHref: () => native.baseUrl }),
+    "ext:deno_web/12_location.js": ObjectFreeze({ getLocationHref: () => baseUrl }),
     // Deno.HttpClient doesn't exist here, so no RequestInit.client is valid.
     "ext:deno_fetch/22_http_client.js": ObjectFreeze({ HttpClientPrototype: ObjectFreeze(ObjectCreate(null)) }),
   };
@@ -398,7 +400,16 @@
   const BadResourcePrototype = ObjectFreeze({ __proto__: null });
   // An http(s) base URL's origin is its scheme, host, and port: the part
   // before the path. (core.js runs before URL exists.)
-  const blobOrigin = (native.baseUrl && RegExpPrototypeExec(/^https?:\/\/[^/?#]+/i, native.baseUrl)?.[0]) || "null";
+  const blobOrigin = () => (baseUrl && RegExpPrototypeExec(/^https?:\/\/[^/?#]+/i, baseUrl)?.[0]) || "null";
+
+  // The isolate's own settings. This script can run once for a startup
+  // snapshot that many isolates are created from, so nothing per isolate is
+  // read while it runs: configure() sets it, after each isolate starts.
+  let baseUrl;
+  function configure(options) {
+    baseUrl = options.baseUrl;
+    native.setTimerRunner(runTimer);
+  }
 
   function destructureError(error) {
     const message = ObjectPrototypeIsPrototypeOf(ErrorPrototype, error)
@@ -412,7 +423,9 @@
     ops,
     loadExtScript,
     build: ObjectFreeze({ __proto__: null, os: "isolane", arch: "", target: "" }),
-    baseUrl: native.baseUrl,
+    get baseUrl() {
+      return baseUrl;
+    },
     isAnyArrayBuffer: native.isAnyArrayBuffer,
     isArrayBuffer: native.isArrayBuffer,
     isArrayBufferView: native.isArrayBufferView,
@@ -460,6 +473,7 @@
 
   bootstrap = ObjectFreeze({
     __proto__: null,
+    configure,
     core,
     internals: { __proto__: null },
     primordials,

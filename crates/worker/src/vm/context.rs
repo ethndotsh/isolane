@@ -30,14 +30,27 @@ const REMOVED_GLOBALS: &[&str] = &["SharedArrayBuffer", "Atomics"];
 
 /// The VM's context and its compiled shims. On failure, what every eval
 /// gets instead: `ERR_ISOLATE_RETIRED`, or `ERR_SHIM` when a shim failed.
-pub(super) fn new_context(isolate: &mut v8::Isolate, config: &VmConfig) -> Result<(v8::Global<v8::Context>, Shims), Failure> {
+/// `from_snapshot`: the isolate was created from the web platform's
+/// snapshot, so its context already has the platform, and only needs
+/// configuring.
+pub(super) fn new_context(
+    isolate: &mut v8::Isolate,
+    config: &VmConfig,
+    from_snapshot: bool,
+) -> Result<(v8::Global<v8::Context>, Shims), Failure> {
     v8::scope!(let scope, isolate);
     let context = v8::Context::new(scope, Default::default());
     context.set_allow_generation_from_strings(config.eval);
     let scope = &mut v8::ContextScope::new(scope, context);
     let global = context.global(scope);
     if config.web {
-        crate::web::install(scope, global, config.base_url.as_deref()).map_err(|e| fail(ErrorCode::IsolateRetired, e))?;
+        let base_url = config.base_url.as_deref();
+        let set_up = if from_snapshot {
+            crate::web::configure(scope, global, base_url)
+        } else {
+            crate::web::install(scope, global, base_url)
+        };
+        set_up.map_err(|e| fail(ErrorCode::IsolateRetired, e))?;
     }
     let wasm: &[&str] = if config.wasm { &[] } else { &["WebAssembly"] };
     for name in REMOVED_GLOBALS.iter().chain(wasm) {

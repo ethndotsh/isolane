@@ -215,9 +215,15 @@ export class WorkerProcess {
   #alive = true;
   #stderrTail = '';
 
-  constructor(workerPath: string, handlers: WorkerHandlers, strict: boolean, memoryLimitBytes?: number) {
+  /**
+   * `webSnapshot`: the worker will run web VMs, so it builds the web
+   * platform's snapshot in the background as it starts (otherwise, when
+   * the first web VM asks).
+   */
+  constructor(workerPath: string, handlers: WorkerHandlers, strict: boolean, memoryLimitBytes?: number, webSnapshot = false) {
     const args = ['--serve'];
     if (memoryLimitBytes !== undefined) args.push(`--memory-limit=${memoryLimitBytes}`);
+    if (webSnapshot) args.push('--web-snapshot=background');
     // Empty environment and no inherited fds beyond the three pipes: nothing
     // from the application process (secrets in env vars, open sockets) is
     // reachable from the worker.

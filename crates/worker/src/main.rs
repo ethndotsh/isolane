@@ -161,7 +161,7 @@ fn self_check() -> ExitCode {
     }
 }
 
-fn serve(lock_down: bool, memory_limit: Option<u64>) -> ExitCode {
+fn serve(lock_down: bool, memory_limit: Option<u64>, web_background: bool) -> ExitCode {
     // Every guest sees UTC: the host's time zone (Date#getTimezoneOffset,
     // Intl's default zone) would say where the machine is. Set while the
     // process is still single-threaded, before ICU first reads it.
@@ -180,6 +180,16 @@ fn serve(lock_down: bool, memory_limit: Option<u64>) -> ExitCode {
         }
     };
     init_v8();
+    // The web platform's snapshot is built when the first web VM wants it,
+    // or, with --web-snapshot=background (the supervisor expects web VMs),
+    // right away in the background: the worker reports ready without
+    // waiting, and a web VM that comes sooner waits for the rest. Either
+    // way it's memory operations only, the same under the lockdown below.
+    if web_background {
+        let _ = std::thread::Builder::new().name("web-snapshot".into()).spawn(|| {
+            web::snapshot();
+        });
+    }
     // The limit is for guests, on top of what V8 has already mapped writable
     // (on x64 mostly its JIT code range: ~550 MiB of address space, little
     // of it in use).
@@ -402,8 +412,11 @@ fn main() -> ExitCode {
     }
     let mut mode = None;
     let mut memory_limit = None;
+    let mut web_background = false;
     for arg in &args {
-        if let Some(n) = arg.strip_prefix("--memory-limit=") {
+        if arg == "--web-snapshot=background" {
+            web_background = true;
+        } else if let Some(n) = arg.strip_prefix("--memory-limit=") {
             match n.parse::<u64>() {
                 Ok(n) => memory_limit = Some(n),
                 Err(_) => {
@@ -419,11 +432,11 @@ fn main() -> ExitCode {
     }
     match mode {
         Some("--self-check") => self_check(),
-        None | Some("--serve") => serve(true, memory_limit),
-        Some("--no-lockdown") => serve(false, memory_limit),
+        None | Some("--serve") => serve(true, memory_limit, web_background),
+        Some("--no-lockdown") => serve(false, memory_limit, web_background),
         Some(other) => {
             eprintln!(
-                "usage: isolane-worker [--serve | --self-check | --no-lockdown] [--memory-limit=BYTES] (got {other})"
+                "usage: isolane-worker [--serve | --self-check | --no-lockdown] [--memory-limit=BYTES] [--web-snapshot=background] (got {other})"
             );
             ExitCode::from(2)
         }

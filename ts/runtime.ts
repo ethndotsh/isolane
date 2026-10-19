@@ -252,7 +252,7 @@ export class Runtime {
     const own = this.#tenantLayer(tenant);
     const resolved = resolve([this.#runtimeLayer(), this.#defaults, own, call], this.#limits, ['runtime', 'defaults', 'tenant', 'call']);
     const chain = new HookChain(resolved.hooks, this.#emitter);
-    const worker = this.#workerFor(tenant, own);
+    const worker = this.#workerFor(tenant, own, resolved.web !== false);
     const id = this.#nextIsolate++;
     const state = worker.createIsolate(id, resolved, chain);
     return new Isolate(worker, state, () => this.#nextReq++);
@@ -286,7 +286,9 @@ export class Runtime {
 
   #refill(): void {
     while (!this.#closed && this.#spares.length < this.#spareCount && this.#spareFailures < MAX_SPARE_FAILURES) {
-      const spare = new SpareWorker(this.#workerPath, this.#strict, this.#spareMemory(), (gone) => {
+      // Spares build the web snapshot up front when the defaults turn web on.
+      const web = this.#tenantLevel(undefined).web !== false;
+      const spare = new SpareWorker(this.#workerPath, this.#strict, this.#spareMemory(), web, (gone) => {
         // Died before anyone used it (it never ran guest code).
         this.#spares = this.#spares.filter((s) => s !== gone);
         this.#spareFailures++;
@@ -323,7 +325,8 @@ export class Runtime {
     lru.stop('ERR_ISOLATE_CLOSED', 'was stopped to make room for another tenant');
   }
 
-  #workerFor(tenant: string, own: IsolateConfig | undefined): TenantWorker {
+  /** `web`: the isolate the worker is started for uses the web platform. */
+  #workerFor(tenant: string, own: IsolateConfig | undefined, web: boolean): TenantWorker {
     let w = this.#workers.get(tenant);
     if (w) return w;
     const level = this.#tenantLevel(own);
@@ -338,6 +341,7 @@ export class Runtime {
       usage: this.#usageOf(tenant),
       chain,
       onGone: (gone, exit) => this.#gone(tenant, gone, exit, chain),
+      webSnapshot: web,
       spare: this.#takeSpare(memory),
     });
     this.#workers.set(tenant, w);
