@@ -5,6 +5,7 @@
 // rules in docs/api-review.md: units are suffixes, capabilities are named
 // for the guest API they enable, one word per idea.
 
+import { runInNewContext } from 'node:vm';
 import type { ConnectPolicy, FetchPolicy, FsPolicy } from './capabilities.js';
 import { invalidConfig } from './errors.js';
 import { validateHooks, type Hooks } from './hooks.js';
@@ -297,6 +298,14 @@ export interface ResolvedConfig {
   readonly shims: ResolvedShims;
 }
 
+/**
+ * ECMAScript's global names (and `console`), from a fresh Node context: a
+ * `globals` entry can't replace them. The web platform's names are checked
+ * in the isolate, as the prelude defines the globals.
+ */
+let builtins: ReadonlySet<string> | undefined;
+const builtinGlobals = () => (builtins ??= new Set(runInNewContext('Object.getOwnPropertyNames(globalThis)') as string[]));
+
 const CONFIG_KEYS = new Set(['host', 'globals', 'eval', 'wasm', 'web', 'fetch', 'connect', 'fs', 'time', 'random', 'limits', 'hooks', 'shims']);
 
 const SHIM_PHASES = ['setup', 'before', 'after'] as const;
@@ -418,6 +427,7 @@ export function validateConfig(layer: unknown, where: string, level: Level): Iso
     if (c.globals === null || typeof c.globals !== 'object' || Array.isArray(c.globals)) throw invalidConfig(at('globals'), 'must be an object');
     for (const name of Object.keys(c.globals)) {
       if (name === '__proto__' || name.startsWith('__isolane_')) throw invalidConfig(at(`globals.${name}`), 'is a reserved name');
+      if (builtinGlobals().has(name)) throw invalidConfig(at(`globals.${name}`), 'would replace a built-in global');
     }
     try {
       if (JSON.stringify(c.globals) === undefined) throw new Error();

@@ -1111,9 +1111,14 @@ export function capabilities(
       if (reserved.has(name)) throw new TypeError(`globals.${name} is taken by the ${reserved.get(name)} policy's global`);
       if (topLevel.has(name)) throw new TypeError(`globals.${name} is also a host function or namespace`);
     }
-    // JSON text inside a JS string literal: values arrive as plain data.
+    // JSON text inside a JS string literal: values arrive as plain data,
+    // each a new global (never one the platform already has).
     const json = JSON.stringify(config.globals);
-    prelude = `Object.assign(globalThis, JSON.parse(${JSON.stringify(json)}));\n` + prelude;
+    prelude =
+      `(() => { const g = JSON.parse(${JSON.stringify(json)}); for (const k of Object.keys(g)) {` +
+      ` if (Object.hasOwn(globalThis, k)) throw new TypeError('globals.' + k + ' would replace a built-in global');` +
+      ` Object.defineProperty(globalThis, k, { value: g[k], writable: true, enumerable: true, configurable: true }); } })();\n` +
+      prelude;
   }
   return {
     entries,

@@ -94,6 +94,15 @@ test('fetch and fs policies reach the guest through the worker', async () => {
 test('globals pass inputs without touching the code string', async () => {
   const input = { name: 'O\'Brien"); throw 1; //', n: 41 };
   assert.deepEqual(await pool.run('[input.name, input.n + 1]', { ...T, globals: { input } }), [input.name, 42]);
+  // They can't replace built-ins: ECMAScript's are refused up front, the
+  // web platform's when the isolate starts.
+  for (const name of ['Object', 'JSON', 'undefined', 'console', 'WebAssembly']) {
+    await assert.rejects(pool.run('1', { ...T, globals: { [name]: 1 } }), (e) => e.code === 'ERR_INVALID_CONFIG' && /would replace a built-in global/.test(e.message), name);
+  }
+  for (const name of ['TextEncoder', 'fetch', 'URL']) {
+    await assert.rejects(pool.run('1', { ...T, globals: { [name]: 1 } }), /globals\.\w+ would replace a built-in global/, name);
+  }
+  assert.equal(await pool.run('typeof TextEncoder', { ...T, web: false, globals: { TextEncoder: 'mine' } }), 'string');
 });
 
 test('tenant config layers: defaults, tenants(name), the call', async () => {

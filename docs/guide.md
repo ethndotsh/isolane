@@ -65,6 +65,11 @@ Later levels win field by field. `host` and `globals` merge by name,
 throws `ERR_INVALID_CONFIG` naming the field (`defaults.limits.timeoutMs
 must be ...`).
 
+`globals` are JSON values the guest gets as new globals; a name the guest
+already has (`Object`, `JSON`, `console`, or a web platform global like
+`URL`) is refused rather than replaced (ECMAScript's names as
+`ERR_INVALID_CONFIG`, the web platform's when the isolate starts).
+
 ## Guest capabilities
 
 By default guest code gets ECMAScript and the web platform, but no
