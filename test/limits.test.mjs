@@ -292,6 +292,9 @@ test('a huge unhandled error is cut to size, not a protocol violation', async ()
   assert.equal(thrown.code, 'ERR_GUEST_EXCEPTION');
   assert.ok(thrown.guest.message.length <= 64 * 1024 + 3);
   await assert.rejects(t.run(`'z'.repeat(80 << 20)`, { limits: { ...limits, resultBytes: 1 << 30 } }), limit('resultBytes'));
+  const unserializable = await t.run(`({ toJSON() { throw new Error('w'.repeat(80 << 20)); } })`, { limits }).catch((e) => e);
+  assert.equal(unserializable.code, 'ERR_NOT_SERIALIZABLE');
+  assert.ok(unserializable.message.length <= 64 * 1024 + 3);
   assert.equal(await t.run('1'), 1);
   assert.deepEqual(security, []);
   rt.close();
@@ -331,4 +334,22 @@ test('limits.pendingHostCalls and limits.hostCalls bound host-call floods', asyn
   assert.equal(ran, 9);
   // The defaults allow ordinary use.
   assert.equal(await pool.run('Promise.all(Array.from({ length: 900 }, () => one())).then((r) => r.length)', { ...T, host }), 900);
+});
+
+test('an eval waiting behind its isolate\'s background work is not mistaken for an unresponsive worker', async () => {
+  const rt = new Runtime({ strict });
+  const security = [];
+  rt.on('securityEvent', (e) => security.push(e.detail));
+  const vm = isolateOf(rt, {
+    tenant: 'behind',
+    limits: { timeoutMs: 400, backgroundMs: null },
+    host: { soon: () => new Promise((r) => setTimeout(r, 20)) },
+  });
+  // Five continuations, each spinning until its 400 ms budget, run ahead
+  // of the next eval: 2.4 s in all, past its first deadline (1.4 s).
+  await vm.eval('for (let i = 0; i < 5; i++) soon().then(() => { for (;;) {} }); 1');
+  await new Promise((r) => setTimeout(r, 40));
+  await assert.rejects(vm.eval('for (;;) {}'), limit('timeoutMs'));
+  assert.deepEqual(security, []);
+  rt.close();
 });

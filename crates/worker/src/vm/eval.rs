@@ -106,7 +106,7 @@ fn to_json(scope: &mut v8::PinScope, value: v8::Local<v8::Value>) -> Result<Stri
             Ok(if s == "undefined" { "null".into() } else { s })
         }
         None => {
-            let msg = tc.exception().map(|e| e.to_rust_string_lossy(tc)).unwrap_or_default();
+            let msg = tc.exception().map(|e| bounded_string(tc, e, ERROR_TEXT_MAX)).unwrap_or_default();
             Err(fail(ErrorCode::NotSerializable, msg))
         }
     }

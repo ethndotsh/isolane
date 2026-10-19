@@ -10,6 +10,7 @@ import { IsolaneError, invalidConfig, isIsolaneErrorCode, limitError, type Isola
 import type { HookChain } from './hooks.js';
 import type { HostContext, HostEntry } from './host.js';
 import {
+  MAX_FRAME,
   OOM_EXIT_CODE,
   WorkerProcess,
   type LogLevel,
@@ -106,7 +107,14 @@ interface Pending {
   resolve(value: unknown): void;
   reject(err: IsolaneError): void;
   timer?: NodeJS.Timeout;
+  /** Re-arms `timer` from now: the worker showed it's working. */
+  rearm?: () => void;
 }
+
+/** How much longer than its first deadline an eval may be kept waiting
+ * by the isolate's own work ahead of it (timers, continuations), as long
+ * as the worker keeps reporting it. */
+const MAX_DEADLINE_EXTENSION = 10;
 
 /** A host call in flight: its abort signal, made only if the function asks for it. */
 /** One host call in flight, and its handler's context: `signal` is made on first use (most functions never ask). */
@@ -180,6 +188,10 @@ export interface TenantWorkerOptions {
   prepareWeb: boolean;
   spare?: SpareWorker;
 }
+
+/** Longest host-function error message sent to the guest. */
+const ERROR_TEXT_MAX = 64 * 1024;
+const clip = (s: string) => (s.length > ERROR_TEXT_MAX ? `${s.slice(0, ERROR_TEXT_MAX)}…` : s);
 
 const formatArgs = (args: unknown[]) =>
   args
@@ -308,8 +320,11 @@ export class TenantWorker {
         reject(new IsolaneError('ERR_WORKER_CRASHED', `worker for tenant ${this.tenant} is gone`, { tenant: this.tenant }));
         return;
       }
-      if (Buffer.byteLength(code, 'utf8') > state.codeBytes) {
-        reject(this.#limit('codeBytes', `the code is larger than ${state.codeBytes} bytes`, state.id));
+      // A frame carries at most 64 MiB: a frame the worker can't take
+      // would end it as if it had crashed.
+      const codeBytes = Math.min(state.codeBytes, MAX_FRAME - 64 * 1024);
+      if (Buffer.byteLength(code, 'utf8') > codeBytes) {
+        reject(this.#limit('codeBytes', `the code is larger than ${codeBytes} bytes`, state.id));
         return;
       }
       if (this.#requests.size >= this.limits.concurrentEvals) {
@@ -325,10 +340,22 @@ export class TenantWorker {
         // setTimeout takes at most 2^31 - 1 ms (a longer one fires at once);
         // a deadline past that (over 24 days) is no deadline.
         if (limit <= 2 ** 31 - 1) {
-          pending.timer = setTimeout(
-            () => this.#proc.kill('unresponsive', `no reply to an eval ${limit}ms after it was sent (limits.timeoutMs ${timeoutMs})`),
-            limit,
-          );
+          const sent = Date.now();
+          const arm = (ms: number) =>
+            setTimeout(
+              () => this.#proc.kill('unresponsive', `no reply to an eval ${Date.now() - sent}ms after it was sent (limits.timeoutMs ${timeoutMs})`),
+              ms,
+            );
+          pending.timer = arm(limit);
+          // The isolate's background work (a timer batch, a host call's
+          // continuation: each budgeted like an eval) can run ahead of the
+          // eval. The worker reports each as it finishes; that's progress, so
+          // the deadline moves, up to a bound a worker can't stretch further.
+          const latest = sent + limit * MAX_DEADLINE_EXTENSION;
+          pending.rearm = () => {
+            clearTimeout(pending.timer);
+            pending.timer = arm(Math.max(0, Math.min(limit, latest - Date.now())));
+          };
         }
       }
       this.#requests.set(req, pending);
@@ -389,6 +416,7 @@ export class TenantWorker {
   #onMessage(msg: Exclude<WorkerMessage, { t: 'ready' }>): void {
     if (msg.t === 'usage') {
       this.#count(msg);
+      for (const p of this.#requests.values()) if (p.isolate.id === msg.vm) p.rearm?.();
       if (msg.limit !== undefined) {
         const state = this.#isolates.get(msg.vm);
         const message = msg.message ?? '';
@@ -464,11 +492,12 @@ export class TenantWorker {
       if (value !== undefined) frame.value = value; // JSON text; absent = undefined
       if (parts.length) frame.bin = parts.map((p) => [p.path, p.bytes.length]);
       if (!ok) {
-        frame.error = err instanceof Error ? err.message : String(err);
+        // Error messages can echo guest input; keep them to a size a frame takes.
+        frame.error = clip(err instanceof Error ? err.message : String(err));
         // The guest sees the same class (TypeError, ...) and Node-style code.
-        if (err instanceof Error && typeof err.name === 'string') frame.errorName = err.name;
+        if (err instanceof Error && typeof err.name === 'string') frame.errorName = clip(err.name);
         const code = (err as { code?: unknown } | null)?.code;
-        if (typeof code === 'string') frame.errorCode = code;
+        if (typeof code === 'string') frame.errorCode = clip(code);
       }
       this.#proc.send(
         frame,

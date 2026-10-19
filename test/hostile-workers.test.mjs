@@ -137,3 +137,19 @@ test('a worker that stops reading its input is killed, not buffered for without 
   assert.match(events[0]?.detail, /stopped reading its input/);
   stuck.close();
 });
+
+test('guest-sized data never makes a frame the worker refuses', async () => {
+  const rt = new Runtime({ strict: process.env.ISOLANE_STRICT === '1' });
+  const security = [];
+  rt.on('securityEvent', (e) => security.push(e.detail));
+  const t = rt.tenant('frames');
+  // A host function that echoes guest input in its error.
+  const host = { echo: (s) => Promise.reject(new Error(`not found: ${s}, nor ${s}`)) };
+  const out = await t.run(`echo('k'.repeat(60 << 20)).catch((e) => e.message.length)`, { host, limits: { heapBytes: 1 << 30 } });
+  assert.ok(out <= 64 * 1024 + 1, `${out}`);
+  // codeBytes set past what a frame carries.
+  await assert.rejects(t.run(`/*${'c'.repeat(70 << 20)}*/ 1`, { limits: { codeBytes: 1 << 30 } }), (e) => e.code === 'ERR_LIMIT' && e.limit === 'codeBytes');
+  assert.equal(await t.run('1'), 1);
+  assert.deepEqual(security, []);
+  rt.close();
+});
