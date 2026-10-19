@@ -38,7 +38,8 @@ globalThis.assertThrows = (f) => { try { typeof f === 'function' && f(); } catch
 globalThis.__natives = new Proxy({}, { get: () => () => undefined });
 `;
 
-const pool = new Runtime({ strict: process.env.ISOLANE_STRICT === '1', onSecurityEvent: (e) => events.push(e) });
+// No quarantine: one bad file must not stop the rest from running.
+const pool = new Runtime({ strict: process.env.ISOLANE_STRICT === '1', quarantineMs: null, onSecurityEvent: (e) => events.push(e) });
 const events = [];
 const outcomes = {};
 const crashes = [];
@@ -59,9 +60,9 @@ async function runFile(path, tenant) {
   } catch (e) {
     const c = e?.code ?? 'non-IsolaneError';
     outcomes[c] = (outcomes[c] ?? 0) + 1;
-    if (c === 'ERR_WORKER_CRASHED') {
+    if (c === 'ERR_WORKER_CRASHED' || c === 'ERR_WORKER_UNRESPONSIVE') {
       const ev = events.slice(before).find((x) => x.tenant === tenant);
-      crashes.push({ file: relative(root, path), signal: ev?.signal ?? null, exitCode: ev?.exitCode ?? null, kind: ev?.kind, detail: (ev?.detail ?? e.message).slice(-300) });
+      crashes.push({ file: relative(root, path), code: c, signal: ev?.signal ?? null, exitCode: ev?.exitCode ?? null, kind: ev?.kind, detail: (ev?.detail ?? e.message).slice(-300) });
     }
   }
 }
@@ -80,7 +81,8 @@ await Promise.all(
 pool.close();
 
 const bySignal = {};
-for (const c of crashes) bySignal[c.signal ?? `exit ${c.exitCode}`] = (bySignal[c.signal ?? `exit ${c.exitCode}`] ?? 0) + 1;
+const label = (c) => (c.code === 'ERR_WORKER_UNRESPONSIVE' ? 'unresponsive' : (c.signal ?? `exit ${c.exitCode}`));
+for (const c of crashes) bySignal[label(c)] = (bySignal[label(c)] ?? 0) + 1;
 const report = { files: mine.length, skipped, seconds: (Date.now() - started) / 1000, outcomes, crashesBySignal: bySignal, crashes };
 console.log(JSON.stringify(report, null, 2));
 // SIGSYS is an allowlist gap and fails the run; other crashes are reported.
