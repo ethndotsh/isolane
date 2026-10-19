@@ -28,6 +28,7 @@ Agreed October 2026:
 1. **Web conformance pass** (done but for the ada decision): close the WPT gaps, using Deno wherever it is ahead.
 2. **The rest of the web platform**:
    - `crypto.subtle`;
+   - `connect()` as the Sockets API (Cloudflare's, also a WinterTC draft): a `Socket` with `readable`/`writable` streams, `opened`/`closed`, `startTls()`, and `secureTransport: 'off' | 'on' | 'starttls'`. Today it's `{ read, write, close }` with no STARTTLS. Goal: postgres.js's `cf` build talks to Postgres from a guest. That also needs `crypto.subtle` for SCRAM-SHA-256, plus, until ES modules land, a bundle that aliases `cloudflare:sockets`, `node:events` and `node:buffer`. Add a Postgres end-to-end test in CI;
    - the web snapshot built into the binary and a pool of pre-created web isolates, so `web` can default to on;
    - fair CPU accounting for timers;
    - test262;
