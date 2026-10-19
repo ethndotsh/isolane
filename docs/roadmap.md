@@ -25,7 +25,7 @@ safety posture, installable with `npm install`:
 
 Agreed October 2026:
 
-1. **Web conformance pass** (in progress): close the WPT gaps, using Deno wherever it is ahead.
+1. **Web conformance pass** (done but for the ada decision): close the WPT gaps, using Deno wherever it is ahead.
 2. **The rest of the web platform**:
    - `crypto.subtle`;
    - the web snapshot built into the binary and a pool of pre-created web isolates, so `web` can default to on;
@@ -295,9 +295,11 @@ in `patches/deno-*.patch`, applied by `scripts/vendor-deno.sh`.
 | `vm.call(name, ...args)` for stateful isolates (call an exported/global function with schema-checked args) | idea |
 | **Deployments with user-defined entrypoints** (Workers-style, customizable): `tenant.deploy(code, { entrypoints: ['fetch', 'scheduled', 'onMessage', ...] })` evaluates the module once (its "cold start": top-level code, user-defined init), then `deployment.invoke(name, ...args)` calls an exported handler in a warm isolate. Host-defined handler names and argument shapes (`fetch(request, env, ctx)` is just one preset); warm-isolate pool per deployment with `minWarm`/`maxIsolates`/`idleMs`; `isolation: 'per-invoke' \| 'reuse'` (reuse keeps module state between invocations, like Workers); cold-start hooks (`onColdStart`); V8 code cache per deployment so re-creating an isolate skips parsing | planned |
 
-### Web conformance pass (in progress, before new features)
+### Web conformance pass (done, except the URL parser decision)
 
 Decided (October 2026): close the known WPT gaps before expanding features, using Deno wherever it has the better implementation. First compare against Deno's own WPT expectations, then: `data:` URLs via the `data-url` crate; Deno's MessageChannel (and structuredClone transfer); Deno's compression semantics; newer Deno fixes or our own for the vendored-code edge cases (structured clone, body, Request attributes, streams, events, SRI); evaluate `ada-url` for URL parsing; stream request bodies through the broker; confirm the encoding edge case is upstream.
+
+Result: see "After the Deno-gaps pass" under the WPT gate below (99.0% of applicable subtests; bugs 177 → 125, 112 of them the URL parser, where adopting ada is a decision to make).
 
 ### Errors and stack traces
 
