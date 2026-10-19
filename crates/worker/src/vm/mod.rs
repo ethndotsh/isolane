@@ -7,6 +7,8 @@
 //! - `eval`: running guest code and sending results
 //! - `host_call`: host functions and their replies
 //! - `console`: guest console output
+//! - `errors`: guest errors described, host-call attribution, and errors
+//!   nothing handled
 //! - `mailbox`: messages held while a sync host call waits
 //! - `watchdog`: wall-clock and CPU budgets
 //! - `background`: the budget for work between evals
@@ -14,6 +16,7 @@
 mod background;
 mod console;
 mod context;
+mod errors;
 mod eval;
 mod host_call;
 mod mailbox;
@@ -31,6 +34,7 @@ use std::sync::Arc;
 use crate::frame::Writer;
 use crate::proto::{fail, limit, ErrorCode, Failure, Usage};
 pub use console::guest_log;
+pub use errors::{report as report_guest_error, RejectionReporter};
 use context::{allow_wasm, deny_wasm, new_context, Shims};
 use background::Background;
 use eval::{eval, refuse_all, run_idle_timers, send_result, usage, EvalEnd};
@@ -124,7 +128,7 @@ pub fn out_of_time() -> bool {
 pub enum VmMsg {
     /// `last`: the VM is disposed right after (a one-shot run), so timers
     /// left pending never run.
-    Eval { req: u64, code: String, last: bool },
+    Eval { req: u64, code: String, filename: Option<String>, last: bool },
     HostReply { call: u64, reply: Reply },
     Dispose,
 }
@@ -247,6 +251,7 @@ fn vm_main(id: u64, config: VmConfig, rx: Receiver<VmMsg>, out: Output, stopper:
     isolate.set_microtasks_policy(v8::MicrotasksPolicy::Explicit);
     isolate.set_allow_wasm_code_generation_callback(if config.wasm { allow_wasm } else { deny_wasm });
     isolate.set_oom_error_handler(out_of_memory);
+    errors::install(&mut isolate);
 
     let cpu_clock = CpuClock::current();
     let handle = isolate.thread_safe_handle();
@@ -281,6 +286,7 @@ fn vm_main(id: u64, config: VmConfig, rx: Receiver<VmMsg>, out: Output, stopper:
         // The supervisor names its brokers __isolane_* and refuses those
         // names for the embedder's functions.
         internal: config.functions.iter().map(|f| f.path.first().is_some_and(|n| n.starts_with("__isolane_"))).collect(),
+        names: config.functions.iter().map(|f| f.path.join(".")).collect(),
     });
     isolate.set_slot(bridge.clone());
     // Set once the VM can't safely run again (it hit its heap limit, or its
@@ -362,7 +368,7 @@ fn vm_main(id: u64, config: VmConfig, rx: Receiver<VmMsg>, out: Output, stopper:
         };
         match msg {
             VmMsg::Dispose => break,
-            VmMsg::Eval { req, code, last } => {
+            VmMsg::Eval { req, code, filename, last } => {
                 // Usage from before this eval goes out first.
                 background.report(&out, id, true, None);
                 if let Some(cause) = background_hit.take() {
@@ -380,7 +386,7 @@ fn vm_main(id: u64, config: VmConfig, rx: Receiver<VmMsg>, out: Output, stopper:
                 bridge.in_eval.set(true);
                 bridge.host_calls.set(0);
                 bridge.limit_hit.replace(None);
-                let end = eval(&mut isolate, &context, &shims, &code, &bridge.mailbox, deadline);
+                let end = eval(&mut isolate, &context, &shims, &code, filename.as_deref(), &bridge.mailbox, deadline);
                 pump_tasks(&isolate);
                 bridge.in_eval.set(false);
                 bridge.deadline.set(None);
@@ -435,6 +441,7 @@ fn vm_main(id: u64, config: VmConfig, rx: Receiver<VmMsg>, out: Output, stopper:
                     while pump_tasks(scope) {
                         scope.perform_microtask_checkpoint();
                     }
+                    errors::report_rejections(scope);
                 }
                 bridge.deadline.set(None);
                 let fired = watchdog.disarm() != Fired::No || bridge.timed_out.take();

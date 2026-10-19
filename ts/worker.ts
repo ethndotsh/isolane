@@ -7,10 +7,10 @@ import { spawn, type ChildProcessByStdio } from 'node:child_process';
 import type { Readable, Writable } from 'node:stream';
 
 import type { PathSegment } from './binary.js';
-import type { GuestErrorInfo } from './errors.js';
+import { parseGuestError, type GuestErrorInfo } from './errors.js';
 
 /** The protocol version this library speaks; a worker reporting another is refused. */
-export const PROTOCOL_VERSION = 2;
+export const PROTOCOL_VERSION = 3;
 
 /** Largest frame accepted from a worker (matches the worker's own cap). */
 export const MAX_FRAME = 64 << 20;
@@ -54,7 +54,8 @@ export type WorkerMessage =
   | ({ t: 'result'; req: number; ok: false; code: string; message: string; guest?: GuestErrorInfo; limit?: string; shim?: { phase: 'setup' | 'before' | 'after'; index: number } } & WorkerUsage)
   | ({ t: 'usage'; vm: number; limit?: string; message?: string } & WorkerUsage)
   | { t: 'hostCall'; vm: number; call: number; fn: number; args: unknown[]; /** The frame's body length. */ size: number }
-  | { t: 'log'; vm: number; level: LogLevel; message: string };
+  | { t: 'log'; vm: number; level: LogLevel; message: string }
+  | { t: 'guestError'; vm: number; kind: 'exception' | 'rejection'; guest: GuestErrorInfo };
 
 /** What an eval or continuation cost, as the worker reports it. */
 export interface WorkerUsage {
@@ -79,8 +80,6 @@ export const OOM_EXIT_CODE = 6;
 
 const isUint = (v: unknown): v is number => typeof v === 'number' && Number.isSafeInteger(v) && v >= 0;
 
-const optString = (v: unknown) => (typeof v === 'string' ? v : undefined);
-
 const SHIM_PHASES = new Set(['setup', 'before', 'after']);
 
 function parseShimRef(raw: unknown): { phase: 'setup' | 'before' | 'after'; index: number } | undefined {
@@ -89,18 +88,6 @@ function parseShimRef(raw: unknown): { phase: 'setup' | 'before' | 'after'; inde
   return typeof r.phase === 'string' && SHIM_PHASES.has(r.phase) && isUint(r.index)
     ? { phase: r.phase as 'setup' | 'before' | 'after', index: r.index }
     : undefined;
-}
-
-function parseGuestError(raw: unknown): GuestErrorInfo | undefined {
-  if (raw === null || typeof raw !== 'object') return undefined;
-  const g = raw as Record<string, unknown>;
-  if (typeof g.message !== 'string') return undefined;
-  const info: GuestErrorInfo = { message: g.message };
-  const name = optString(g.name);
-  const stack = optString(g.stack);
-  if (name !== undefined) info.name = name;
-  if (stack !== undefined) info.stack = stack;
-  return info;
 }
 
 /**
@@ -183,6 +170,10 @@ export function parseWorkerMessage(raw: unknown, bytes?: Buffer): WorkerMessage 
       if (!(isUint(m.vm) && isUint(m.call) && isUint(m.fn) && Array.isArray(m.args))) return null;
       const args = bytes === undefined ? m.args : attachArgs(m.args, m.bin, bytes);
       return args ? { t: 'hostCall', vm: m.vm, call: m.call, fn: m.fn, args, size: 0 } : null;
+    }
+    case 'guestError': {
+      const guest = parseGuestError(m.guest);
+      return isUint(m.vm) && (m.kind === 'exception' || m.kind === 'rejection') && guest ? { t: 'guestError', vm: m.vm, kind: m.kind, guest } : null;
     }
     case 'log':
       return isUint(m.vm) && typeof m.level === 'string' && LOG_LEVELS.has(m.level) && typeof m.message === 'string'

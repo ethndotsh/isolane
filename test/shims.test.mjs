@@ -104,7 +104,7 @@ test('guest line numbers are unaffected by shims', async () => {
   const stackOf = (config) => pool.run(guest, { ...T, ...config }).catch((e) => e.guest.stack);
   const plain = await stackOf({});
   const shimmed = await stackOf({ shims: { setup: 'a = 1;\nb = 2', before: 'c = 1;\nd = 2;\ne = 3', after: 'return result' } });
-  assert.match(plain, /<anonymous>:3:7/);
+  assert.match(plain, /acme\/eval-1\.js:3:7/);
   assert.equal(shimmed, plain);
 });
 

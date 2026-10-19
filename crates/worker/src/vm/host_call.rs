@@ -9,6 +9,7 @@ use std::time::{Duration, Instant};
 
 use serde_json::value::RawValue;
 
+use super::errors;
 use super::mailbox::Mailbox;
 use super::{Output, Reply, VmMsg};
 use crate::proto::{limit, Failure, Out, PathSegment};
@@ -21,8 +22,9 @@ pub(super) struct Bridge {
     pub(super) next_call: Cell<u64>,
     /// Console bytes left this eval.
     pub(super) log_budget: Cell<usize>,
-    /// Async host calls waiting for replies, with each one's frame size.
-    pub(super) pending: RefCell<HashMap<u64, (v8::Global<v8::PromiseResolver>, usize)>>,
+    /// Async host calls waiting for replies, with each one's frame size,
+    /// function, and (for the embedder's functions) the call site's Error.
+    pub(super) pending: RefCell<HashMap<u64, Pending>>,
     /// The frame bytes of host calls waiting for replies (`limits.hostCallBytes`).
     pub(super) pending_bytes: Cell<usize>,
     /// When the running eval or continuation must stop (a sync host call
@@ -42,6 +44,19 @@ pub(super) struct Bridge {
     /// By function index: isolane's own brokers (fetch, connect, fs), which
     /// `limits.hostCalls` doesn't count (their own limits bound them).
     pub(super) internal: Vec<bool>,
+    /// By function index: its dotted name (`db.getUser`), for the frame a
+    /// failed call's error gets.
+    pub(super) names: Vec<String>,
+}
+
+/// An async host call waiting for its reply.
+pub(super) struct Pending {
+    pub(super) resolver: v8::Global<v8::PromiseResolver>,
+    pub(super) size: usize,
+    pub(super) function: u32,
+    /// Made when the call was: its stack is where the guest called (see
+    /// `errors::attribute`). Not kept for isolane's own brokers.
+    pub(super) site: Option<v8::Global<v8::Value>>,
 }
 
 /// Serialize a host call's arguments and send it; returns the call id and
@@ -206,7 +221,14 @@ pub(super) fn host_function(scope: &mut v8::PinScope, args: v8::FunctionCallback
     let bridge = scope.get_slot::<Rc<Bridge>>().expect("bridge slot").clone();
     let Some(resolver) = v8::PromiseResolver::new(scope) else { return };
     let Some((call, size)) = send_host_call(scope, &args, &bridge) else { return };
-    bridge.pending.borrow_mut().insert(call, (v8::Global::new(scope, resolver), size));
+    let function = args.data().uint32_value(scope).unwrap_or(u32::MAX);
+    let internal = bridge.internal.get(function as usize).copied().unwrap_or(true);
+    let site = (!internal).then(|| {
+        let site = errors::call_site(scope);
+        v8::Global::new(scope, site)
+    });
+    let pending = Pending { resolver: v8::Global::new(scope, resolver), size, function, site };
+    bridge.pending.borrow_mut().insert(call, pending);
     bridge.pending_bytes.set(bridge.pending_bytes.get() + size);
     rv.set(resolver.get_promise(scope).into());
 }
@@ -225,6 +247,7 @@ impl Drop for Uncount<'_> {
 /// directly. Everything else that arrives meanwhile waits in the mailbox.
 pub(super) fn sync_host_function(scope: &mut v8::PinScope, args: v8::FunctionCallbackArguments, mut rv: v8::ReturnValue<v8::Value>) {
     let bridge = scope.get_slot::<Rc<Bridge>>().expect("bridge slot").clone();
+    let function = args.data().uint32_value(scope).unwrap_or(u32::MAX);
     let Some((call, size)) = send_host_call(scope, &args, &bridge) else { return };
     // Counted while it waits, like an async call (the supervisor holds it).
     bridge.pending_bytes.set(bridge.pending_bytes.get() + size);
@@ -246,6 +269,9 @@ pub(super) fn sync_host_function(scope: &mut v8::PinScope, args: v8::FunctionCal
                 match settle(scope, reply) {
                     Ok(v) => rv.set(v),
                     Err(e) => {
+                        if let Some(name) = attributed(&bridge, function) {
+                            errors::attribute(scope, e, name, None);
+                        }
                         scope.throw_exception(e);
                     }
                 }
@@ -295,15 +321,31 @@ fn settle<'s>(scope: &mut v8::PinScope<'s, '_>, reply: Reply) -> Result<v8::Loca
     Err(e)
 }
 
+/// The embedder's function `function`'s name, for attributing its errors
+/// (not isolane's own brokers: their errors are the web platform's).
+fn attributed(bridge: &Bridge, function: u32) -> Option<&str> {
+    let i = function as usize;
+    match bridge.internal.get(i) {
+        Some(false) => bridge.names.get(i).map(String::as_str),
+        _ => None,
+    }
+}
+
 pub(super) fn apply_host_reply(scope: &mut v8::PinScope, call: u64, reply: Reply) {
     let bridge = scope.get_slot::<Rc<Bridge>>().expect("bridge slot").clone();
-    let Some((resolver, size)) = bridge.pending.borrow_mut().remove(&call) else { return };
-    bridge.pending_bytes.set(bridge.pending_bytes.get() - size);
+    let Some(pending) = bridge.pending.borrow_mut().remove(&call) else { return };
+    bridge.pending_bytes.set(bridge.pending_bytes.get() - pending.size);
     // I/O completed: the guest's clock moves forward.
     crate::clock::advance();
-    let resolver = v8::Local::new(scope, resolver);
+    let resolver = v8::Local::new(scope, pending.resolver);
     match settle(scope, reply) {
         Ok(v) => resolver.resolve(scope, v),
-        Err(e) => resolver.reject(scope, e),
+        Err(e) => {
+            if let Some(name) = attributed(&bridge, pending.function) {
+                let site = pending.site.map(|s| v8::Local::new(scope, s));
+                errors::attribute(scope, e, name, site);
+            }
+            resolver.reject(scope, e)
+        }
     };
 }

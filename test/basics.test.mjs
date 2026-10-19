@@ -118,7 +118,7 @@ test('errors carry kind, retryability, tenant, and what the guest threw', async 
   assert.equal(err.guest.message, 'bad thing');
   assert.match(err.guest.stack, /MyError: bad thing/);
   const thrown = await pool.run('throw 42', T).catch((e) => e);
-  assert.deepEqual(thrown.guest, { message: '42' });
+  assert.deepEqual(thrown.guest, { message: '42', frames: [] });
   const timeout = await pool.run('for (;;) {}', { ...T, limits: { timeoutMs: 50 } }).catch((e) => e);
   assert.deepEqual([timeout.code, timeout.kind], ['ERR_LIMIT', 'limit']);
   const usage = (() => {

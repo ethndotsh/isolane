@@ -90,13 +90,54 @@ export function isIsolaneErrorCode(code: unknown): code is IsolaneErrorCode {
   return typeof code === 'string' && Object.hasOwn(KINDS, code);
 }
 
-/** What the guest threw, for `ERR_GUEST_EXCEPTION`. */
+/**
+ * What the guest threw, for `ERR_GUEST_EXCEPTION` (and `onGuestError`).
+ * Every part is bounded: long text is cut (with `…`), and causes and an
+ * AggregateError's errors only go so deep.
+ */
 export interface GuestErrorInfo {
   /** `error.name`, when the guest threw an object that has one. */
   name?: string;
   /** `error.message`, or the thrown value as a string. */
   message: string;
+  /**
+   * `error.stack`, without isolane's own frames (its built-in scripts,
+   * `ext:` and `isolane:`). For code that didn't compile: where, the
+   * source line, and a caret, then the error.
+   */
   stack?: string;
+  /** The stack's frames, innermost first (empty when there are none). */
+  frames: GuestStackFrame[];
+  /** Where code failed to compile (a SyntaxError in the code itself). */
+  location?: GuestErrorLocation;
+  /** `error.cause`, described the same way. */
+  cause?: GuestErrorInfo;
+  /** An AggregateError's `errors`. */
+  errors?: GuestErrorInfo[];
+  /** The error's own enumerable properties whose values are JSON (`code`, ...). */
+  properties?: Record<string, unknown>;
+}
+
+/** One stack frame: `at handler (src/index.js:12:5)`. */
+export interface GuestStackFrame {
+  /** The function (`handler`, `Foo.bar`, `new Foo`), or null at the top level. */
+  function: string | null;
+  /** The script's name (`src/index.js`, `acme/eval-1.js`), `<host>` for a host function, `<anonymous>`, or `native`. */
+  file: string | null;
+  /** 1-based; null when the frame has no position (a host function). */
+  line: number | null;
+  column: number | null;
+  /** An `await` resumed it (`at async handler (...)`). */
+  async?: true;
+}
+
+/** A place in guest code (1-based). */
+export interface GuestErrorLocation {
+  file: string;
+  line: number;
+  column: number;
+  /** The line (a window around the column, for long lines) and a caret under it. */
+  sourceLine?: string;
 }
 
 /** Which shim failed, for `ERR_SHIM`. */
@@ -168,3 +209,97 @@ export const invalidConfig = (path: string, problem: string) =>
 /** `ERR_LIMIT` for the named limit. */
 export const limitError = (limit: string, message: string, tenant?: string) =>
   new IsolaneError('ERR_LIMIT', `isolane: ${message} (limits.${limit})`, { tenant, limit });
+
+// ---- guest errors from the worker ----
+
+/** Frames from isolane's own scripts: the web platform (`ext:`), and the
+ * runtime and prelude (`isolane:`). Not the guest's to act on. */
+const isInternalFile = (file: string | null) => file !== null && (file.startsWith('ext:') || file.startsWith('isolane:'));
+
+const MAX_FRAMES = 64;
+
+/**
+ * One V8 stack line (`    at fn (file:1:2)`, `    at file:1:2`,
+ * `    at async fn (file:1:2)`, `    at eval (eval at f (file:1:2), <anonymous>:1:1)`).
+ */
+export function parseFrame(line: string): GuestStackFrame | null {
+  const m = /^\s*at (.*)$/.exec(line);
+  if (!m) return null;
+  let rest = m[1];
+  let async = false;
+  if (rest.startsWith('async ')) {
+    async = true;
+    rest = rest.slice(6);
+  }
+  let fn: string | null = null;
+  let loc = rest;
+  if (rest.endsWith(')')) {
+    // The location is the last parenthesized group (eval origins nest).
+    let depth = 0;
+    for (let i = rest.length - 1; i >= 0; i--) {
+      if (rest[i] === ')') depth++;
+      else if (rest[i] === '(' && --depth === 0) {
+        if (i > 0) {
+          fn = rest.slice(0, i).trimEnd() || null;
+          loc = rest.slice(i + 1, -1);
+        }
+        break;
+      }
+    }
+  }
+  const pos = /^(.*):(\d+):(\d+)$/.exec(loc);
+  const frame: GuestStackFrame = pos
+    ? { function: fn, file: pos[1], line: Number(pos[2]), column: Number(pos[3]) }
+    : { function: fn, file: loc || null, line: null, column: null };
+  if (async) frame.async = true;
+  return frame;
+}
+
+/** A stack without isolane's own frames, and its frames parsed. */
+function stackFrames(stack: string | undefined): { stack: string | undefined; frames: GuestStackFrame[] } {
+  if (stack === undefined) return { stack, frames: [] };
+  const frames: GuestStackFrame[] = [];
+  const kept: string[] = [];
+  for (const line of stack.split('\n')) {
+    const frame = parseFrame(line);
+    if (frame && isInternalFile(frame.file)) continue;
+    if (frame && frames.length < MAX_FRAMES) frames.push(frame);
+    kept.push(line);
+  }
+  return { stack: kept.join('\n'), frames };
+}
+
+const MAX_DEPTH = 8;
+const MAX_ERRORS = 16;
+
+/** A worker's description of a guest error, shape-checked (the worker may be compromised). */
+export function parseGuestError(raw: unknown, depth = 0): GuestErrorInfo | undefined {
+  if (raw === null || typeof raw !== 'object' || depth >= MAX_DEPTH) return undefined;
+  const g = raw as Record<string, unknown>;
+  if (typeof g.message !== 'string') return undefined;
+  const { stack, frames } = stackFrames(typeof g.stack === 'string' ? g.stack : undefined);
+  const info: GuestErrorInfo = { message: g.message, frames };
+  if (typeof g.name === 'string') info.name = g.name;
+  if (stack !== undefined) info.stack = stack;
+  const l = g.location as Record<string, unknown> | null | undefined;
+  if (l && typeof l === 'object' && typeof l.file === 'string' && isPosInt(l.line) && isPosInt(l.column)) {
+    info.location = { file: l.file, line: l.line, column: l.column };
+    if (typeof l.sourceLine === 'string') info.location.sourceLine = l.sourceLine;
+  }
+  const cause = parseGuestError(g.cause, depth + 1);
+  if (cause) info.cause = cause;
+  if (Array.isArray(g.errors)) {
+    info.errors = g.errors
+      .slice(0, MAX_ERRORS)
+      .map((e) => parseGuestError(e, depth + 1))
+      .filter((e): e is GuestErrorInfo => e !== undefined);
+  }
+  if (g.properties !== null && typeof g.properties === 'object' && !Array.isArray(g.properties)) {
+    const props: Record<string, unknown> = {};
+    for (const [k, v] of Object.entries(g.properties)) if (k !== '__proto__') props[k] = v;
+    if (Object.keys(props).length) info.properties = props;
+  }
+  return info;
+}
+
+const isPosInt = (v: unknown): v is number => typeof v === 'number' && Number.isSafeInteger(v) && v > 0;

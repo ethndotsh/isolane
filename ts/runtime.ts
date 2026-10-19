@@ -23,6 +23,33 @@ export interface RunConfig extends IsolateConfig {
   tenant: string;
 }
 
+/** Options for one eval (or run). */
+export interface EvalOptions<S extends AnySchema | undefined = undefined> {
+  /** A Standard Schema the completion value must match (`ERR_INVALID_RETURN` if not); the result is typed by it. */
+  returns?: S;
+  /**
+   * The code's name in stack traces and compile errors: `src/handler.js`
+   * reads `at handle (src/handler.js:12:5)`. Defaults to
+   * `<tenant>/eval-<n>.js` (n counts the isolate's evals from 1).
+   */
+  filename?: string;
+}
+
+/** A filename for stack traces: printable, and not one of isolane's own (`ext:`, `isolane:`). */
+function checkFilename(filename: unknown): string | undefined {
+  if (filename === undefined) return undefined;
+  if (typeof filename !== 'string' || filename === '' || filename.length > 1024) {
+    throw invalidConfig('filename', 'must be a non-empty string of at most 1024 characters');
+  }
+  // eslint-disable-next-line no-control-regex
+  if (/[\u0000-\u001f\u007f]/.test(filename)) throw invalidConfig('filename', 'must not contain control characters');
+  if (/^(ext|isolane):/.test(filename)) throw invalidConfig('filename', "must not start with ext: or isolane: (isolane's own scripts)");
+  return filename;
+}
+
+/** The tenant's name as a path segment for default filenames. */
+const filenameSafe = (tenant: string) => tenant.replace(/[^\w.@-]/g, '_').slice(0, 128);
+
 export interface RuntimeOptions {
   /**
    * Path to the isolane-worker binary. Defaults to `$ISOLANE_WORKER`, then
@@ -169,12 +196,13 @@ export class Runtime {
    * `returns` (a Standard Schema), the completion value is validated and
    * typed: `ERR_INVALID_RETURN` if it doesn't match.
    */
-  async run<S extends AnySchema | undefined = undefined>(code: string, config: RunConfig & { returns?: S }): Promise<ResultOf<S>> {
+  async run<S extends AnySchema | undefined = undefined>(code: string, config: RunConfig & EvalOptions<S>): Promise<ResultOf<S>> {
     if (config === null || typeof config !== 'object') throw invalidConfig('', 'run() needs a config with a tenant');
-    const { tenant, returns, ...rest } = config;
+    const { tenant, returns, filename, ...rest } = config;
+    checkFilename(filename);
     const isolate = this[CREATE](tenant, rest);
     try {
-      return await isolate[EVAL_LAST](code, returns);
+      return await isolate[EVAL_LAST](code, { returns, filename });
     } finally {
       isolate.close();
     }
@@ -381,8 +409,8 @@ export class Tenant {
   }
 
   /** Evaluate `code` in a fresh isolate. */
-  run<S extends AnySchema | undefined = undefined>(code: string, config?: IsolateConfig & { returns?: S }): Promise<ResultOf<S>> {
-    return this.#runtime.run(code, { ...config, tenant: this.name } as RunConfig & { returns?: S });
+  run<S extends AnySchema | undefined = undefined>(code: string, config?: IsolateConfig & EvalOptions<S>): Promise<ResultOf<S>> {
+    return this.#runtime.run(code, { ...config, tenant: this.name } as RunConfig & EvalOptions<S>);
   }
 
   /** Create a stateful isolate: it keeps its globals between evals. */
@@ -420,6 +448,7 @@ export class Isolate {
   #chain: HookChain;
   #nextReq: () => number;
   #closed = false;
+  #evals = 0;
 
   /** @internal */
   constructor(worker: TenantWorker, state: IsolateState, nextReq: () => number) {
@@ -435,17 +464,20 @@ export class Isolate {
    * Evaluate code, keeping global state between calls. `returns` (a
    * Standard Schema) validates and types the completion value.
    */
-  eval<S extends AnySchema | undefined = undefined>(code: string, options?: { returns?: S }): Promise<ResultOf<S>> {
-    return this.#eval(code, options?.returns, false);
+  eval<S extends AnySchema | undefined = undefined>(code: string, options?: EvalOptions<S>): Promise<ResultOf<S>> {
+    return this.#eval(code, options ?? {}, false);
   }
 
   /** @internal */
-  [EVAL_LAST]<S extends AnySchema | undefined>(code: string, returns: S | undefined): Promise<ResultOf<S>> {
-    return this.#eval(code, returns, true);
+  [EVAL_LAST]<S extends AnySchema | undefined>(code: string, options: EvalOptions<S>): Promise<ResultOf<S>> {
+    return this.#eval(code, options, true);
   }
 
-  async #eval<S extends AnySchema | undefined>(code: string, returns: S | undefined, last: boolean): Promise<ResultOf<S>> {
+  async #eval<S extends AnySchema | undefined>(code: string, options: EvalOptions<S>, last: boolean): Promise<ResultOf<S>> {
+    const { returns } = options;
     if (returns !== undefined && !isStandardSchema(returns)) throw invalidConfig('returns', 'must be a Standard Schema');
+    const filename = checkFilename(options.filename) ?? `${filenameSafe(this.tenant)}/eval-${this.#evals + 1}.js`;
+    this.#evals++;
     if (this.#closed) throw new IsolaneError('ERR_ISOLATE_CLOSED', 'isolane: the isolate has been closed', { tenant: this.tenant });
     if (typeof code !== 'string') throw invalidConfig('code', 'must be a string');
     await this.#worker.ready.catch((err: Error) => {
@@ -458,10 +490,10 @@ export class Isolate {
     });
     const chain = this.#chain;
     if (!chain.observesEvals) {
-      const value = await this.#worker.eval(this.#state, this.#nextReq(), code, last);
+      const value = await this.#worker.eval(this.#state, this.#nextReq(), code, filename, last);
       return (returns ? await checkReturn(returns, value, this.tenant) : value) as ResultOf<S>;
     }
-    const event = { tenant: this.tenant, isolate: this.id, code };
+    const event = { tenant: this.tenant, isolate: this.id, code, filename };
     const before = await chain.beforeEval(event);
     if ('denied' in before) {
       throw new IsolaneError('ERR_DENIED', `isolane: the eval was denied: ${before.denied}`, { tenant: this.tenant, reason: before.denied });
@@ -469,7 +501,7 @@ export class Isolate {
     const started = performance.now();
     let value: unknown;
     try {
-      value = await this.#worker.eval(this.#state, this.#nextReq(), before.code, last);
+      value = await this.#worker.eval(this.#state, this.#nextReq(), before.code, filename, last);
     } catch (err) {
       await chain.afterEval({ ...event, code: before.code, durationMs: performance.now() - started, error: err as IsolaneError });
       throw err;

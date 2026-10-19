@@ -58,19 +58,14 @@ pub(super) fn new_context(
         global.delete(scope, key.into());
     }
     if config.wasm {
-        run_internal(scope, WASM_GUARD).map_err(|e| fail(ErrorCode::IsolateRetired, e))?;
+        run_internal(scope, "isolane:wasm-guard.js", WASM_GUARD).map_err(|e| fail(ErrorCode::IsolateRetired, e))?;
     }
     install_console(scope, global);
     install_functions(scope, global, config).map_err(|e| fail(ErrorCode::IsolateRetired, e))?;
     if let Some(prelude) = &config.prelude {
-        v8::tc_scope!(let tc, scope);
-        let ran = v8::String::new(tc, prelude)
-            .and_then(|src| v8::Script::compile(tc, src, None))
-            .and_then(|script| script.run(tc));
-        if ran.is_none() {
-            let msg = tc.exception().map(|e| describe(tc, e)).unwrap_or_else(|| "unknown error".into());
-            return Err(fail(ErrorCode::IsolateRetired, format!("vm setup failed: {msg}")));
-        }
+        // The supervisor's own code (brokers, globals): named isolane:, so
+        // its frames are isolane's in guest stacks.
+        run_internal(scope, "isolane:prelude.js", prelude).map_err(|e| fail(ErrorCode::IsolateRetired, e))?;
     }
     if config.web {
         // The web platform's hooks for the prelude to hand over the network
@@ -88,11 +83,9 @@ pub(super) fn new_context(
 const WASM_GUARD: &str = include_str!("wasm_guard.js");
 
 /// Run one of isolane's own scripts in the context, before guest code.
-fn run_internal(scope: &mut v8::PinScope, code: &str) -> Result<(), String> {
+fn run_internal(scope: &mut v8::PinScope, filename: &str, code: &str) -> Result<(), String> {
     v8::tc_scope!(let tc, scope);
-    let ran = v8::String::new(tc, code)
-        .and_then(|src| v8::Script::compile(tc, src, None))
-        .and_then(|script| script.run(tc));
+    let ran = shim_script(tc, code, filename, 0).and_then(|script| script.run(tc));
     if ran.is_none() {
         let msg = tc.exception().map(|e| describe(tc, e)).unwrap_or_else(|| "unknown error".into());
         return Err(format!("vm setup failed: {msg}"));

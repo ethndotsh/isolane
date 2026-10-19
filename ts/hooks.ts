@@ -5,7 +5,7 @@
 // `after*` innermost first), events at every level. `runtime.on(event, fn)`
 // gets the same events.
 
-import { invalidConfig, IsolaneError } from './errors.js';
+import { invalidConfig, IsolaneError, type GuestErrorInfo } from './errors.js';
 import type { LogLevel } from './worker.js';
 
 type Awaitable<T> = T | Promise<T>;
@@ -34,6 +34,8 @@ export interface EvalEvent {
   tenant: string;
   isolate: number;
   code: string;
+  /** The code's name in stack traces. */
+  filename: string;
 }
 
 /** An eval, after it ran. */
@@ -50,6 +52,19 @@ export interface LogEvent {
   message: string;
   /** `guest`: the guest's console; `host`: a host function's `ctx.log`. */
   source: 'guest' | 'host';
+}
+
+/**
+ * An error the guest's code didn't handle, outside an eval's result: an
+ * exception in a timer or task callback (`exception`), or a promise
+ * rejected with no handler by the time its task was done (`rejection`).
+ * It's also logged (`Uncaught ...`), and neither fails an eval.
+ */
+export interface GuestErrorEvent {
+  tenant: string;
+  isolate: number;
+  kind: 'exception' | 'rejection';
+  error: GuestErrorInfo;
 }
 
 /** A limit was hit (an `ERR_LIMIT` error, from the worker or the runtime). */
@@ -115,6 +130,8 @@ export interface Hooks {
   /** After it ran: `{ result }` replaces the result (when it succeeded). */
   afterEval?(event: EvalOutcome): Awaitable<void | { result: unknown }>;
   onLog?(event: LogEvent): void;
+  /** An uncaught exception or unhandled rejection in guest code (see `GuestErrorEvent`). */
+  onGuestError?(event: GuestErrorEvent): void;
   onLimit?(event: LimitEvent): void;
   onPolicyDenial?(event: PolicyDenialEvent): void;
   /** Runtime, `defaults`, and `tenants(name)` levels only (there's no call). */
@@ -128,6 +145,7 @@ export interface RuntimeEvents {
   hostCall: HostCallOutcome;
   eval: EvalOutcome;
   log: LogEvent;
+  guestError: GuestErrorEvent;
   limit: LimitEvent;
   policyDenial: PolicyDenialEvent;
   securityEvent: SecurityEvent;
@@ -140,6 +158,7 @@ const HOOK_KEYS = new Set([
   'beforeEval',
   'afterEval',
   'onLog',
+  'onGuestError',
   'onLimit',
   'onPolicyDenial',
   'onSecurityEvent',
@@ -188,6 +207,7 @@ function safely(f: () => void): void {
 
 const EVENT_HOOK = {
   log: 'onLog',
+  guestError: 'onGuestError',
   limit: 'onLimit',
   policyDenial: 'onPolicyDenial',
   securityEvent: 'onSecurityEvent',

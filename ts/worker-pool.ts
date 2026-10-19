@@ -314,7 +314,7 @@ export class TenantWorker {
   /** `last`: the isolate closes after this eval (a one-shot run), so the
    * worker drops it as soon as the result is sent and its pending timers
    * never run. */
-  eval(state: IsolateState, req: number, code: string, last = false): Promise<unknown> {
+  eval(state: IsolateState, req: number, code: string, filename: string, last = false): Promise<unknown> {
     return new Promise((resolve, reject) => {
       if (!this.#proc.alive) {
         reject(new IsolaneError('ERR_WORKER_CRASHED', `worker for tenant ${this.tenant} is gone`, { tenant: this.tenant }));
@@ -360,7 +360,7 @@ export class TenantWorker {
       }
       this.#requests.set(req, pending);
       this.#touch();
-      this.#proc.send(last ? { t: 'eval', vm: state.id, req, code, last } : { t: 'eval', vm: state.id, req, code });
+      this.#proc.send(last ? { t: 'eval', vm: state.id, req, code, filename, last } : { t: 'eval', vm: state.id, req, code, filename });
     });
   }
 
@@ -456,6 +456,10 @@ export class TenantWorker {
       return;
     }
     const state = this.#isolates.get(msg.vm);
+    if (msg.t === 'guestError') {
+      if (state) state.chain.emit('guestError', { tenant: this.tenant, isolate: msg.vm, kind: msg.kind, error: msg.guest });
+      return;
+    }
     if (msg.t === 'log') {
       if (!state) return;
       // The worker cuts long lines; a worker that didn't is cut here too

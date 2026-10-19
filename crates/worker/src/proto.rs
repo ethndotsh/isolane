@@ -7,7 +7,7 @@ use serde_json::value::RawValue;
 
 /// The protocol version. The worker reports it in `ready`; a supervisor
 /// that speaks another version refuses the worker.
-pub const PROTOCOL_VERSION: u32 = 2;
+pub const PROTOCOL_VERSION: u32 = 3;
 
 /// Supervisor → worker.
 #[derive(Deserialize)]
@@ -50,6 +50,8 @@ pub enum In {
         vm: u64,
         req: u64,
         code: String,
+        /// The code's name in stack traces (`acme/eval-1.js`).
+        filename: Option<String>,
         /// The VM is disposed after this eval (a one-shot run): it exits
         /// once the result is sent, and pending timers never run.
         #[serde(default)]
@@ -155,8 +157,9 @@ pub enum ErrorCode {
     Internal,
 }
 
-/// What the guest threw, for `ERR_GUEST_EXCEPTION`.
-#[derive(Clone, Serialize)]
+/// What the guest threw, for `ERR_GUEST_EXCEPTION` (and `guestError`
+/// frames). Every part is bounded (see `vm::errors`).
+#[derive(Clone, Default, Serialize)]
 pub struct GuestError {
     /// `error.name` when the guest threw an object with one.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -165,13 +168,37 @@ pub struct GuestError {
     pub message: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub stack: Option<String>,
+    /// Where code failed to compile (a SyntaxError in the eval's code).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub location: Option<Location>,
+    /// `error.cause`, as a guest error of its own.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cause: Option<Box<GuestError>>,
+    /// An AggregateError's `errors`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub errors: Option<Vec<GuestError>>,
+    /// Own enumerable properties (like `code`) whose values are JSON, as JSON.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub properties: Option<std::collections::BTreeMap<String, Box<RawValue>>>,
+}
+
+/// A place in guest code: 1-based line and column.
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Location {
+    pub file: String,
+    pub line: u32,
+    pub column: u32,
+    /// The line itself (a window around the column, for long lines).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source_line: Option<String>,
 }
 
 #[derive(Clone)]
 pub struct Failure {
     pub code: ErrorCode,
     pub message: String,
-    pub guest: Option<GuestError>,
+    pub guest: Option<Box<GuestError>>,
     /// For `ERR_LIMIT`: which limit, by its public name (`timeoutMs`, ...).
     pub limit: Option<&'static str>,
     /// For `ERR_SHIM`: which shim.
@@ -255,6 +282,14 @@ pub enum Out<'a> {
         limit: Option<&'static str>,
         #[serde(skip_serializing_if = "Option::is_none")]
         message: Option<&'a str>,
+    },
+    /// An error nothing handled, outside the eval's own result: an
+    /// exception in a timer or task (`kind: "exception"`), or a rejected
+    /// promise with no handler (`"rejection"`). One-way: no reply.
+    GuestError {
+        vm: u64,
+        kind: &'static str,
+        guest: &'a GuestError,
     },
     /// A console call from guest code. One-way: no reply.
     Log {

@@ -311,18 +311,21 @@ fn random_uuid(scope: &mut v8::PinScope, _args: Args, mut rv: Rv) {
     rv.set(v8::String::new(scope, &s).unwrap().into());
 }
 
-/// An error nothing handled (reportError with no listener, a microtask
-/// that threw): the guest's console, at error level.
+/// An error nothing handled (reportError with no listener, a timer or
+/// microtask that threw): the guest's console, at error level, and a
+/// `guestError` frame.
 fn report_unhandled_exception(scope: &mut v8::PinScope, args: Args, _rv: Rv) {
-    let e = args.get(0);
-    let mut text = e;
-    if let Ok(obj) = v8::Local::<v8::Object>::try_from(e) {
-        let key = v8::String::new(scope, "stack").unwrap();
-        if let Some(stack) = obj.get(scope, key.into()).filter(|s| s.is_string()) {
-            text = stack;
-        }
+    let e = v8::Local::new(scope, args.get(0));
+    crate::vm::report_guest_error(scope, "exception", e);
+}
+
+/// native.setRejectionReporter(fn), once per context: globals.js's
+/// `unhandledrejection` dispatch, called for each rejection with no handler.
+fn set_rejection_reporter(scope: &mut v8::PinScope, args: Args, _rv: Rv) {
+    if let Ok(f) = v8::Local::<v8::Function>::try_from(args.get(0)) {
+        let reporter = crate::vm::RejectionReporter(v8::Global::new(scope, f));
+        scope.set_slot(std::rc::Rc::new(reporter));
     }
-    crate::vm::guest_log(scope, "error", "Uncaught ", text);
 }
 
 /// native.log(level, message): Deno's core.print, to the guest's console.
@@ -387,6 +390,7 @@ fn native_fns() -> Natives {
         "setHostObject" => clone::set_host_object,
         "randomUUID" => random_uuid,
         "reportUnhandledException" => report_unhandled_exception,
+        "setRejectionReporter" => set_rejection_reporter,
         "newDecoder" => encoding::new_decoder,
         "decoderDecode" => encoding::decoder_decode,
         "freeDecoder" => encoding::free_decoder,

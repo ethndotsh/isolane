@@ -133,6 +133,12 @@
   // Timers. An exception in a callback is reported like any uncaught
   // error: an "error" event on the global object, then the console.
   core.setReportException((error) => eventModule().reportException(error));
+  // A rejection nothing handled: an "unhandledrejection" event on the global
+  // object first; a listener that calls preventDefault() handles it.
+  core.setReportRejection((promise, reason) => {
+    const { PromiseRejectionEvent } = eventModule();
+    return g.dispatchEvent(new PromiseRejectionEvent("unhandledrejection", { cancelable: true, promise, reason }));
+  });
   for (const name of ["setTimeout", "setInterval", "clearTimeout", "clearInterval"]) {
     lazy(name, from(TIMERS_JS, name));
   }

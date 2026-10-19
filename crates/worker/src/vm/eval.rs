@@ -14,7 +14,8 @@ use super::mailbox::Mailbox;
 use super::watchdog::CpuClock;
 use super::{pump_tasks, Output, VmMsg};
 use super::console::bounded_string;
-use crate::proto::{fail, limit, ErrorCode, Failure, GuestError, Out, ShimRef, Usage};
+use super::errors;
+use crate::proto::{fail, limit, ErrorCode, Failure, Out, ShimRef, Usage};
 
 /// How often to look for V8's foreground tasks while it has background work
 /// in flight and nothing else to wait for.
@@ -44,25 +45,27 @@ pub(super) fn describe(scope: &mut v8::PinScope, exception: v8::Local<v8::Value>
             }
         }
     }
-    bounded_string(scope, exception, ERROR_TEXT_MAX)
+    errors::text(scope, exception, ERROR_TEXT_MAX).unwrap_or_default()
 }
 
 /// `ERR_GUEST_EXCEPTION` for a thrown value: the one-line message ("stack"
-/// or the value), plus name/message/stack as separate fields.
-fn guest_failure(scope: &mut v8::PinScope, exception: v8::Local<v8::Value>) -> Failure {
+/// or the value), plus the value described (see `errors::guest_error`).
+fn guest_failure<'s>(scope: &mut v8::PinScope<'s, '_>, exception: v8::Local<'s, v8::Value>) -> Failure {
     let mut f = fail(ErrorCode::GuestException, describe(scope, exception));
-    let get = |scope: &mut v8::PinScope, obj: v8::Local<v8::Object>, key: &str| {
-        let k = v8::String::new(scope, key).unwrap();
-        obj.get(scope, k.into()).filter(|v| v.is_string()).map(|v| bounded_string(scope, v, ERROR_TEXT_MAX))
-    };
-    f.guest = Some(match v8::Local::<v8::Object>::try_from(exception) {
-        Ok(obj) => GuestError {
-            name: get(scope, obj, "name"),
-            message: get(scope, obj, "message").unwrap_or_else(|| bounded_string(scope, exception, ERROR_TEXT_MAX)),
-            stack: get(scope, obj, "stack"),
-        },
-        Err(_) => GuestError { name: None, message: bounded_string(scope, exception, ERROR_TEXT_MAX), stack: None },
-    });
+    f.guest = Some(Box::new(errors::guest_error(scope, exception)));
+    f
+}
+
+/// `ERR_GUEST_EXCEPTION` for code that didn't compile: with where, and the
+/// stack (and message) saying so, since a SyntaxError has no frames.
+fn compile_failure(tc: &mut v8::PinnedRef<v8::TryCatch<v8::HandleScope>>) -> Failure {
+    let Some(exception) = tc.exception() else { return fail(ErrorCode::GuestException, "unknown error") };
+    let mut f = guest_failure(tc, exception);
+    let location = tc.message().and_then(|m| errors::compile_location(tc, m));
+    if let (Some(guest), Some((location, caret))) = (f.guest.as_mut(), location) {
+        errors::with_location(guest, location, &caret);
+        f.message = clip(guest.stack.clone().unwrap_or_default());
+    }
     f
 }
 
@@ -120,11 +123,29 @@ pub(super) fn eval(
     context: &v8::Global<v8::Context>,
     shims: &Shims,
     code: &str,
+    filename: Option<&str>,
     mailbox: &Mailbox,
     deadline: Option<Instant>,
 ) -> EvalEnd {
     v8::scope_with_context!(scope, isolate, context);
     v8::tc_scope!(let tc, scope);
+    let end = run(tc, shims, code, filename.unwrap_or("eval.js"), mailbox, deadline);
+    // Rejections the eval left without a handler, now that it's over.
+    if !matches!(end, EvalEnd::Disposed) {
+        tc.reset();
+        errors::report_rejections(tc);
+    }
+    end
+}
+
+fn run(
+    tc: &mut v8::PinnedRef<v8::TryCatch<v8::HandleScope>>,
+    shims: &Shims,
+    code: &str,
+    filename: &str,
+    mailbox: &Mailbox,
+    deadline: Option<Instant>,
+) -> EvalEnd {
 
     let guest_error = |tc: &mut v8::PinnedRef<v8::TryCatch<v8::HandleScope>>| match tc.exception() {
         Some(e) => guest_failure(tc, e),
@@ -151,8 +172,12 @@ pub(super) fn eval(
     let Some(source) = v8::String::new(tc, code) else {
         return EvalEnd::Done(Err(fail(ErrorCode::Internal, "source too large")));
     };
-    let Some(script) = v8::Script::compile(tc, source, None) else {
-        return EvalEnd::Done(Err(guest_error(tc)));
+    let Some(name) = v8::String::new(tc, filename) else {
+        return EvalEnd::Done(Err(fail(ErrorCode::Internal, "filename too large")));
+    };
+    let origin = v8::ScriptOrigin::new(tc, name.into(), 0, 0, false, 0, None, false, false, false, None);
+    let Some(script) = v8::Script::compile(tc, source, Some(&origin)) else {
+        return EvalEnd::Done(Err(compile_failure(tc)));
     };
     let Some(mut value) = script.run(tc) else {
         return EvalEnd::Done(Err(guest_error(tc)));
@@ -226,7 +251,11 @@ fn settle(
         }
         match promise.state() {
             v8::PromiseState::Fulfilled => return Settled::Fulfilled,
-            v8::PromiseState::Rejected => return Settled::Rejected,
+            v8::PromiseState::Rejected => {
+                // Its rejection is the eval's (or shim's) result, not unhandled.
+                errors::forget(tc, promise);
+                return Settled::Rejected;
+            }
             v8::PromiseState::Pending => {}
         }
         if pump_tasks(tc) {
@@ -248,6 +277,9 @@ fn settle(
                 "promise never settled: there are no timers or I/O, only host functions",
             ));
         }
+        // This task's microtasks have run: rejections still without a
+        // handler are unhandled.
+        errors::report_rejections(tc);
         // Wait for a host reply, the next timer, or (with V8 work in flight)
         // briefly, then look for its results.
         let left = deadline.map(|d| d.saturating_duration_since(Instant::now()));
@@ -292,6 +324,7 @@ pub(super) fn run_idle_timers(scope: &mut v8::PinScope) {
         }
         let ran = crate::web::timers::run_due_timer(scope);
         scope.perform_microtask_checkpoint();
+        errors::report_rejections(scope);
         let pumped = pump_tasks(scope);
         if !ran && !pumped {
             return;
@@ -330,7 +363,7 @@ pub(super) fn send_result(out: &Output, req: u64, result: Result<String, Failure
             value: None,
             code: Some(f.code),
             message: Some(&f.message),
-            guest: f.guest.as_ref(),
+            guest: f.guest.as_deref(),
             limit: f.limit,
             shim: f.shim.as_ref(),
             usage,

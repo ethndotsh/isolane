@@ -305,7 +305,7 @@ fn serve(lock_down: bool, memory_limit: Option<u64>, web_background: bool) -> Ex
                     }
                 }
             }
-            In::Eval { vm, req, code, last } => {
+            In::Eval { vm, req, code, filename, last } => {
                 let refuse = |f: proto::Failure| {
                     out.send(&Out::Result {
                         req,
@@ -323,7 +323,7 @@ fn serve(lock_down: bool, memory_limit: Option<u64>, web_background: bool) -> Ex
                     refuse(failure.clone());
                     continue;
                 }
-                let sent = vms.get(&vm).map(|(tx, _)| tx.send(VmMsg::Eval { req, code, last }).is_ok());
+                let sent = vms.get(&vm).map(|(tx, _)| tx.send(VmMsg::Eval { req, code, filename, last }).is_ok());
                 if sent != Some(true) {
                     refuse(fail(ErrorCode::IsolateClosed, "the isolate has been closed"));
                 }

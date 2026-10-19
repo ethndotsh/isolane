@@ -605,6 +605,15 @@
   function configure(options) {
     baseUrl = options.baseUrl;
     native.setTimerRunner(runTimer);
+    native.setRejectionReporter(reportRejection);
+  }
+
+  // A promise rejected with no handler, once its task is done: globals.js
+  // dispatches "unhandledrejection" on the global object. Returns whether
+  // nothing handled it (then the worker reports it).
+  let rejectionHandler = null;
+  function reportRejection(promise, reason) {
+    return rejectionHandler === null ? true : rejectionHandler(promise, reason);
   }
 
   function destructureError(error) {
@@ -685,6 +694,10 @@
     // global object's error event.
     setReportException(fn) {
       reportException = fn;
+    },
+    // Not part of deno_core: globals.js's "unhandledrejection" dispatch.
+    setReportRejection(fn) {
+      rejectionHandler = fn;
     },
     // Not part of deno_core: for runtime/fetch.js, the data: URL processor
     // and Subresource Integrity's digests.
