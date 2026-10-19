@@ -22,6 +22,13 @@ export interface IsolateLimits {
   heapBytes?: number | null;
   /** Live timers; more throws a RangeError in the guest. Default 10,000. */
   timers?: number;
+  /**
+   * Time a stateful isolate may spend running between evals (timers, and
+   * continuations of host calls nobody awaits), per minute: CPU time on
+   * Linux, wall time elsewhere. Past it the isolate is retired (`ERR_LIMIT`
+   * on its next eval). `null`: none. Default 1 s per minute.
+   */
+  backgroundMs?: number | null;
   /** Console output per eval; the rest is dropped. Default 1 MiB. */
   logBytes?: number;
   /** Longest console line; longer ones are cut. Default 16 KiB. */
@@ -68,6 +75,7 @@ export const DEFAULT_LIMITS = Object.freeze({
   cpuMs: null,
   heapBytes: 128 * 1024 ** 2,
   timers: 10_000,
+  backgroundMs: 1_000,
   logBytes: 1024 ** 2,
   logLineBytes: 16 * 1024,
   codeBytes: 16 * 1024 ** 2,
@@ -83,9 +91,9 @@ export const DEFAULT_LIMITS = Object.freeze({
 /** Every limit, with defaults filled in (`null` where a limit is off). */
 export type ResolvedLimits = { [K in keyof (Limits & RuntimeLimits)]-?: Exclude<(Limits & RuntimeLimits)[K], undefined> };
 
-const ISOLATE_LIMITS = new Set(['timeoutMs', 'cpuMs', 'heapBytes', 'timers', 'logBytes', 'logLineBytes', 'codeBytes', 'resultBytes', 'decompressedBytes']);
+const ISOLATE_LIMITS = new Set(['timeoutMs', 'cpuMs', 'heapBytes', 'timers', 'backgroundMs', 'logBytes', 'logLineBytes', 'codeBytes', 'resultBytes', 'decompressedBytes']);
 const TENANT_LIMITS = new Set(['isolates', 'concurrentEvals', 'workerMemoryBytes', 'idleMs']);
-const NULLABLE = new Set(['timeoutMs', 'cpuMs', 'heapBytes', 'workerMemoryBytes']);
+const NULLABLE = new Set(['timeoutMs', 'cpuMs', 'heapBytes', 'backgroundMs', 'workerMemoryBytes']);
 const MINIMUM: Record<string, number> = { workerMemoryBytes: 64 * 1024 ** 2, heapBytes: 1024 ** 2 };
 
 /** Old names, for errors that say what to write instead. */
@@ -470,6 +478,7 @@ export function workerLimits(l: ResolvedLimits) {
     cpuMs: l.cpuMs ?? undefined,
     heapBytes: l.heapBytes ?? undefined,
     timers: l.timers,
+    backgroundMs: l.backgroundMs ?? undefined,
     logBytes: l.logBytes,
     logLineBytes: l.logLineBytes,
     resultBytes: l.resultBytes,

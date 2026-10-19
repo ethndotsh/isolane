@@ -363,6 +363,13 @@ export class TenantWorker {
   #onMessage(msg: Exclude<WorkerMessage, { t: 'ready' }>): void {
     if (msg.t === 'usage') {
       this.#count(msg);
+      if (msg.limit !== undefined) {
+        const state = this.#isolates.get(msg.vm);
+        const message = msg.message ?? '';
+        (state?.chain ?? this.#chain).emit('limit', { tenant: this.tenant, isolate: msg.vm, limit: msg.limit, message });
+        // The isolate is retired: its host calls have no one waiting.
+        if (state) this.#abandonCalls(state, new IsolaneError('ERR_LIMIT', message, { tenant: this.tenant, limit: msg.limit }));
+      }
       return;
     }
     if (msg.t === 'result') {

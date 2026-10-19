@@ -40,7 +40,7 @@ export type WorkerMessage =
   | ({ t: 'ready'; protocol: number } & IsolationInfo)
   | ({ t: 'result'; req: number; ok: true; value: unknown } & WorkerUsage)
   | ({ t: 'result'; req: number; ok: false; code: string; message: string; guest?: GuestErrorInfo; limit?: string; shim?: { phase: 'setup' | 'before' | 'after'; index: number } } & WorkerUsage)
-  | ({ t: 'usage'; vm: number } & WorkerUsage)
+  | ({ t: 'usage'; vm: number; limit?: string; message?: string } & WorkerUsage)
   | { t: 'hostCall'; vm: number; call: number; fn: number; args: unknown[] }
   | { t: 'log'; vm: number; level: LogLevel; message: string };
 
@@ -161,7 +161,12 @@ export function parseWorkerMessage(raw: unknown, bytes?: Buffer): WorkerMessage 
         ...parseUsage(m),
       };
     case 'usage':
-      return isUint(m.vm) ? { t: 'usage', vm: m.vm, ...parseUsage(m) } : null;
+      // `limit`: work between evals hit it (and the isolate is retired).
+      if (!isUint(m.vm)) return null;
+      if (m.limit !== undefined && (typeof m.limit !== 'string' || typeof m.message !== 'string')) return null;
+      return m.limit === undefined
+        ? { t: 'usage', vm: m.vm, ...parseUsage(m) }
+        : { t: 'usage', vm: m.vm, limit: m.limit, message: m.message as string, ...parseUsage(m) };
     case 'hostCall': {
       if (!(isUint(m.vm) && isUint(m.call) && isUint(m.fn) && Array.isArray(m.args))) return null;
       const args = bytes === undefined ? m.args : attachArgs(m.args, m.bin, bytes);

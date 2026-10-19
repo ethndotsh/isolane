@@ -9,7 +9,9 @@
 //! - `console`: guest console output
 //! - `mailbox`: messages held while a sync host call waits
 //! - `watchdog`: wall-clock and CPU budgets
+//! - `background`: the budget for work between evals
 
+mod background;
 mod console;
 mod context;
 mod eval;
@@ -27,9 +29,10 @@ use std::sync::mpsc::{Receiver, RecvTimeoutError};
 use std::sync::Arc;
 
 use crate::frame::Writer;
-use crate::proto::{fail, limit, ErrorCode, Failure, Out, Usage};
+use crate::proto::{fail, limit, ErrorCode, Failure, Usage};
 pub use console::guest_log;
 use context::{allow_wasm, deny_wasm, new_context, Shims};
+use background::Background;
 use eval::{eval, refuse_all, run_idle_timers, send_result, usage, EvalEnd};
 use host_call::{apply_host_reply, Bridge};
 use mailbox::Mailbox;
@@ -287,15 +290,32 @@ fn vm_main(id: u64, config: VmConfig, rx: Receiver<VmMsg>, out: Output) {
         }
     };
 
+    // Work between evals (timers, continuations) and its budget.
+    let mut background = Background::new(config.limits.background_ms, cpu_clock);
+    // Set when that budget runs out: the next eval fails with it, and the
+    // isolate is retired.
+    let mut background_hit: Option<Failure> = None;
+
     loop {
         // Between evals, wake for the next timer too (stateful isolates keep
-        // theirs; see run_idle_timers).
+        // theirs; see run_idle_timers), and to report background usage.
         let next_timer = if retired.is_none() { crate::web::timers::next_timer().map(|(due, _)| due) } else { None };
-        let msg = match bridge.mailbox.idle(next_timer) {
+        let wake = match (next_timer, background.report_due()) {
+            (Some(a), Some(b)) => Some(a.min(b)),
+            (a, b) => a.or(b),
+        };
+        let msg = match bridge.mailbox.idle(wake) {
             Ok(m) => m,
+            Err(RecvTimeoutError::Timeout) if !crate::web::timers::next_timer().is_some_and(|(due, _)| due.is_zero()) || retired.is_some() => {
+                // No timer is due: only a usage report was.
+                background.report(&out, id, false, None);
+                continue;
+            }
             Err(RecvTimeoutError::Timeout) => {
                 let cpu_start = cpu_clock.map(|c| c.now()).unwrap_or_default();
-                bridge.deadline.set(watchdog.arm(timeout, cpu));
+                let (wall, cpu_budget) = background.budgets(timeout, cpu);
+                let batch = background.start(std::time::Duration::ZERO);
+                bridge.deadline.set(watchdog.arm(wall, cpu_budget));
                 bridge.timed_out.set(false);
                 {
                     v8::scope_with_context!(scope, &mut isolate, &context);
@@ -306,11 +326,12 @@ fn vm_main(id: u64, config: VmConfig, rx: Receiver<VmMsg>, out: Output) {
                 if isolate.is_execution_terminating() || fired || oom.hit.load(Ordering::SeqCst) {
                     isolate.cancel_terminate_execution();
                 }
-                if oom.hit.load(Ordering::SeqCst) {
-                    retired = Some(retire("the isolate was terminated by an earlier timer callback (heap limit); create a new one".into()));
-                }
                 let spent = usage(&mut isolate, cpu_clock, cpu_start);
-                out.send(&Out::Usage { vm: id, usage: spent });
+                let heap_hit = oom.hit.load(Ordering::SeqCst);
+                if let Some((r, hit)) = background.settle(batch, spent, heap_hit, &out, id, "timer callback") {
+                    retired = Some(r);
+                    background_hit = hit;
+                }
                 continue;
             }
             Err(RecvTimeoutError::Disconnected) => break,
@@ -318,6 +339,12 @@ fn vm_main(id: u64, config: VmConfig, rx: Receiver<VmMsg>, out: Output) {
         match msg {
             VmMsg::Dispose => break,
             VmMsg::Eval { req, code, last } => {
+                // Usage from before this eval goes out first.
+                background.report(&out, id, true, None);
+                if let Some(cause) = background_hit.take() {
+                    send_result(&out, req, Err(cause), Usage::default());
+                    continue;
+                }
                 if let Some(cause) = &retired {
                     send_result(&out, req, Err(cause.clone()), Usage::default());
                     continue;
@@ -367,7 +394,9 @@ fn vm_main(id: u64, config: VmConfig, rx: Receiver<VmMsg>, out: Output) {
                     continue;
                 }
                 let cpu_start = cpu_clock.map(|c| c.now()).unwrap_or_default();
-                bridge.deadline.set(watchdog.arm(timeout, cpu));
+                let (wall, cpu_budget) = background.budgets(timeout, cpu);
+                let batch = background.start(background::REPLY_COST);
+                bridge.deadline.set(watchdog.arm(wall, cpu_budget));
                 bridge.timed_out.set(false);
                 {
                     v8::scope_with_context!(scope, &mut isolate, &context);
@@ -382,14 +411,16 @@ fn vm_main(id: u64, config: VmConfig, rx: Receiver<VmMsg>, out: Output) {
                 if isolate.is_execution_terminating() || fired || oom.hit.load(Ordering::SeqCst) {
                     isolate.cancel_terminate_execution();
                 }
-                if oom.hit.load(Ordering::SeqCst) {
-                    retired = Some(retire("the isolate was terminated by an earlier continuation (heap limit); create a new one".into()));
-                }
                 let spent = usage(&mut isolate, cpu_clock, cpu_start);
-                out.send(&Out::Usage { vm: id, usage: spent });
+                let heap_hit = oom.hit.load(Ordering::SeqCst);
+                if let Some((r, hit)) = background.settle(batch, spent, heap_hit, &out, id, "continuation") {
+                    retired = Some(r);
+                    background_hit = hit;
+                }
             }
         }
     }
+    background.report(&out, id, true, None);
     watchdog.close();
     // The isolate holds a raw pointer to `oom`, and the context handle needs
     // a live isolate: drop in that order.

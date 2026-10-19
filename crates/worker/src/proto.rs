@@ -243,12 +243,18 @@ pub enum Out<'a> {
         #[serde(flatten)]
         usage: Usage,
     },
-    /// CPU used by work outside an eval (host-reply continuations).
+    /// CPU used by work outside an eval (timers, host-reply
+    /// continuations), and the limit that work hit, if it hit one (the
+    /// isolate is retired).
     #[serde(rename_all = "camelCase")]
     Usage {
         vm: u64,
         #[serde(flatten)]
         usage: Usage,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        limit: Option<&'static str>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        message: Option<&'a str>,
     },
     /// A console call from guest code. One-way: no reply.
     Log {

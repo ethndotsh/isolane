@@ -266,12 +266,20 @@ fn settle(
     }
 }
 
+/// How long one batch of timers between evals runs before going back to
+/// the mailbox, so evals and replies waiting for this isolate aren't held
+/// up by a timer storm.
+const IDLE_SLICE: std::time::Duration = std::time::Duration::from_millis(10);
+
 /// Timers that came due between evals (a stateful isolate's setInterval, a
 /// setTimeout left by an earlier eval): run them, each followed by its
-/// microtasks, under the same budget as an eval.
+/// microtasks, for up to `IDLE_SLICE` (the rest run in the next batch,
+/// after any waiting messages), under the eval budgets capped by the
+/// background budget (see `background`).
 pub(super) fn run_idle_timers(scope: &mut v8::PinScope) {
+    let start = std::time::Instant::now();
     loop {
-        if scope.is_execution_terminating() {
+        if scope.is_execution_terminating() || start.elapsed() >= IDLE_SLICE {
             return;
         }
         let ran = crate::web::timers::run_due_timer(scope);

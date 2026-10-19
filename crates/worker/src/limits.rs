@@ -20,6 +20,10 @@ pub struct Limits {
     pub heap_bytes: Option<u64>,
     /// Live timers (setTimeout/setInterval); more throws a RangeError.
     pub timers: u32,
+    /// Time per minute for work between evals (timers, continuations):
+    /// CPU time where there's a CPU clock (Linux), wall time elsewhere.
+    /// None: no limit.
+    pub background_ms: Option<u64>,
     /// Console output per eval; the rest is dropped.
     pub log_bytes: usize,
     /// Longest single console line; longer ones are cut.
@@ -37,6 +41,7 @@ impl Default for Limits {
             cpu_ms: None,
             heap_bytes: None,
             timers: 10_000,
+            background_ms: None,
             log_bytes: 1 << 20,
             log_line_bytes: 16 << 10,
             result_bytes: 16 << 20,
