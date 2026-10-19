@@ -57,12 +57,34 @@ jobs:
         with:
           python-version: '3.12'
 
-      - name: Fetch V8's test corpus
+      - name: V8 tag
         if: startsWith(matrix.job, 'corpus')
+        id: v8tag
+        run: echo "tag=$(sed -n 's/^V8_TAG=//p' scripts/fetch-rusty-v8.sh)" >>"$GITHUB_OUTPUT"
+
+      # Cached by tag, so it isn't cloned from Chromium's git host (which
+      # often fails runners with 5xx errors) every week.
+      - name: Restore V8's test corpus
+        if: startsWith(matrix.job, 'corpus')
+        id: corpus
+        uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}/v8
+          key: v8-mjsunit-${{ steps.v8tag.outputs.tag }}
+
+      - name: Fetch V8's test corpus (when not cached)
+        if: startsWith(matrix.job, 'corpus') && steps.corpus.outputs.cache-hit != 'true'
+        env:
+          TAG: ${{ steps.v8tag.outputs.tag }}
         run: |
-          tag=$(sed -n 's/^V8_TAG=//p' scripts/fetch-rusty-v8.sh)
-          git clone -q --depth 1 --branch "$tag" --filter=blob:none --sparse https://chromium.googlesource.com/v8/v8.git "$RUNNER_TEMP/v8"
-          git -C "$RUNNER_TEMP/v8" sparse-checkout set test/mjsunit
+          for n in 1 2 3 4 5; do
+            rm -rf "$RUNNER_TEMP/v8"
+            git clone -q --depth 1 --branch "$TAG" --filter=blob:none --sparse https://chromium.googlesource.com/v8/v8.git "$RUNNER_TEMP/v8" &&
+              git -C "$RUNNER_TEMP/v8" sparse-checkout set test/mjsunit && exit 0
+            echo "clone failed (attempt $n); retrying in $((n * 20))s" >&2
+            sleep $((n * 20))
+          done
+          exit 1
 
       - name: Run
         env:
