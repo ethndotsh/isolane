@@ -400,12 +400,12 @@ test('limits.pendingHostCalls and limits.hostCalls bound host-call floods', asyn
     assert.ok(signals.length > 0 && signals.every((s) => s.aborted), 'abandoned calls are aborted');
     stateful.close();
   }
-  // Calls an eval left behind when it returned: each expires after
-  // timeoutMs, so the isolate's slots come back.
+  // Calls an eval left behind when it returned: each expires a second
+  // after timeoutMs, so the isolate's slots come back.
   signals.length = 0;
   const left = isolate({ ...T, host: { hang, one: host.one }, limits: { timeoutMs: 100, pendingHostCalls: 5 } });
   assert.equal(await left.eval('globalThis.p = Array.from({ length: 5 }, () => hang()); 1'), 1);
-  await new Promise((r) => setTimeout(r, 250));
+  await new Promise((r) => setTimeout(r, 1300));
   assert.equal(await left.eval('one()'), 1);
   assert.deepEqual(
     await left.eval('Promise.allSettled(p).then((r) => r.map((x) => [x.status, x.reason?.name, x.reason?.code]))'),

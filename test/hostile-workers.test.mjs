@@ -21,7 +21,7 @@ test('a crashing worker rejects in-flight evals and raises a security event', as
 test('a worker that exits cleanly by itself is a security event too', async () => {
   const events = [];
   const quiet = new Runtime({
-    workerPath: fakeWorker(`send({ t: 'ready', protocol: 2, v8: 'fake', sandboxSecure: true, lockdown: { landlock: 'full', seccomp: 'full' } }); process.stdin.once('data', () => process.exit(0));`),
+    workerPath: fakeWorker(`send({ t: 'ready', protocol: 3, v8: 'fake', sandboxSecure: true, lockdown: { landlock: 'full', seccomp: 'full' } }); process.stdin.once('data', () => process.exit(0));`),
     hooks: { onSecurityEvent: (e) => events.push(e) },
   });
   await assert.rejects(quiet.run('1', { tenant: 'quiet' }), code('ERR_WORKER_CRASHED'));
@@ -33,7 +33,7 @@ test('a worker flooding log lines is cut off at a per-second bound', async () =>
   const logs = [];
   const line = 'x'.repeat(1000);
   const flood = new Runtime({
-    workerPath: fakeWorker(`send({ t: 'ready', protocol: 2, v8: 'fake', sandboxSecure: true, lockdown: { landlock: 'full', seccomp: 'full' } });
+    workerPath: fakeWorker(`send({ t: 'ready', protocol: 3, v8: 'fake', sandboxSecure: true, lockdown: { landlock: 'full', seccomp: 'full' } });
       process.stdin.once('data', () => { for (let i = 0; i < 10000; i++) send({ t: 'log', vm: 1, level: 'log', message: '${line}' }); });
       setInterval(() => {}, 1000);`),
     hooks: { onLog: (e) => logs.push(e) },
