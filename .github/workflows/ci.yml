@@ -4,6 +4,12 @@ on:
   push:
   pull_request:
   workflow_dispatch:
+  # Called by v8-update.yml to test a V8 bump before it opens a PR.
+  workflow_call:
+    inputs:
+      ref:
+        type: string
+        required: true
 
 jobs:
   linux-x64:
@@ -19,6 +25,8 @@ jobs:
       CLANG_PATH: /usr/lib/llvm-21/bin/clang
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref || github.ref }}
 
       - name: Free disk space for the V8 build
         run: |
@@ -110,3 +118,11 @@ jobs:
             syscall-audit.txt
             build/logs/*.log
           if-no-files-found: ignore
+
+      # For soak.yml (fuzzing and stress), which runs against main's build.
+      - uses: actions/upload-artifact@v4
+        with:
+          name: worker-linux-x64
+          path: |
+            ${{ runner.temp }}/isolane-worker
+            ${{ runner.temp }}/isolane-escape-worker

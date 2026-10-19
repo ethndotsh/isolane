@@ -1,0 +1,80 @@
+name: Soak
+
+# Fuzzing and stress, run against the worker main's CI last built. Weekly,
+# or on demand. Each job uploads a JSON report.
+#   protocol-fuzz  hostile fake workers vs. the supervisor
+#   corpus         V8's mjsunit corpus through the locked-down worker
+#   stress         VM/tenant floods, churn, leaks, noisy neighbours
+
+on:
+  schedule:
+    - cron: '41 6 * * 0'
+  workflow_dispatch:
+    inputs:
+      fuzz_iterations:
+        description: protocol-fuzz iterations
+        default: '5000'
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  soak:
+    strategy:
+      fail-fast: false
+      matrix:
+        job: [protocol-fuzz, corpus-0, corpus-1, stress]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Build TypeScript
+        run: |
+          npm ci
+          npx tsc
+
+      - name: Download main's worker
+        if: matrix.job != 'protocol-fuzz'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          run=$(gh run list -R "$GITHUB_REPOSITORY" -w CI -b main -s success -L 1 --json databaseId --jq '.[0].databaseId')
+          gh run download "$run" -R "$GITHUB_REPOSITORY" -n worker-linux-x64 -D "$RUNNER_TEMP/bin"
+          chmod +x "$RUNNER_TEMP"/bin/*
+          echo "ISOLANE_WORKER=$RUNNER_TEMP/bin/isolane-worker" >>"$GITHUB_ENV"
+          "$RUNNER_TEMP/bin/isolane-worker" --self-check
+
+      - name: Fetch V8's test corpus
+        if: startsWith(matrix.job, 'corpus')
+        run: |
+          tag=$(sed -n 's/^V8_TAG=//p' scripts/fetch-rusty-v8.sh)
+          git clone -q --depth 1 --branch "$tag" --filter=blob:none --sparse https://chromium.googlesource.com/v8/v8.git "$RUNNER_TEMP/v8"
+          git -C "$RUNNER_TEMP/v8" sparse-checkout set test/mjsunit
+
+      - name: Run
+        env:
+          ISOLANE_STRICT: '1'
+          JOB: ${{ matrix.job }}
+          ITERATIONS: ${{ inputs.fuzz_iterations || '5000' }}
+        run: |
+          set +e
+          case "$JOB" in
+            protocol-fuzz) node soak/protocol-fuzz.mjs "$ITERATIONS" ;;
+            corpus-*) node soak/corpus.mjs "$RUNNER_TEMP/v8" 3 "${JOB#corpus-}/2" ;;
+            stress) node soak/stress.mjs ;;
+          esac >report.json
+          status=$?
+          { echo "### $JOB"; echo '```json'; head -c 60000 report.json; echo '```'; } >>"$GITHUB_STEP_SUMMARY"
+          exit $status
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: soak-${{ matrix.job }}
+          path: report.json
