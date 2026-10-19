@@ -81,14 +81,6 @@
       "category": "environment",
       "reason": "Uses WPT's proxy for a fake host (bad-port.wpt), which this harness doesn't run; the fetch policy also refuses that host."
     },
-    "decompression-trailing": {
-      "category": "bug",
-      "reason": "DecompressionStream with trailing data after the end of the stream stalls instead of erroring (roadmap: DecompressionStream trailing input)."
-    },
-    "compression-format": {
-      "category": "bug",
-      "reason": "CompressionStream/DecompressionStream edge cases: output for tiny repetitive inputs is larger than browsers', and a truncated or corrupt deflate stream isn't always detected (roadmap: compression conformance)."
-    },
     "encoding-edge": {
       "category": "bug",
       "reason": "encoding_rs differs from the Encoding standard for EUC-JP's state after a fatal streaming error (roadmap: encoding conformance)."
@@ -155,13 +147,6 @@
         "chunk of type shared Uint8Array should error the stream for brotli": "FAIL"
       }
     },
-    "compression/compression-output-length.any.js": {
-      "why": "compression-format",
-      "subtests": {
-        "the length of deflate data should be shorter than that of the original data": "FAIL",
-        "the length of gzip data should be shorter than that of the original data": "FAIL"
-      }
-    },
     "compression/decompression-bad-chunks.any.js": {
       "why": "no-wasm",
       "subtests": {
@@ -174,17 +159,6 @@
         "chunk of type SharedArrayBuffer should error the stream for brotli": "FAIL",
         "chunk of type shared Uint8Array should error the stream for brotli": "FAIL"
       }
-    },
-    "compression/decompression-corrupt-input.any.js": {
-      "why": "compression-format",
-      "subtests": {
-        "truncating the input for 'deflate' should give an error": "FAIL",
-        "format 'deflate' field DATA should be error for 5": "FAIL"
-      }
-    },
-    "compression/decompression-extra-input.any.js": {
-      "status": "ERROR",
-      "why": "decompression-trailing"
     },
     "compression/idlharness.https.any.js": {
       "why": "not-worker-scope",

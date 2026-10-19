@@ -1,0 +1,28 @@
+DecompressionStream: when a chunk decodes and then hits input after the end
+of the compressed data, error the stream right after enqueuing its output
+(op_compression_check, runtime/core.js), not at the next write or at close,
+which may never come (compression/decompression-extra-input.any.js; Deno
+has the same bug).
+
+diff --git a/runtime/deno/ext/web/14_compression.js b/runtime/deno/ext/web/14_compression.js
+--- a/runtime/deno/ext/web/14_compression.js
++++ b/runtime/deno/ext/web/14_compression.js
+@@ -8,6 +8,7 @@
+ (function () {
+ const { core, primordials } = __bootstrap;
+ const {
++  op_compression_check,
+   op_compression_finish,
+   op_compression_new,
+   op_compression_write,
+@@ -136,6 +137,10 @@ class DecompressionStream {
+           chunk,
+         );
+         maybeEnqueue(controller, output);
++        // A chunk that decoded, then hit input after the end of the
++        // compressed data (or corrupt input): error the stream after its
++        // output, not at the next write, which may never come.
++        op_compression_check(rid);
+       },
+       flush(controller) {
+         const output = op_compression_finish(rid, true);

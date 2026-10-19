@@ -65,7 +65,11 @@ const DIRS = [
   'xhr/formdata',
 ];
 // Shared files the tests load, and the server's own code.
-const SUPPORT = ['/resources', '/common', '/interfaces', '/FileAPI/support', '/fetch/api/resources', '/fetch/connection-pool/resources', '/xhr/resources', '/tools'];
+const SUPPORT = [
+  '/resources', '/common', '/interfaces', '/FileAPI/support', '/fetch/api/resources', '/fetch/connection-pool/resources', '/xhr/resources', '/tools',
+  // compression/compression-output-length.any.js compresses this file.
+  '/media/test-av-384k-44100Hz-1ch-320x240-30fps-10kfr.webm',
+];
 // Paths a plain file server needs mapped (wptserve knows them).
 const STATIC_ALIASES = { '/resources/WebIDLParser.js': '/resources/webidl2/lib/webidl2.js' };
 

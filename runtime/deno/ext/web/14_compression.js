@@ -8,6 +8,7 @@
 (function () {
 const { core, primordials } = __bootstrap;
 const {
+  op_compression_check,
   op_compression_finish,
   op_compression_new,
   op_compression_write,
@@ -136,6 +137,10 @@ class DecompressionStream {
           chunk,
         );
         maybeEnqueue(controller, output);
+        // A chunk that decoded, then hit input after the end of the
+        // compressed data (or corrupt input): error the stream after its
+        // output, not at the next write, which may never come.
+        op_compression_check(rid);
       },
       flush(controller) {
         const output = op_compression_finish(rid, true);

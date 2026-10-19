@@ -515,6 +515,34 @@ test('decompression keeps the output before trailing garbage, then errors', asyn
   );
 });
 
+test('decompression: truncated input and input after the end are errors', async () => {
+  const decode = (format, mutate, close = true) => run(`(async () => {
+    const z = [];
+    for await (const c of new Blob(['hello']).stream().pipeThrough(new CompressionStream('${format}'))) z.push(...c);
+    const ds = new DecompressionStream('${format}');
+    const w = ds.writable.getWriter();
+    w.write(new Uint8Array(${mutate})).catch(() => {});
+    ${close ? 'w.close().catch(() => {});' : ''}
+    const r = ds.readable.getReader();
+    let text = '';
+    try {
+      for (;;) {
+        const { done, value } = await r.read();
+        if (done) return [text, 'done'];
+        text += new TextDecoder().decode(value);
+      }
+    } catch (e) {
+      return [text, e.name];
+    }
+  })()`);
+  for (const format of ['deflate', 'deflate-raw', 'gzip']) {
+    assert.deepEqual((await decode(format, 'z.slice(0, -1)'))[1], 'TypeError', `${format} truncated`);
+    // Without closing the writer: the error comes right after the output.
+    assert.deepEqual(await decode(format, '[...z, 0]', false), ['hello', 'TypeError'], `${format} extra input`);
+    assert.deepEqual(await decode(format, 'z'), ['hello', 'done'], format);
+  }
+});
+
 test('Blob.text() strips one UTF-8 byte order mark', async () => {
   assert.deepEqual(await run(`Promise.all([new Blob(['\ufeffA']).text(), new Blob(['\ufeff\ufeffB']).text()])`), ['A', '\ufeffB']);
 });

@@ -7,8 +7,15 @@
 //! abandoned one when its JS handle is collected). Output is bounded per
 //! call, so a decompression bomb fails with a TypeError instead of growing
 //! one buffer until the allocator gives up (which would abort the worker).
-//! A write that fails partway (trailing garbage after the end of a gzip
-//! member) returns what it decoded and fails the stream on the next call.
+//! A write that fails partway (input after the end of the compressed data)
+//! returns what it decoded, and the stream fails right after that output is
+//! enqueued (native.compressionCheck, from 14_compression.js's transform;
+//! see patches/deno-compression-errors.patch).
+//!
+//! Unlike Deno's, the deflate and deflate-raw decoders drive flate2's
+//! inflater directly, to know where the compressed data ends: input after
+//! the end is an error, and so is input that ends before it (flate2's
+//! write::ZlibDecoder accepts both), as the Compression Standard has it.
 
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -17,8 +24,8 @@ use std::io::Write;
 use brotli::enc::encode::{BrotliEncoderOperation, BrotliEncoderParameter, BrotliEncoderStateStruct};
 use brotli::enc::StandardAlloc;
 use brotli::DecompressorWriter as BrotliDecoder;
-use flate2::write::{DeflateDecoder, DeflateEncoder, GzDecoder, GzEncoder, ZlibDecoder, ZlibEncoder};
-use flate2::Compression;
+use flate2::write::{DeflateEncoder, GzDecoder, GzEncoder, ZlibEncoder};
+use flate2::{Compression, Decompress, FlushDecompress, Status};
 
 use super::{copy_bytes, new_u8array, string_arg, throw_type, Args, Rv};
 
@@ -85,10 +92,74 @@ impl RawBrotliEncoder {
     }
 }
 
+/// A zlib (deflate) or raw deflate decoder that knows where the compressed
+/// data ends.
+struct Inflater {
+    inflate: Decompress,
+    ended: bool,
+}
+
+fn invalid(msg: &str) -> std::io::Error {
+    std::io::Error::new(std::io::ErrorKind::InvalidData, msg.to_string())
+}
+
+impl Inflater {
+    fn new(zlib_header: bool) -> Self {
+        Inflater { inflate: Decompress::new(zlib_header), ended: false }
+    }
+
+    /// Decode `input` into `out`; an error after some output carries it
+    /// (PartialOutput), like the write decoders' errors.
+    fn write(&mut self, mut input: &[u8], flush: FlushDecompress) -> std::io::Result<Vec<u8>> {
+        let mut out = Vec::new();
+        let fail = |out: Vec<u8>, e: std::io::Error| {
+            if out.is_empty() {
+                e
+            } else {
+                std::io::Error::new(e.kind(), PartialOutput(out, e.to_string()))
+            }
+        };
+        loop {
+            if self.ended {
+                if input.is_empty() {
+                    return Ok(out);
+                }
+                return Err(fail(out, invalid("junk after the end of the compressed data")));
+            }
+            if out.capacity() - out.len() < 32 << 10 {
+                out.reserve(64 << 10);
+            }
+            let (in_before, out_before) = (self.inflate.total_in(), out.len());
+            let status = match self.inflate.decompress_vec(input, &mut out, flush) {
+                Ok(status) => status,
+                Err(e) => return Err(fail(out, invalid(&e.to_string()))),
+            };
+            let consumed = (self.inflate.total_in() - in_before) as usize;
+            input = &input[consumed..];
+            if status == Status::StreamEnd {
+                self.ended = true;
+                continue;
+            }
+            if out.len() > max_output() {
+                return Err(std::io::Error::other(format!("output larger than {} bytes", max_output())));
+            }
+            let full = out.len() == out.capacity();
+            let progressed = consumed > 0 || out.len() > out_before;
+            if !full && (input.is_empty() || !progressed) {
+                break; // needs more input
+            }
+        }
+        if flush == FlushDecompress::Finish && !self.ended {
+            return Err(fail(out, invalid("the compressed data ends early")));
+        }
+        Ok(out)
+    }
+}
+
 enum Inner {
-    DeflateDecoder(ZlibDecoder<Vec<u8>>),
+    DeflateDecoder(Inflater),
     DeflateEncoder(ZlibEncoder<Vec<u8>>),
-    DeflateRawDecoder(DeflateDecoder<Vec<u8>>),
+    DeflateRawDecoder(Inflater),
     DeflateRawEncoder(DeflateEncoder<Vec<u8>>),
     GzDecoder(GzDecoder<Vec<u8>>),
     GzEncoder(GzEncoder<Vec<u8>>),
@@ -113,9 +184,9 @@ pub fn compression_new(scope: &mut v8::PinScope, args: Args, mut rv: Rv) {
     let is_decoder = args.get(1).boolean_value(scope);
     let w = Vec::new();
     let inner = match (format.as_str(), is_decoder) {
-        ("deflate", true) => Inner::DeflateDecoder(ZlibDecoder::new(w)),
+        ("deflate", true) => Inner::DeflateDecoder(Inflater::new(true)),
         ("deflate", false) => Inner::DeflateEncoder(ZlibEncoder::new(w, Compression::default())),
-        ("deflate-raw", true) => Inner::DeflateRawDecoder(DeflateDecoder::new(w)),
+        ("deflate-raw", true) => Inner::DeflateRawDecoder(Inflater::new(false)),
         ("deflate-raw", false) => Inner::DeflateRawEncoder(DeflateEncoder::new(w, Compression::default())),
         ("gzip", true) => Inner::GzDecoder(GzDecoder::new(w)),
         ("gzip", false) => Inner::GzEncoder(GzEncoder::new(w, Compression::default())),
@@ -148,9 +219,9 @@ fn write_slice(inner: &mut Inner, input: &[u8]) -> std::io::Result<Vec<u8>> {
         }
     }
     match inner {
-        Inner::DeflateDecoder(d) => drain(d, true, input, |d| d.get_mut()),
+        Inner::DeflateDecoder(d) => d.write(input, FlushDecompress::None),
         Inner::DeflateEncoder(d) => drain(d, false, input, |d| d.get_mut()),
-        Inner::DeflateRawDecoder(d) => drain(d, true, input, |d| d.get_mut()),
+        Inner::DeflateRawDecoder(d) => d.write(input, FlushDecompress::None),
         Inner::DeflateRawEncoder(d) => drain(d, false, input, |d| d.get_mut()),
         Inner::GzDecoder(d) => drain(d, true, input, |d| d.get_mut()),
         Inner::GzEncoder(d) => drain(d, false, input, |d| d.get_mut()),
@@ -236,9 +307,9 @@ pub fn compression_finish(scope: &mut v8::PinScope, args: Args, mut rv: Rv) {
         }
     };
     let out = match inner {
-        Inner::DeflateDecoder(d) => d.finish(),
+        Inner::DeflateDecoder(mut d) => d.write(&[], FlushDecompress::Finish),
         Inner::DeflateEncoder(d) => d.finish(),
-        Inner::DeflateRawDecoder(d) => d.finish(),
+        Inner::DeflateRawDecoder(mut d) => d.write(&[], FlushDecompress::Finish),
         Inner::DeflateRawEncoder(d) => d.finish(),
         Inner::GzDecoder(d) => d.finish(),
         Inner::GzEncoder(d) => d.finish(),
@@ -252,6 +323,26 @@ pub fn compression_finish(scope: &mut v8::PinScope, args: Args, mut rv: Rv) {
         Ok(_) if report => throw_type(scope, &format!("output larger than {} bytes", max_output())),
         Err(e) if report => throw_type(scope, &e.to_string()),
         _ => rv.set(new_u8array(scope, &[]).into()),
+    }
+}
+
+/// native.compressionCheck(id): throws if the last write failed after its
+/// output (which the caller has enqueued by now).
+pub fn compression_check(scope: &mut v8::PinScope, args: Args, _rv: Rv) {
+    let id = args.get(0).uint32_value(scope).unwrap_or(0);
+    let failed = STREAMS.with(|s| {
+        let mut s = s.borrow_mut();
+        match s.get(&id) {
+            Some(Entry::Failed(e)) => {
+                let e = e.clone();
+                s.remove(&id);
+                Some(e)
+            }
+            _ => None,
+        }
+    });
+    if let Some(e) = failed {
+        throw_type(scope, &e);
     }
 }
 

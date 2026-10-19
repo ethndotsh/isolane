@@ -395,6 +395,7 @@ fn native_fns() -> Natives {
         "compressionNew" => compression::compression_new,
         "compressionWrite" => compression::compression_write,
         "compressionFinish" => compression::compression_finish,
+        "compressionCheck" => compression::compression_check,
         "compressionFree" => compression::compression_free,
         "timerNow" => timers::timer_now,
         "timerState" => timers::timer_state,

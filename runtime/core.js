@@ -480,6 +480,10 @@
     op_compression_finish(handle, reportErrors) {
       return native.compressionFinish(handle.id, reportErrors);
     },
+    // Not Deno's: see patches/deno-compression-errors.patch.
+    op_compression_check(handle) {
+      native.compressionCheck(handle.id);
+    },
   };
 
   // A macrotask: resolves when a 0 ms timer fires.
