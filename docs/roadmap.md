@@ -29,7 +29,7 @@ Agreed October 2026:
 2. **The rest of the web platform**:
    - `crypto.subtle` (done; draft algorithms remain, section 3);
    - `URLPattern` (the last missing Minimum Common API global; Deno's `01_urlpattern.js` on the `urlpattern` crate);
-   - ~~`connect()` as the Sockets API~~ done: see section 2. Left: switch the Postgres test to SCRAM-SHA-256 auth once `crypto.subtle` lands (it runs with `trust` auth today);
+   - ~~`connect()` as the Sockets API~~ done: see section 2, and the Postgres test authenticates with SCRAM-SHA-256 (postgres.js on `crypto.subtle`);
    - the web snapshot built into the binary and a pool of pre-created web isolates, so `web` can default to on;
    - fair CPU accounting for timers;
    - test262;

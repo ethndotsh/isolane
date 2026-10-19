@@ -28,12 +28,13 @@ jobs:
       CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUSTFLAGS: -C link-arg=-fuse-ld=lld
       CARGO_INCREMENTAL: '0'
     # For test/postgres.test.mjs: postgres.js from a guest, over connect().
-    # Trust auth until crypto.subtle lands (postgres.js's SCRAM uses it).
+    # Password auth, which the image makes SCRAM-SHA-256: postgres.js does
+    # SCRAM with crypto.subtle (PBKDF2, HMAC, SHA-256) in the guest.
     services:
       postgres:
         image: postgres:17
         env:
-          POSTGRES_HOST_AUTH_METHOD: trust
+          POSTGRES_PASSWORD: isolane-test
         ports: ['5432:5432']
         options: --health-cmd pg_isready --health-interval 5s --health-timeout 5s --health-retries 20
     steps:
@@ -154,7 +155,7 @@ jobs:
         env:
           ISOLANE_WORKER: ${{ runner.temp }}/isolane-worker
           ISOLANE_STRICT: '1'
-          ISOLANE_PG_URL: postgres://postgres@localhost:5432/postgres
+          ISOLANE_PG_URL: postgres://postgres:isolane-test@localhost:5432/postgres
         run: node --test --test-reporter=spec $(ls test/*.test.mjs | grep -v lockdown)
 
       # web-platform-tests as a per-subtest gate (test/wpt/expectations.json),

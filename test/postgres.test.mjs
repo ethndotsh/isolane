@@ -1,6 +1,8 @@
 // postgres.js (its Cloudflare Workers build) from guest code, over
 // connect(): the Sockets API against a real Postgres. Needs ISOLANE_WORKER
-// and ISOLANE_PG_URL (postgres://user@host:port/db); skipped without it.
+// and ISOLANE_PG_URL (postgres://user:password@host:port/db); skipped
+// without it. With a password, Postgres authenticates with SCRAM-SHA-256,
+// which postgres.js does in the guest with crypto.subtle.
 //
 // Guest code can't import modules yet, so the test bundles postgres.js
 // with esbuild, as a Workers deployment would be: `cloudflare:sockets` is
