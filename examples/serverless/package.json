@@ -2,12 +2,22 @@
   "name": "isolane-example-serverless",
   "private": true,
   "type": "module",
+  "engines": {
+    "node": ">= 22.18"
+  },
   "scripts": {
-    "platform": "node platform.mjs",
-    "deploy": "node deployer.mjs"
+    "platform": "node src/platform.ts",
+    "deploy": "node src/deployer.ts",
+    "typecheck": "tsc -p . && tsc -p app"
   },
   "dependencies": {
     "isolane": "file:../..",
-    "ws": "^8.18.0"
+    "ws": "^8.18.0",
+    "zod": "^4.1.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.18.0",
+    "@types/ws": "^8.18.0",
+    "typescript": "^5.9.0"
   }
 }
