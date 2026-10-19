@@ -28,6 +28,7 @@ Agreed October 2026:
 1. **Web conformance pass** (done but for the ada decision): close the WPT gaps, using Deno wherever it is ahead.
 2. **The rest of the web platform**:
    - `crypto.subtle`;
+   - `URLPattern` (the last missing Minimum Common API global; Deno's `01_urlpattern.js` on the `urlpattern` crate);
    - `connect()` as the Sockets API (Cloudflare's, also a WinterTC draft): a `Socket` with `readable`/`writable` streams, `opened`/`closed`, `startTls()`, and `secureTransport: 'off' | 'on' | 'starttls'`. Today it's `{ read, write, close }` with no STARTTLS. Goal: postgres.js's `cf` build talks to Postgres from a guest. That also needs `crypto.subtle` for SCRAM-SHA-256, plus, until ES modules land, a bundle that aliases `cloudflare:sockets`, `node:events` and `node:buffer`. Add a Postgres end-to-end test in CI;
    - the web snapshot built into the binary and a pool of pre-created web isolates, so `web` can default to on;
    - fair CPU accounting for timers;
@@ -99,6 +100,12 @@ Agreed October 2026:
 | Host functions get call context (tenant, VM, abort signal) | done |
 | UDP sockets | idea |
 | KV / cache / queue capabilities as policies (Workers-style bindings) | idea |
+| Cloudflare Workers parity, beyond WinterTC (ignoring Node compat and npm). Done: the isolate-per-request model, frozen time, limits, policy-checked `fetch`. Coming with deployments: `export default { fetch, scheduled, queue }` handlers, `ctx.waitUntil`/`passThroughOnException`, Workers-shaped `env` bindings | planned (with deployments) |
+| `WebSocket` client (through the broker, under the `fetch`/`connect` policy) and `WebSocketPair` for handlers that accept WebSockets | planned |
+| Cache API (`caches.default`, `caches.open`) backed by host functions or a supervisor-side store, per tenant | planned |
+| `HTMLRewriter` on `lol-html` (Rust, the library Cloudflare uses), streaming over `Response` bodies | planned |
+| Small Workers extras: `crypto.DigestStream`, `crypto.subtle.timingSafeEqual`, `scheduler.wait`, `navigator.hardwareConcurrency` | planned (after `crypto.subtle`) |
+| Durable Objects-style stateful actors (see celld) | idea |
 
 ## 3. WinterTC compatibility
 
