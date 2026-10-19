@@ -103,6 +103,7 @@ jobs:
           npm ci
           npx tsc
           npm run typecheck
+          (cd examples/serverless && npm ci && npm run typecheck)
 
       - name: Lockdown tests
         env:
