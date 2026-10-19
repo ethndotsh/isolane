@@ -259,6 +259,10 @@ environment 49, bug 177. Under wptserve, the fixes below took the run from
 | `vm.call(name, ...args)` for stateful isolates (call an exported/global function with schema-checked args) | idea |
 | **Deployments with user-defined entrypoints** (Workers-style, customizable): `tenant.deploy(code, { entrypoints: ['fetch', 'scheduled', 'onMessage', ...] })` evaluates the module once (its "cold start": top-level code, user-defined init), then `deployment.invoke(name, ...args)` calls an exported handler in a warm isolate. Host-defined handler names and argument shapes (`fetch(request, env, ctx)` is just one preset); warm-isolate pool per deployment with `minWarm`/`maxIsolates`/`idleMs`; `isolation: 'per-invoke' \| 'reuse'` (reuse keeps module state between invocations, like Workers); cold-start hooks (`onColdStart`); V8 code cache per deployment so re-creating an isolate skips parsing | planned |
 
+### Web conformance pass (in progress, before new features)
+
+Decided (October 2026): close the known WPT gaps before expanding features, using Deno wherever it has the better implementation. First compare against Deno's own WPT expectations, then: `data:` URLs via the `data-url` crate; Deno's MessageChannel (and structuredClone transfer); Deno's compression semantics; newer Deno fixes or our own for the vendored-code edge cases (structured clone, body, Request attributes, streams, events, SRI); evaluate `ada-url` for URL parsing; stream request bodies through the broker; confirm the encoding edge case is upstream.
+
 ### Errors and stack traces
 
 Checked on the dev build (October 2026): a guest throw gives a correct stack but with `<anonymous>` as the file; a SyntaxError has no location at all; a host function that throws gives the guest an Error whose stack has **no guest frames** (it's created when the reply arrives, not at the call site); `cause` chains are dropped.
