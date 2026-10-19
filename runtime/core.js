@@ -340,6 +340,8 @@
   const decoders = new FinalizationRegistry((id) => native.freeDecoder(id));
   const ops = ObjectFreeze(
     ObjectAssign(ObjectCreate(null), rawOps, blobOps, compressionOps, { op_encode_binary_string, op_defer }, {
+      // (No op_http_new_response_native_headers / op_http_drop_response_native:
+      // 23_response.js skips Deno.serve's native responses when they're absent.)
       op_encoding_new_decoder(label, fatal, ignoreBOM) {
         const id = native.newDecoder(label, fatal, ignoreBOM);
         const handle = ObjectFreeze({ __proto__: null, id });
@@ -364,6 +366,11 @@
       markNotSerializable: native.markNotSerializable,
       MessagePortPrototype: ObjectFreeze(ObjectCreate(null)),
     }),
+    // No document location: relative URLs in Request/Response.redirect throw,
+    // as in a worker without a base URL.
+    "ext:deno_web/12_location.js": ObjectFreeze({ getLocationHref: () => undefined }),
+    // Deno.HttpClient doesn't exist here, so no RequestInit.client is valid.
+    "ext:deno_fetch/22_http_client.js": ObjectFreeze({ HttpClientPrototype: ObjectFreeze(ObjectCreate(null)) }),
   };
 
   const loaded = new SafeMap();

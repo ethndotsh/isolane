@@ -6,10 +6,19 @@
 import { spawn, type ChildProcessByStdio } from 'node:child_process';
 import type { Readable, Writable } from 'node:stream';
 
+import type { PathSegment } from './binary.js';
 import type { GuestErrorInfo } from './errors.js';
 
 /** Largest frame accepted from a worker (matches the worker's own cap). */
 export const MAX_FRAME = 64 << 20;
+
+/**
+ * A frame body is UTF-8 JSON (starting with `{`), or bytes attached to
+ * JSON: a 0x00 tag, a u32 little-endian JSON length, the JSON, then raw
+ * bytes that the JSON's `bin` field claims, all of them, in order.
+ */
+const BINARY_TAG = 0;
+const BINARY_HEADER = 5;
 
 /** Time a fresh worker has to initialize V8 and report ready. */
 const READY_TIMEOUT_MS = 10_000;
@@ -69,10 +78,36 @@ function parseGuestError(raw: unknown): GuestErrorInfo | undefined {
   return info;
 }
 
-/** Validate a decoded frame's shape; null if it isn't a message we accept. */
-export function parseWorkerMessage(raw: unknown): WorkerMessage | null {
+/**
+ * A host call's byte arguments: `bin` is `[argument index, length]` pairs,
+ * the bytes follow in that order, and `args` has null at each index. Null
+ * unless every byte is claimed exactly once and every index is valid.
+ */
+function attachArgs(args: unknown[], bin: unknown, bytes: Buffer): unknown[] | null {
+  if (!Array.isArray(bin) || bin.length === 0 || bin.length > args.length) return null;
+  const out = args.slice();
+  const used = new Set<number>();
+  let offset = 0;
+  for (const entry of bin) {
+    if (!Array.isArray(entry) || entry.length !== 2) return null;
+    const [index, len] = entry as unknown[];
+    if (!isUint(index) || !isUint(len) || index >= args.length || used.has(index) || args[index] !== null) return null;
+    if (len > bytes.length - offset) return null;
+    used.add(index);
+    out[index] = bytes.subarray(offset, offset + len);
+    offset += len;
+  }
+  return offset === bytes.length ? out : null;
+}
+
+/** Validate a decoded frame's shape; null if it isn't a message we accept.
+ * `bytes` are the frame's attached bytes, if it is a binary frame: only a
+ * host call may have them, and it must claim them all. */
+export function parseWorkerMessage(raw: unknown, bytes?: Buffer): WorkerMessage | null {
   if (raw === null || typeof raw !== 'object') return null;
   const m = raw as Record<string, unknown>;
+  if (m.bin !== undefined && (m.t !== 'hostCall' || bytes === undefined)) return null;
+  if (bytes !== undefined && m.t !== 'hostCall') return null;
   switch (m.t) {
     case 'ready': {
       const l = m.lockdown as Record<string, unknown> | null;
@@ -93,10 +128,11 @@ export function parseWorkerMessage(raw: unknown): WorkerMessage | null {
       return { t: 'result', req: m.req, ok: false, code: m.code, message: m.message, guest: parseGuestError(m.guest), ...parseUsage(m) };
     case 'usage':
       return isUint(m.vm) ? { t: 'usage', vm: m.vm, ...parseUsage(m) } : null;
-    case 'hostCall':
-      return isUint(m.vm) && isUint(m.call) && typeof m.name === 'string' && Array.isArray(m.args)
-        ? { t: 'hostCall', vm: m.vm, call: m.call, name: m.name, args: m.args }
-        : null;
+    case 'hostCall': {
+      if (!(isUint(m.vm) && isUint(m.call) && typeof m.name === 'string' && Array.isArray(m.args))) return null;
+      const args = bytes === undefined ? m.args : attachArgs(m.args, m.bin, bytes);
+      return args ? { t: 'hostCall', vm: m.vm, call: m.call, name: m.name, args } : null;
+    }
     case 'log':
       return isUint(m.vm) && typeof m.level === 'string' && LOG_LEVELS.has(m.level) && typeof m.message === 'string'
         ? { t: 'log', vm: m.vm, level: m.level as LogLevel, message: m.message }
@@ -214,7 +250,18 @@ export class WorkerProcess {
         this.#buf = this.#buf.subarray(4 + len);
         let msg: WorkerMessage | null;
         try {
-          msg = parseWorkerMessage(JSON.parse(body.toString('utf8')));
+          if (body[0] === BINARY_TAG) {
+            if (body.length < BINARY_HEADER) throw new Error('truncated binary frame');
+            const jsonLen = body.readUInt32LE(1);
+            if (jsonLen > body.length - BINARY_HEADER) throw new Error('binary frame JSON overruns the frame');
+            const json = body.subarray(BINARY_HEADER, BINARY_HEADER + jsonLen).toString('utf8');
+            // Copied: host functions may keep these bytes, and they shouldn't
+            // keep the rest of the stream's buffer alive.
+            const bytes = Buffer.from(body.subarray(BINARY_HEADER + jsonLen));
+            msg = parseWorkerMessage(JSON.parse(json), bytes);
+          } else {
+            msg = parseWorkerMessage(JSON.parse(body.toString('utf8')));
+          }
         } catch {
           msg = null;
         }
@@ -262,12 +309,27 @@ export class WorkerProcess {
     return this.#child.pid;
   }
 
-  send(msg: object): void {
+  /** Send a message, with `attached` bytes after its JSON (a binary frame). */
+  send(msg: object, attached: Uint8Array[] = []): void {
     if (!this.#alive) return;
-    const body = Buffer.from(JSON.stringify(msg, wellFormed), 'utf8');
-    const header = Buffer.alloc(4);
-    header.writeUInt32LE(body.length, 0);
-    this.#child.stdin.write(Buffer.concat([header, body]));
+    const json = Buffer.from(JSON.stringify(msg, wellFormed), 'utf8');
+    if (attached.length === 0) {
+      const header = Buffer.alloc(4);
+      header.writeUInt32LE(json.length, 0);
+      this.#child.stdin.write(Buffer.concat([header, json]));
+      return;
+    }
+    const bytes = attached.reduce((n, b) => n + b.length, 0);
+    const header = Buffer.alloc(4 + BINARY_HEADER);
+    header.writeUInt32LE(BINARY_HEADER + json.length + bytes, 0);
+    header[4] = BINARY_TAG;
+    header.writeUInt32LE(json.length, 5);
+    this.#child.stdin.write(Buffer.concat([header, json, ...attached]));
+  }
+
+  /** Whether a message of `json` bytes plus `attached` bytes fits in a frame. */
+  static fits(json: number, attached: number): boolean {
+    return json + attached + (attached > 0 ? BINARY_HEADER : 0) <= MAX_FRAME;
   }
 
   kill(reason: 'killed' | 'unresponsive' = 'killed', detail = 'killed by supervisor'): void {

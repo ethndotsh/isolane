@@ -6,6 +6,7 @@
 import { resolve as resolvePath } from 'node:path';
 
 import { capabilities, type FsPolicy, type NetworkPolicy, type SocketPolicy } from './capabilities.js';
+import { splitBytes, type BinaryPart } from './binary.js';
 import { IsolaneError, invalidOption, isIsolaneErrorCode, type IsolaneErrorCode } from './errors.js';
 import { checkResult, describeIssues, isStandardSchema, validate, type StandardSchemaV1 } from './schema.js';
 import {
@@ -673,9 +674,10 @@ class TenantWorker {
     }
     // hostCall
     this.#usage.hostCalls++;
-    const reply = (ok: boolean, value?: string, err?: unknown) => {
+    const reply = (ok: boolean, value?: string, err?: unknown, parts: BinaryPart[] = []) => {
       const frame: Record<string, unknown> = { t: 'hostReply', vm: msg.vm, call: msg.call, ok };
       if (value !== undefined) frame.value = value; // JSON text; absent = undefined
+      if (parts.length) frame.bin = parts.map((p) => [p.path, p.bytes.length]);
       if (!ok) {
         frame.error = err instanceof Error ? err.message : String(err);
         // The guest sees the same class (TypeError, ...) and Node-style code.
@@ -683,18 +685,28 @@ class TenantWorker {
         const code = (err as { code?: unknown } | null)?.code;
         if (typeof code === 'string') frame.errorCode = code;
       }
-      this.#proc.send(frame);
+      this.#proc.send(
+        frame,
+        parts.map((p) => p.bytes),
+      );
     };
     const fail = (err: unknown) => reply(false, undefined, err);
     const succeed = (result: unknown) => {
-      let json: string | undefined;
+      // Bytes in the result (Buffers, typed arrays, ArrayBuffers) cross as
+      // raw bytes and arrive as Uint8Arrays; everything else as JSON.
+      let split;
       try {
-        json = JSON.stringify(result);
+        split = splitBytes(result);
       } catch (err) {
         fail(new Error(`host function ${msg.name} returned a non-JSON value: ${(err as Error).message}`));
         return;
       }
-      reply(true, json);
+      const bytes = split.parts.reduce((n, p) => n + p.bytes.length, 0);
+      if (!WorkerProcess.fits((split.json?.length ?? 0) * 3 + 1024, bytes)) {
+        fail(new RangeError(`host function ${msg.name} returned more than 64 MiB`));
+        return;
+      }
+      reply(true, split.json, undefined, split.parts);
     };
     const fn = Object.hasOwn(this.#hostFunctions.get(msg.vm) ?? {}, msg.name)
       ? this.#hostFunctions.get(msg.vm)![msg.name]

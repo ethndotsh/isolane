@@ -6,12 +6,16 @@
 //
 // Each test file gets a fresh isolate: testharness.js, its META scripts, the
 // test, then done(). Code generation is on (idlharness.js uses eval).
-// Harness-only scaffolding (not part of the platform): fetch() that reads
-// WPT files (until phase 3 brings the real one), and a `location` for subset
-// tests. Timers are the platform's own. Files that only run in a window
-// (META global=window) are skipped.
+// WPT files are served by a static HTTP server on localhost, and isolates
+// fetch them with the platform's own fetch() under a network policy that
+// allows it. WPT's Python handlers (.py) don't run here: tests that need
+// them fail. Harness-only scaffolding: a `location`, and fetch() resolving
+// relative URLs against it (the platform has no base URL; `new Request` with
+// a relative URL throws, as in a worker without one). Files that only run
+// in a window (META global=window) are skipped.
 import { execFileSync } from 'node:child_process';
 import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs';
+import { createServer } from 'node:http';
 import { tmpdir } from 'node:os';
 import { dirname, join, posix, relative } from 'node:path';
 import { Runtime } from '../dist/index.js';
@@ -37,10 +41,15 @@ const DIRS = [
   'compression',
   'WebCryptoAPI/getRandomValues.any.js',
   'WebCryptoAPI/randomUUID.https.any.js',
+  'fetch/api/headers',
+  'fetch/api/request',
+  'fetch/api/response',
+  'fetch/api/body',
+  'xhr/formdata',
 ];
 
 // Shared files the tests load (harness, IDL, data).
-const SUPPORT = ['/resources', '/common', '/interfaces', '/fetch/data-urls/resources', '/FileAPI/support'];
+const SUPPORT = ['/resources', '/common', '/interfaces', '/fetch/data-urls/resources', '/FileAPI/support', '/fetch/api/resources'];
 // Paths the WPT server serves under another name.
 const ALIASES = { '/resources/WebIDLParser.js': '/resources/webidl2/lib/webidl2.js' };
 
@@ -85,6 +94,21 @@ const selected = files.filter((f) => !filter || f.includes(filter));
 
 const harness = readFileSync(join(root, 'resources/testharness.js'), 'utf8');
 
+// The WPT checkout over HTTP (static files only).
+const TYPES = { '.js': 'text/javascript', '.json': 'application/json', '.html': 'text/html', '.txt': 'text/plain', '.png': 'image/png' };
+const server = createServer((req, res) => {
+  const path = decodeURIComponent(new URL(req.url, 'http://x').pathname);
+  const full = join(root, path);
+  if (!full.startsWith(root) || path.endsWith('.py') || !existsSync(full) || !statSync(full).isFile()) {
+    res.writeHead(404).end();
+    return;
+  }
+  const ext = path.slice(path.lastIndexOf('.'));
+  res.writeHead(200, { 'content-type': TYPES[ext] ?? 'application/octet-stream' }).end(readFileSync(full));
+});
+await new Promise((r) => server.listen(0, '127.0.0.1', r));
+const origin = `http://localhost:${server.address().port}`;
+
 /** META comments at the top of a test file. */
 function meta(source) {
   const out = { scripts: [], globals: null, timeout: 'normal' };
@@ -114,10 +138,10 @@ const SETUP = `
     globalThis.setTimeout = (fn, ms = 0, ...a) => { const id = __nextTimer++; __wpt_sleep(Math.min(Number(ms) || 0, 30000)).then(() => { if (!__cancelled.has(id)) typeof fn === "function" && fn(...a); }); return id; };
     globalThis.clearTimeout = (id) => __cancelled.add(id);
   }
-  globalThis.fetch = async (url) => {
-    const r = await __wpt_read(String(url));
-    if (r === null) return { ok: false, status: 404, async json() { throw new TypeError("not found"); }, async text() { return ""; } };
-    return { ok: true, status: 200, async json() { return JSON.parse(r); }, async text() { return r; } };
+  // fetch() with relative URLs, against the test's location.
+  const __fetch = fetch;
+  globalThis.fetch = function fetch(input, init) {
+    return __fetch(typeof input === "string" ? new URL(input, __wpt_url).href : input, init);
   };
 `;
 
@@ -161,15 +185,10 @@ async function runFile(file, lane) {
     allowCodeGeneration: true, // idlharness.js evals
     timeoutMs: m.timeout === 'long' ? 60000 : 20000,
     memoryLimitBytes: 256 << 20,
-    globals: { __wpt_url: `https://wpt.example/${rel}`, __wpt_path: `/${rel}` },
+    globals: { __wpt_url: `${origin}/${rel}`, __wpt_path: `/${rel}` },
+    network: { allow: ['localhost'], allowPrivateNetworks: true, maxRequests: 10_000 },
     hostFunctions: {
       __wpt_sleep: (ms) => new Promise((r) => setTimeout(r, ms)),
-      __wpt_read: (url) => {
-        const path = url.replace(/^https?:\/\/[^/]+/, '').split(/[?#]/)[0];
-        const full = resolveWpt(path);
-        if (!full.startsWith(root) || !existsSync(full)) return null;
-        return readFileSync(full, 'utf8');
-      },
     },
   });
     step = 'setup';
@@ -220,6 +239,7 @@ await Promise.all(
   }),
 );
 runtime.close();
+server.close();
 
 const total = { files: 0, skipped: 0, harnessErrors: 0, tests: 0, pass: 0, fail: 0, timeout: 0, notrun: 0, precondition: 0 };
 for (const r of Object.values(results)) for (const k of Object.keys(total)) total[k] += r[k];

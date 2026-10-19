@@ -326,6 +326,46 @@ test('host functions: sync, async, and errors', async () => {
   await assert.rejects(pool.run('add(1n, 2)', opts), code('ERR_GUEST_EXCEPTION'));
 });
 
+test('bytes cross host calls as bytes, both ways', async () => {
+  const seen = [];
+  const hostFunctions = {
+    take: (a, b, nested) => {
+      seen.push([Buffer.isBuffer(a), [...a], [...b], nested]);
+      return { echo: Buffer.concat([a, b]), list: [new Uint8Array([7]), 'x'], ab: new Uint8Array([5, 6]).buffer };
+    },
+    big: () => Buffer.alloc(3 << 20, 1),
+    whole: { sync: true, fn: (b) => b },
+  };
+  assert.deepEqual(
+    await pool.run(
+      `take(new Uint8Array([1, 2]), new Uint16Array([0x0403]).buffer, { n: 1 }).then((r) => [r.echo instanceof Uint8Array, [...r.echo], r.list[0] instanceof Uint8Array, [...r.list[0]], r.list[1], [...r.ab]])`,
+      { ...T, hostFunctions },
+    ),
+    [true, [1, 2, 3, 4], true, [7], 'x', [5, 6]],
+  );
+  assert.deepEqual(seen, [[true, [1, 2], [3, 4], { n: 1 }]]);
+  assert.equal(await pool.run('big().then((b) => b.length + b[100])', { ...T, hostFunctions }), (3 << 20) + 1);
+  assert.deepEqual(await pool.run('[...whole(new Uint8Array([9, 8]))]', { ...T, hostFunctions }), [9, 8]);
+  // Arguments past the frame limit throw in the guest instead of breaking the protocol.
+  // (synchronously, like any argument that can't be serialized).
+  assert.match(
+    await pool.run('try { take(new Uint8Array(65 << 20)); "sent" } catch (e) { e.name + ": " + e.message }', { ...T, hostFunctions }),
+    /RangeError: .*64 MiB/,
+  );
+});
+
+test('oversized results and error messages fail the eval, not the worker', async () => {
+  const events = [];
+  const rt = new Runtime({ strict: process.env.ISOLANE_STRICT === '1', onSecurityEvent: (e) => events.push(e) });
+  await assert.rejects(rt.run('"x".repeat(70 << 20)', T), code('ERR_NOT_SERIALIZABLE'));
+  const err = await rt.run('throw new Error("y".repeat(70 << 20))', T).catch((e) => e);
+  assert.equal(err.code, 'ERR_GUEST_EXCEPTION');
+  assert.ok(err.guest.message.length < 70 << 10);
+  assert.equal(await rt.run('1 + 1', T), 2);
+  assert.deepEqual(events, []);
+  rt.close();
+});
+
 test('host functions on a stateful vm', async () => {
   const log = [];
   const vm = pool.createIsolate({ ...T, hostFunctions: { log: (m) => void log.push(m) } });

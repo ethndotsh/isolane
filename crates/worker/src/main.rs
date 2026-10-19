@@ -225,13 +225,24 @@ fn serve(lock_down: bool, memory_limit: Option<u64>) -> ExitCode {
                 return ExitCode::from(4);
             }
         };
-        let msg: In = match serde_json::from_slice(&frame) {
+        let (json, attached) = match frame::split(&frame) {
+            Ok(parts) => parts,
+            Err(e) => {
+                eprintln!("isolane-worker: bad frame: {e}");
+                return ExitCode::from(4);
+            }
+        };
+        let msg: In = match serde_json::from_slice(json) {
             Ok(m) => m,
             Err(e) => {
                 eprintln!("isolane-worker: bad message: {e}");
                 return ExitCode::from(4);
             }
         };
+        if !attached.is_empty() && !matches!(msg, In::HostReply { .. }) {
+            eprintln!("isolane-worker: bad message: bytes attached to a message that takes none");
+            return ExitCode::from(4);
+        }
         match msg {
             In::Create {
                 vm,
@@ -286,9 +297,25 @@ fn serve(lock_down: bool, memory_limit: Option<u64>) -> ExitCode {
                     out.send(&Out::Result { req, ok: false, value: None, code: Some(f.code), message: Some(&f.message), guest: None, usage: Default::default() });
                 }
             }
-            In::HostReply { vm, call, ok, value, error, error_name, error_code } => {
+            In::HostReply { vm, call, ok, value, error, error_name, error_code, bin } => {
+                // The attached bytes, split as `bin` says, all of them.
+                let mut bytes = Vec::with_capacity(bin.len());
+                let mut rest = attached;
+                for (path, len) in bin {
+                    if len > rest.len() {
+                        eprintln!("isolane-worker: bad message: host reply bytes overrun the frame");
+                        return ExitCode::from(4);
+                    }
+                    let (b, r) = rest.split_at(len);
+                    bytes.push((path, b.to_vec()));
+                    rest = r;
+                }
+                if !rest.is_empty() {
+                    eprintln!("isolane-worker: bad message: unclaimed bytes in a host reply");
+                    return ExitCode::from(4);
+                }
                 if let Some(tx) = vms.get(&vm) {
-                    let reply = vm::Reply { ok, value, error, error_name, error_code };
+                    let reply = vm::Reply { ok, value, error, error_name, error_code, bytes };
                     let _ = tx.send(VmMsg::HostReply { call, reply });
                 }
             }
