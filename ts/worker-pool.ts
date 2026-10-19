@@ -421,10 +421,12 @@ export class TenantWorker {
     const state = this.#isolates.get(msg.vm);
     if (msg.t === 'log') {
       if (!state) return;
-      // The worker cuts long lines; a worker that didn't is cut here too.
+      // The worker cuts long lines; a worker that didn't is cut here too
+      // (leaving room for the worker's own notices).
       let message = msg.message;
-      if (Buffer.byteLength(message) > state.logLineBytes + 3) {
-        message = `${Buffer.from(message).subarray(0, state.logLineBytes).toString('utf8').replace(/\uFFFD$/, '')}…`;
+      const max = Math.max(state.logLineBytes, 1024);
+      if (Buffer.byteLength(message) > max + 3) {
+        message = `${Buffer.from(message).subarray(0, max).toString('utf8').replace(/\uFFFD$/, '')}…`;
       }
       this.#usage.logBytes += message.length;
       state.chain.emit('log', { tenant: this.tenant, isolate: msg.vm, level: msg.level, message, source: 'guest' });
