@@ -67,8 +67,19 @@ const pick = (a) => a[Math.floor(rand() * a.length)];
 const weird = () =>
   pick([null, true, -1, 0, 1.5, 2 ** 53, -(2 ** 63), NaN, '', 'x'.repeat(1 + Math.floor(rand() * 5000)), [], {}, { __proto__: { a: 1 } }, '$req', '$vm', '\u0000', '\ud800', [[[[[]]]]]]);
 const values = () => pick([undefined, '1', 'null', '"s"', '{"a":[1,2]}', '{', '1e999', '"\\ud800"', JSON.stringify('x'.repeat(10000))]);
+function guestError(depth) {
+  if (rand() < 0.15) return weird();
+  const g = { message: rand() < 0.9 ? 'boom' : weird() };
+  if (rand() < 0.5) g.name = pick(['Error', 'TypeError', weird()]);
+  if (rand() < 0.5) g.stack = pick(['Error: boom\n    at f (x.js:1:2)\n    at ext:deno_web/x.js:3:4', '    at (((:1:2)', 'at', weird()]);
+  if (rand() < 0.2) g.location = pick([{ file: 'x.js', line: 1, column: 2, sourceLine: 'x' }, { file: 1, line: -1 }, weird()]);
+  if (rand() < 0.3 && depth < 12) g.cause = guestError(depth + 1);
+  if (rand() < 0.2 && depth < 2) g.errors = rand() < 0.8 ? Array.from({ length: Math.floor(rand() * 20) }, () => guestError(depth + 1)) : weird();
+  if (rand() < 0.2) g.properties = pick([{ code: 'E' }, { __proto__: { x: 1 } }, [], weird()]);
+  return g;
+}
 function message() {
-  const t = pick(['result', 'result', 'hostCall', 'ready', 'bogus', weird()]);
+  const t = pick(['result', 'result', 'hostCall', 'guestError', 'ready', 'bogus', weird()]);
   const m = { t };
   if (rand() < 0.9) m.req = rand() < 0.7 ? '$req' : weird();
   if (rand() < 0.5) m.vm = rand() < 0.7 ? '$vm' : weird();
@@ -79,6 +90,9 @@ function message() {
   if (rand() < 0.2) m.shim = pick([{ phase: 'after', index: 0 }, { phase: 'before', index: 7 }, { phase: 'constructor', index: 0 }, weird()]);
   if (rand() < 0.2) m.limit = pick(['timeoutMs', 'heapBytes', 'nope', weird()]);
   if (rand() < 0.4) m.message = weird();
+  // Guest errors (in results and guestError frames): nested, malformed, deep.
+  if (rand() < 0.3) m.guest = guestError(0);
+  if (t === 'guestError' && rand() < 0.8) m.kind = pick(['exception', 'rejection', 'nope', weird()]);
   if (t === 'hostCall') {
     m.call = rand() < 0.7 ? Math.floor(rand() * 5) : weird();
     m.fn = pick([0, 0, 1, -1, 1.5, '0', 2 ** 32, weird()]);
@@ -134,7 +148,7 @@ function binStep() {
 
 function plan() {
   const ready = rand() < 0.9
-    ? { t: 'ready', protocol: rand() < 0.95 ? 2 : pick([1, 3, '2', weird()]), v8: 'fake', sandboxSecure: true, lockdown: { landlock: 'full', seccomp: 'full' } }
+    ? { t: 'ready', protocol: rand() < 0.95 ? 3 : pick([1, 2, '3', weird()]), v8: 'fake', sandboxSecure: true, lockdown: { landlock: 'full', seccomp: 'full' } }
     : message();
   const steps = Array.from({ length: 1 + Math.floor(rand() * 4) }, () => {
     const r = rand();
