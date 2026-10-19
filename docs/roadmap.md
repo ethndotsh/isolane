@@ -377,6 +377,7 @@ Measured against isolated-vm (Linux x64 under Rosetta; re-measure natively):
 | Measured: a V8 patch bump (15.2.124.1 → .45) is close to a full rebuild on a 2-core runner — patch releases touch widely included headers, so most objects really are stale | done |
 | V8 build speed: decided (October 2026) to accept the free 4-core public-repo runners. Code-only pushes take ~5 min (cached V8); V8 patch bumps (~30–40 min) run unattended from the daily workflow; compiler-flag changes are full rebuilds (~1 h). Revisit with a self-hosted 16+ core runner or an org's larger runners if bumps start blocking anyone | done |
 | A prebuilt CI image (toolchain, libclang 21, strace) to drop the ~1 min of apt and setup per run | idea |
+| Build noise: rusty_v8 152's `isolate.rs` uses `AtomicUsize::fetch_update`, deprecated in Rust 1.97 (renamed `try_update`); goes away with a newer rusty_v8, or pin the CI toolchain. rusty_v8's "Not using sccache or ccache" note is informational (we cache V8 with the source manifest instead) | noted |
 | sccache for Rust dependencies once oxc and friends land (not for V8: patch bumps change shared headers, so per-object caching mostly misses) | planned |
 | Nightly-only Rust build speedups (parallel frontend `-Zthreads`, Cranelift for dev builds) if we ever move off stable | idea |
 
