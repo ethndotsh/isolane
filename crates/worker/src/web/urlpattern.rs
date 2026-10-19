@@ -55,7 +55,7 @@ fn input_arg(scope: &mut v8::PinScope, value: v8::Local<v8::Value>) -> Option<St
         return Some(StringOrInit::String(value.to_rust_string_lossy(scope)));
     }
     let obj = value.to_object(scope)?;
-    let mut field = |name: &str| -> Option<Option<String>> {
+    let field = |name: &str| -> Option<Option<String>> {
         let key = v8::String::new(scope, name)?;
         let v = obj.get(scope, key.into())?;
         Some(if v.is_null_or_undefined() { None } else { Some(v.to_rust_string_lossy(scope)) })
