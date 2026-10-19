@@ -102,10 +102,9 @@ Agreed October 2026:
 | KV / cache / queue capabilities as policies (Workers-style bindings) | idea |
 | Cloudflare Workers parity, beyond WinterTC (ignoring Node compat and npm). Done: the isolate-per-request model, frozen time, limits, policy-checked `fetch`. Coming with deployments: `export default { fetch, scheduled, queue }` handlers, `ctx.waitUntil`/`passThroughOnException`, Workers-shaped `env` bindings | planned (with deployments) |
 | `WebSocket` client (through the broker, under the `fetch`/`connect` policy) and `WebSocketPair` for handlers that accept WebSockets | planned |
-| Cache API (`caches.default`, `caches.open`) backed by host functions or a supervisor-side store, per tenant | planned |
-| `HTMLRewriter` on `lol-html` (Rust, the library Cloudflare uses), streaming over `Response` bodies | planned |
 | Small Workers extras: `crypto.DigestStream`, `crypto.subtle.timingSafeEqual`, `scheduler.wait`, `navigator.hardwareConcurrency` | planned (after `crypto.subtle`) |
 | Durable Objects-style stateful actors (see celld) | idea |
+| Not planned: the Cache API and `HTMLRewriter`. They're Cloudflare-specific, not WinterTC, and an application can provide either through host functions | decided |
 
 ## 3. WinterTC compatibility
 
