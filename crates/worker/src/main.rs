@@ -6,6 +6,7 @@
 //! process lockdown, for syscall tracing only; the worker then reports no
 //! lockdown and a strict supervisor refuses it.
 
+mod clock;
 mod frame;
 mod lockdown;
 mod proto;
@@ -38,8 +39,8 @@ unsafe extern "C" {
 /// V8 flags for untrusted code.
 /// - no `eval`/`new Function` (also refused per context)
 /// - no `SharedArrayBuffer` constructor (and the global is deleted)
-/// - no Temporal until clocks are frozen at the platform level: `Temporal.Now`
-///   reads the real clock
+/// - no Temporal: its clock is frozen like Date's (see `clock`), but it also
+///   exposes the host time zone and hasn't been audited yet
 const V8_FLAGS: &str = "--disallow-code-generation-from-strings \
     --enable-sharedarraybuffer-per-context \
     --no-harmony-temporal";
@@ -68,7 +69,9 @@ fn init_v8() {
     #[cfg(target_os = "linux")]
     v8::V8::set_entropy_source(entropy);
     v8::V8::set_flags_from_string(V8_FLAGS);
-    let platform = v8::new_default_platform(0, false).make_shared();
+    // Background threads for GC and compilation. Each tenant has its own
+    // process, so keep the pool small rather than one per core.
+    let platform = v8::Platform::new_with_clock(2, clock::platform_clock).make_shared();
     v8::V8::initialize_platform(platform);
     v8::V8::initialize();
 }

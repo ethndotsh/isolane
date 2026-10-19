@@ -113,10 +113,13 @@ code, the worker is treated as potentially compromised.
 
 - ECMAScript plus the application's host functions only.
 - No code generation from strings: `eval` and `new Function` throw.
-- No WebAssembly (`--no-expose-wasm`) at first.
+- No WebAssembly (the global is deleted and code generation is denied).
 - No `SharedArrayBuffer`, `Atomics.wait`, or guest threads.
-- **Frozen clocks:** `Date.now()` and `performance.now()` advance only at host
-  I/O events (host-function replies), never while guest code runs.
+- **Frozen clocks:** the wall clock (`Date`, `Intl`'s default "now",
+  `Temporal.Now`) advances only when an eval starts and when a host-function
+  reply arrives, never while guest code runs. It is the platform's
+  `CurrentClockTimeMillis` (a small rusty_v8 patch, `patches/`) reading a
+  per-VM-thread frozen time. There is no `performance` global.
 
 ### L1: V8 configuration
 

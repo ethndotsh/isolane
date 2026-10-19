@@ -158,6 +158,35 @@ test('no ambient host access', async () => {
 
 // ---- host functions ----
 
+test('the clock is frozen while guest code runs', async () => {
+  // A busy loop can't measure itself, by Date, Intl, or new Date().
+  const [elapsed, sameDate, sameIntl] = await pool.run(
+    `const fmt = new Intl.DateTimeFormat('en', { hour: 'numeric', minute: 'numeric', second: 'numeric', fractionalSecondDigits: 3, timeZone: 'UTC' });
+     const t0 = Date.now(), s0 = fmt.format();
+     let x = 0;
+     for (let i = 0; i < 3e7; i++) x += i;
+     [Date.now() - t0, new Date().getTime() === t0, fmt.format() === s0]`,
+    T,
+  );
+  assert.deepEqual([elapsed, sameDate, sameIntl], [0, true, true]);
+  const now = await pool.run('Date.now()', T);
+  assert.ok(Math.abs(now - Date.now()) < 1000, `guest clock ${now} is not the real time`);
+});
+
+test('the clock moves forward at I/O', async () => {
+  const hostFunctions = { wait: () => new Promise((r) => setTimeout(r, 50)) };
+  const elapsed = await pool.run('(async () => { const t0 = Date.now(); await wait(); return Date.now() - t0; })()', {
+    ...T,
+    hostFunctions,
+  });
+  assert.ok(elapsed >= 40, `clock moved ${elapsed}ms across a 50ms host call`);
+  const vm = pool.createVm(T);
+  const t0 = await vm.eval('globalThis.t0 = Date.now()');
+  await new Promise((r) => setTimeout(r, 50));
+  assert.ok((await vm.eval('Date.now()')) - t0 >= 40);
+  vm.dispose();
+});
+
 test('host functions: sync, async, and errors', async () => {
   const hostFunctions = {
     add: (a, b) => a + b,

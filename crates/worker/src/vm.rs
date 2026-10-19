@@ -167,6 +167,8 @@ fn apply_host_reply(
 ) {
     let bridge = scope.get_slot::<Rc<Bridge>>().expect("bridge slot").clone();
     let Some(resolver) = bridge.pending.borrow_mut().remove(&call) else { return };
+    // I/O completed: the guest's clock moves forward.
+    crate::clock::advance();
     let resolver = v8::Local::new(scope, resolver);
     if ok {
         let parsed = match &value {
@@ -278,6 +280,7 @@ fn eval(
         fail(ErrorCode::GuestException, msg)
     };
 
+    crate::clock::advance();
     let Some(source) = v8::String::new(tc, code) else {
         return EvalEnd::Done(Err(fail(ErrorCode::Internal, "source too large")));
     };

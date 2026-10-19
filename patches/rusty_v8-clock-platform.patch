@@ -1,0 +1,70 @@
+diff --git a/src/binding.cc b/src/binding.cc
+index bf44a8e..3438fd9 100644
+--- a/src/binding.cc
++++ b/src/binding.cc
+@@ -3352,6 +3352,27 @@ class UnprotectedDefaultPlatform : public v8::platform::DefaultPlatform {
+   }
+ };
+ 
++// A DefaultPlatform whose wall clock comes from the embedder: `clock` gets
++// the real time (ms since the epoch) and returns the time to report. This is
++// the clock behind Date, Intl's default "now", and Temporal.Now.
++class ClockPlatform final : public v8::platform::DefaultPlatform {
++ public:
++  ClockPlatform(int thread_pool_size, double (*clock)(double))
++      : v8::platform::DefaultPlatform(thread_pool_size), clock_(clock) {}
++
++  double CurrentClockTimeMillis() override {
++    return clock_(v8::platform::DefaultPlatform::CurrentClockTimeMillis());
++  }
++
++ private:
++  double (*clock_)(double);
++};
++
++v8::Platform* v8__Platform__NewClockPlatform(int thread_pool_size,
++                                             double (*clock)(double)) {
++  return new ClockPlatform(thread_pool_size, clock);
++}
++
+ v8::Platform* v8__Platform__NewDefaultPlatform(int thread_pool_size,
+                                                bool idle_task_support) {
+   return v8::platform::NewDefaultPlatform(
+diff --git a/src/platform.rs b/src/platform.rs
+index d501f87..da2022a 100644
+--- a/src/platform.rs
++++ b/src/platform.rs
+@@ -19,6 +19,10 @@ unsafe extern "C" {
+     thread_pool_size: int,
+     idle_task_support: bool,
+   ) -> *mut Platform;
++  fn v8__Platform__NewClockPlatform(
++    thread_pool_size: int,
++    clock: extern "C" fn(f64) -> f64,
++  ) -> *mut Platform;
+   fn v8__Platform__NewSingleThreadedDefaultPlatform(
+     idle_task_support: bool,
+   ) -> *mut Platform;
+@@ -424,6 +428,22 @@ impl Platform {
+     }
+   }
+ 
++  /// The default platform with an embedder-supplied wall clock: `clock`
++  /// gets the real time in milliseconds since the epoch and returns the
++  /// time JavaScript sees (Date, Intl, Temporal.Now). It is called on
++  /// whichever thread asks, and must not unwind.
++  pub fn new_with_clock(
++    thread_pool_size: u32,
++    clock: extern "C" fn(f64) -> f64,
++  ) -> UniqueRef<Self> {
++    unsafe {
++      UniqueRef::from_raw(v8__Platform__NewClockPlatform(
++        thread_pool_size.clamp(1, 16) as i32,
++        clock,
++      ))
++    }
++  }
++
+   /// The same as new() but disables the worker thread pool.
+   /// It must be used with the --single-threaded V8 flag.
+   ///
