@@ -2,13 +2,13 @@
 // a Tenant is one tenant's handle, and an Isolate is one V8 isolate in a
 // tenant's worker.
 
-import { resolveWorkerBinary } from './worker-binary.js';
 import { resolve as resolvePath } from 'node:path';
 
 import { resolve, validateConfig, validateLimits, type IsolateConfig, type ResolvedConfig, type ResolvedLimits, type RuntimeLimits } from './config.js';
 import { IsolaneError, invalidConfig, limitError } from './errors.js';
 import { Emitter, HookChain, validateHooks, type Hooks, type RuntimeEvents } from './hooks.js';
 import { checkReturn, isStandardSchema, type StandardSchemaV1 } from './schema.js';
+import { resolveWorkerBinary } from './worker-binary.js';
 import { SpareWorker, TenantWorker, emptyUsage, isOutOfMemory, type IsolateState, type TenantUsage } from './worker-pool.js';
 import { WorkerProcess, meetsStrict, type IsolationInfo, type WorkerExit } from './worker.js';
 
