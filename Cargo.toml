@@ -11,12 +11,13 @@ license = "MIT"
 
 # What ships: whole-program optimization, abort on panic (a panicking VM
 # thread kills the worker, which the supervisor sees as a crash, rather than
-# leaving a VM silently stuck), no debug info.
+# leaving a VM silently stuck), no symbols (V8 crash traces in a static
+# binary show offsets either way; symbols only add ~18 MB).
 [profile.release]
 lto = "fat"
 codegen-units = 1
 panic = "abort"
-strip = "debuginfo"
+strip = "symbols"
 
 # Local iteration: release-speed code, built fast
 # (`cargo build --profile fast -p isolane-worker ...`).
