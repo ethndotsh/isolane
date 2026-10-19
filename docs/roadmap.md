@@ -28,7 +28,7 @@ Agreed October 2026:
 1. **Web conformance pass** (done but for the ada decision): close the WPT gaps, using Deno wherever it is ahead.
 2. **The rest of the web platform**:
    - `crypto.subtle` (done; draft algorithms remain, section 3);
-   - `URLPattern` (the last missing Minimum Common API global; Deno's `01_urlpattern.js` on the `urlpattern` crate);
+   - `URLPattern` (done: Deno's `01_urlpattern.js` on the `urlpattern` crate, with the Minimum Common API now complete);
    - ~~`connect()` as the Sockets API~~ done: see section 2, and the Postgres test authenticates with SCRAM-SHA-256 (postgres.js on `crypto.subtle`);
    - the web snapshot built into the binary and a pool of pre-created web isolates, so `web` can default to on;
    - fair CPU accounting for timers;
@@ -277,6 +277,8 @@ in `patches/deno-*.patch`, applied by `scripts/vendor-deno.sh`.
 | — | Run WPT's own server (wptserve) for the gate so tests that need its Python handlers run | done |
 | — | Optional `web: { baseUrl }` (like Deno's `--location`) so relative Request/fetch URLs resolve and `location` exists | done |
 | — | `data:` URLs processed natively with the `data-url` crate, as Deno's fetch does (its MIME serialization keeps `a=""`). Fixed WPT bug `mime-empty-quoted-param` | done |
+| — | `URLPattern` regexp groups with the `v` flag (the standard's set operations, `[[a-z]--a]`): the `urlpattern` crate (0.4.2, as Deno uses) still generates regexps for the `u` flag, which the `v` flag rejects (`/` unescaped in classes). Fix upstream in rust-urlpattern, then switch the flag in 01_urlpattern.js. WPT bug `urlpattern-v-flag` (8 subtests) | planned |
+| — | `URLPattern.compareComponent()` and `generate()` (tentative in WPT; Deno lacks them too) | idea (once standardized) |
 | — | URL parser: the `url` crate lags the URL standard (WPT bug `url-crate`, 112 subtests). Evaluated ada (Node's parser, `ada-url` 4.0.0): on WPT's own data it gets urltestdata 896/896 (url crate 831) and setters 277/278 (255; the miss is an href case outside the setter harness). It builds cleanly against V8's own libc++ (compile `ada.cpp` with `-nostdinc++` and rusty_v8's `third_party/libc++` headers and `__config_site`, `-fno-exceptions -fno-rtti -DNDEBUG`: every C++ symbol it needs resolves inside librusty_v8.a, so no second C++ runtime); the crate's default build would instead link the system libc++/libstdc++ next to V8's static libc++abi, duplicating `__cxa_*`. Not adopted: it's 1.1 MB of C++ parsing guest-controlled strings outside the V8 sandbox, where the `url` crate is safe Rust, a change to what the worker's safety rests on. Options: adopt ada behind that decision (vendor ada.cpp, a worker build.rs, map its components to Deno's url-crate offsets; cross builds need a target sysroot), or fix the gaps in rust-url upstream | decide |
 | — | Compression conformance: deflate and deflate-raw decoders drive flate2's inflater directly, so truncated input and input after the end are TypeErrors (flate2's write decoders accept both). The "output larger than input" failures were the WPT checkout missing the media file the test compresses. Fixed WPT bug `compression-format` | done |
 | — | Encoding conformance: after a fatal streaming error, keep only the byte the decoder looked at (EUC-JP's JIS0212 case). encoding_rs's fatal API doesn't say whether it did; ask upstream for that, or add per-encoding rules. WPT bug `encoding-edge` (1; same op in Deno) | planned (upstream) |

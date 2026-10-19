@@ -72,7 +72,7 @@ over isolane's own native code:
   which need `duplex: 'half'`; `integrity` is checked, Subresource
   Integrity's sha256/384/512; `data:` and `blob:` URLs work without a
   policy)
-- `URL`, `URLSearchParams`
+- `URL`, `URLSearchParams`, `URLPattern`
 - `TextEncoder`, `TextDecoder`, and their streams; `atob`, `btoa`
 - `Event`, `EventTarget`, `AbortController`, `AbortSignal` (incl. `timeout`),
   `DOMException`
@@ -206,8 +206,8 @@ the guest's behalf. A refusal throws in the guest (a `TypeError` for
 `web` is checked against a pinned subset of the
 [web-platform-tests](https://web-platform-tests.org) (WPT): URL, encoding,
 DOM events and abort, streams, compression, FileAPI, structured clone,
-timers, fetch, and Web Crypto, about 53,800 subtests. **99.6% of the
-subtests that apply pass** (85.1% of all of them; most of the rest are
+timers, fetch, Web Crypto, and URL Pattern, about 54,600 subtests. **99.6% of the
+subtests that apply pass** (85.2% of all of them; most of the rest are
 Web Crypto algorithms from drafts beyond the standard).
 
 Every subtest that doesn't pass is listed in `test/wpt/expectations.json`
@@ -216,10 +216,10 @@ with a reason, in one of five categories:
 | Category | Subtests | What it means |
 |---|---|---|
 | by-design | 97 | isolane's choices: no SharedArrayBuffer, no WebAssembly unless allowed, a global that isn't a `WorkerGlobalScope` |
-| draft | 7,244 | APIs from drafts, not yet in a standard: tentative "owning" streams, and Web Crypto algorithms from WICG drafts (Modern Algorithms such as ML-KEM, ML-DSA, and ChaCha20-Poly1305, and Ed448), which are on the roadmap |
+| draft | 7,304 | APIs from drafts, not yet in a standard: tentative "owning" streams, `URLPattern.compareComponent()` and `generate()`, and Web Crypto algorithms from WICG drafts (Modern Algorithms such as ML-KEM, ML-DSA, and ChaCha20-Poly1305, and Ed448), which are on the roadmap |
 | browser-only | 487 | rules for browsers that server runtimes (Deno, workerd) don't apply either: CORS and origins, forbidden headers, referrers, the HTTP cache, `XMLHttpRequest`, the Cache API, canvas, secure contexts |
 | environment | 49 | the test setup or Node's HTTP client: no TLS or HTTP/2 in the test server, no WPT proxy, header bytes Node refuses |
-| bug | 125 | real gaps, each a row in the roadmap: mostly the `url` crate lagging the newest URL spec (112), then a patched `Object.prototype.then` seeing body reads, `Event` attributes, and a few streams and encoding edge cases |
+| bug | 133 | real gaps, each a row in the roadmap: mostly the `url` crate lagging the newest URL spec (112), then `URLPattern` regexp groups with the `v` flag's set operations (8), a patched `Object.prototype.then` seeing body reads, `Event` attributes, and a few streams and encoding edge cases |
 
 The applicable rate leaves out by-design, draft, and browser-only failures; bugs
 and environment failures count against it.
@@ -419,6 +419,11 @@ lifts it.
   ([RUSTSEC-2023-0071](https://rustsec.org/advisories/RUSTSEC-2023-0071)):
   a remote observer timing many RSA decryptions or signatures with one key
   could learn it.
+- **`URLPattern` parsing runs natively**, outside the watchdog, so
+  patterns over 64 KiB, with over 1,024 groups in one component, or with
+  many regexp groups in a long component (their count times its length
+  over 2^18) throw a `RangeError`; real patterns are far below these.
+  Matching runs in V8 and stops at the isolate's limits.
 - **Everything is UTC.** Guests can't see the host's time zone, and can't
   choose another one as the default (they can still format for any zone
   with `Intl`).

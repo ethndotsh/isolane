@@ -28,7 +28,7 @@ test('the globals exist and are non-enumerable', async () => {
     'TransformStream', 'ByteLengthQueuingStrategy', 'CountQueuingStrategy', 'ReadableStreamBYOBReader',
     'Blob', 'File', 'FileReader', 'TextEncoderStream', 'TextDecoderStream', 'CompressionStream',
     'DecompressionStream', 'Headers', 'Request', 'Response', 'FormData', 'fetch',
-    'MessageChannel', 'MessagePort', 'MessageEvent', 'Crypto', 'CryptoKey', 'SubtleCrypto',
+    'MessageChannel', 'MessagePort', 'MessageEvent', 'Crypto', 'CryptoKey', 'SubtleCrypto', 'URLPattern',
   ];
   const types = await run(`${JSON.stringify(names)}.map((n) => typeof globalThis[n])`);
   assert.ok(types.every((t) => t !== 'undefined'), JSON.stringify(Object.fromEntries(names.map((n, i) => [n, types[i]]))));
@@ -89,6 +89,35 @@ test('URL and URLSearchParams', async () => {
   await assert.rejects(run('new URL("nope")'), /TypeError/);
   assert.deepEqual(await run('[...new URLSearchParams("a=1&b=%20&a=3")]'), [['a', '1'], ['b', ' '], ['a', '3']]);
   assert.equal(await run('const p = new URLSearchParams({ z: "1", a: "é" }); p.sort(); p.toString()'), 'a=%C3%A9&z=1');
+});
+
+test('URLPattern', async () => {
+  assert.deepEqual(
+    await run(`const p = new URLPattern({ pathname: '/books/:id(\\\\d+)' });
+      const m = p.exec('https://example.com/books/42?x');
+      [p.test('https://example.com/books/abc'), m.pathname.groups, m.pathname.input, p.pathname, p.hasRegExpGroups]`),
+    [false, { id: '42' }, '/books/42', '/books/:id(\\d+)', true],
+  );
+  assert.deepEqual(
+    await run(`const p = new URLPattern('https://*.example.com/api/:v/*');
+      const m = p.exec('https://eu.example.com/api/v2/users/7');
+      [m.hostname.groups, m.pathname.groups, new URLPattern({ pathname: '/A' }, { ignoreCase: true }).test({ pathname: '/a' })]`),
+    [{ 0: 'eu' }, { v: 'v2', 0: 'users/7' }, true],
+  );
+  assert.deepEqual(await run(`new URLPattern({ hostname: ':domain(.*)' }).exec({ hostname: 'localhost' }).hostname.groups`), { domain: 'localhost' });
+  assert.equal(await run(`new URLPattern().test()`), true);
+  await assert.rejects(run(`new URLPattern({ pathname: '/:id(' })`), /TypeError/);
+  // Parsing can't be interrupted, so pathological patterns are refused up front.
+  await assert.rejects(run(`new URLPattern({ pathname: '(a)'.repeat(3000) })`), /RangeError: URLPattern pattern has too many groups/);
+  await assert.rejects(run(`new URLPattern({ pathname: '/*'.repeat(30000) })`), /RangeError/);
+  await assert.rejects(run(`new URLPattern({ pathname: 'a'.repeat(70000) })`), /RangeError: URLPattern input is too long/);
+  // Matching runs in V8's RegExp, so the watchdog stops catastrophic backtracking.
+  await assert.rejects(
+    run(`new URLPattern({ pathname: '/((?:x+x+)+y)' }).test({ pathname: '/' + 'x'.repeat(40) })`, { limits: { timeoutMs: 300 } }),
+    (err) => err.code === 'ERR_LIMIT',
+  );
+  // Regexp groups must also compile with Rust's regex: no lookaround or backreferences.
+  await assert.rejects(run(`new URLPattern({ pathname: '/((?=a)a)' })`), /TypeError/);
 });
 
 test('TextEncoder and TextDecoder', async () => {
