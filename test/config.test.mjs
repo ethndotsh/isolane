@@ -120,6 +120,54 @@ test('wasm: true opts in to WebAssembly', async () => {
   await assert.rejects(pool.run(code, { ...T, globals: { bytes: wasm } }), /WebAssembly is not defined/);
 });
 
+test('wasm: true still gives no shared memory (no SharedArrayBuffer through WebAssembly)', async () => {
+  // (module (memory (export "m") 1 1 shared))
+  const shared = [0, 97, 115, 109, 1, 0, 0, 0, 5, 4, 1, 3, 1, 1, 7, 5, 1, 1, 109, 2, 0];
+  const result = await pool.run(`(async () => {
+    const bytes = new Uint8Array(shared);
+    const name = (f) => { try { const v = f(); return v instanceof Promise ? v.then(() => 'ok', (e) => e.name) : 'ok'; } catch (e) { return e.name; } };
+    return {
+      sab: typeof SharedArrayBuffer,
+      memory: name(() => new WebAssembly.Memory({ initial: 1, maximum: 1, shared: true })),
+      viaPrototype: name(() => new WebAssembly.Memory.prototype.constructor({ initial: 1, maximum: 1, shared: true })),
+      plainMemory: name(() => new WebAssembly.Memory({ initial: 1 })),
+      instance: name(() => new WebAssembly.Instance(new WebAssembly.Module(bytes))),
+      viaInstancePrototype: name(() => new WebAssembly.Instance.prototype.constructor(new WebAssembly.Module(bytes))),
+      instantiate: await name(() => WebAssembly.instantiate(bytes)),
+      instantiateModule: await name(() => WebAssembly.instantiate(new WebAssembly.Module(bytes))),
+      // Compiling is fine: only an instance's exports could hand out the memory.
+      compile: await name(() => WebAssembly.compile(bytes)),
+      // Nor does a promise's then or constructor lookup see an unchecked instance.
+      leaked: await (async () => {
+        const seen = [];
+        const look = (v) => { try { const m = v?.exports?.m ?? v?.instance?.exports?.m; if (m) seen.push(m.buffer); } catch {} };
+        Object.defineProperty(Object.prototype, 'then', { configurable: true, get() { look(this); return undefined; } });
+        Object.defineProperty(Promise.prototype, 'constructor', { configurable: true, get() { seen.push('promise'); return Promise; } });
+        try {
+          await WebAssembly.instantiate(bytes).catch(() => {});
+          await WebAssembly.instantiate(new WebAssembly.Module(bytes)).catch(() => {});
+        } finally {
+          delete Object.prototype.then;
+          Object.defineProperty(Promise.prototype, 'constructor', { value: Promise, writable: true, configurable: true });
+        }
+        return seen.filter((v) => v !== 'promise' ).length;
+      })(),
+    };
+  })()`, { ...T, wasm: true, globals: { shared } });
+  assert.deepEqual(result, {
+    sab: 'undefined',
+    memory: 'TypeError',
+    viaPrototype: 'TypeError',
+    plainMemory: 'ok',
+    instance: 'TypeError',
+    viaInstancePrototype: 'TypeError',
+    instantiate: 'TypeError',
+    instantiateModule: 'TypeError',
+    compile: 'ok',
+    leaked: 0,
+  });
+});
+
 test('policy errors inside the guest are spec-shaped', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'isolane-errs-'));
   assert.deepEqual(

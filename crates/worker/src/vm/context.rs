@@ -57,6 +57,9 @@ pub(super) fn new_context(
         let key = v8::String::new(scope, name).unwrap();
         global.delete(scope, key.into());
     }
+    if config.wasm {
+        run_internal(scope, WASM_GUARD).map_err(|e| fail(ErrorCode::IsolateRetired, e))?;
+    }
     install_console(scope, global);
     install_functions(scope, global, config).map_err(|e| fail(ErrorCode::IsolateRetired, e))?;
     if let Some(prelude) = &config.prelude {
@@ -79,6 +82,22 @@ pub(super) fn new_context(
     }
     let shims = compile_shims(scope, &config.shims)?;
     Ok((v8::Global::new(scope, context), shims))
+}
+
+/// Keeps WebAssembly's shared memories (SharedArrayBuffers) from guests.
+const WASM_GUARD: &str = include_str!("wasm_guard.js");
+
+/// Run one of isolane's own scripts in the context, before guest code.
+fn run_internal(scope: &mut v8::PinScope, code: &str) -> Result<(), String> {
+    v8::tc_scope!(let tc, scope);
+    let ran = v8::String::new(tc, code)
+        .and_then(|src| v8::Script::compile(tc, src, None))
+        .and_then(|script| script.run(tc));
+    if ran.is_none() {
+        let msg = tc.exception().map(|e| describe(tc, e)).unwrap_or_else(|| "unknown error".into());
+        return Err(format!("vm setup failed: {msg}"));
+    }
+    Ok(())
 }
 
 /// A shim's script, named in stack traces by its filename. `line_offset`
