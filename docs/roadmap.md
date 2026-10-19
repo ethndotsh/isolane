@@ -63,7 +63,7 @@ Agreed October 2026:
 | Per-worker memory cap (RLIMIT_DATA) covering ArrayBuffer/Wasm | done (Linux) | macOS ignores RLIMIT_DATA |
 | V8 patch pipeline: rebase rusty_v8's V8 onto upstream patch releases daily, CI, PR | done | needs repo setting "Allow GitHub Actions to create and approve pull requests" |
 | Milestone rollover alert (branch leaves Stable/Extended Stable) → issue | done | then: bump rusty_v8 major by hand |
-| Bump V8 to 15.2.124.45 (44 security backports behind) | in progress | first run of the pipeline |
+| Bump V8 to 15.2.124.45 (44 security backports behind) | done | first run of the pipeline (68 min incremental on 2 cores) |
 | Protocol fuzzer (hostile fake workers) | done | weekly soak + on demand |
 | V8 mjsunit corpus replay under lockdown (SIGSYS/crash finder) | done | weekly soak |
 | Fuzzilli against our worker config (REPRL mode, sanitizer-coverage V8 build, V8 sandbox fuzzing profile / memory-corruption API) | planned | rented box ~$20–80/mo or weekly 6 h CI job; 1–2 days to set up |
@@ -95,7 +95,7 @@ Agreed October 2026:
 | `console` → `onLog` (per-eval byte budget) | done |
 | `globals`: inputs as data | done |
 | Sync host functions (`{ sync: true, fn }`; the isolate blocks on the reply under the deadline; other messages wait in a mailbox) | done |
-| Host functions get call context (tenant, VM, abort signal) | planned |
+| Host functions get call context (tenant, VM, abort signal) | done |
 | UDP sockets | idea |
 | KV / cache / queue capabilities as policies (Workers-style bindings) | idea |
 
@@ -289,7 +289,7 @@ in `patches/deno-*.patch`, applied by `scripts/vendor-deno.sh`.
 | Error taxonomy: one `IsolaneError` with `code`, `kind` (guest / limit / usage / infrastructure), `retryable`, `tenant`, and `guest` (name, message, stack); spec-shaped errors inside the guest (every fetch failure a `TypeError`; fs errors with Node-style `code`; host-function errors keep their class and `code`) | done |
 | Codes: `ERR_ISOLATE_RETIRED`, `ERR_ISOLATE_DISPOSED`, `ERR_WORKER_UNRESPONSIVE`, `ERR_ISOLATION_UNAVAILABLE`, `ERR_INVALID_OPTION`, `ERR_RUNTIME_CLOSED` added. Policy denials and host-function failures surface inside the guest (as above), not as host-side codes | done |
 | `onPolicyDenial` event (audit log of refused fetch/connect/fs calls per tenant) | done (API v2 hooks) |
-| Resolve the worker binary automatically (per-platform optional package) instead of `ISOLANE_WORKER` | planned (with packaging) |
+| Resolve the worker binary automatically (per-platform optional package) instead of `ISOLANE_WORKER` | done (`ts/worker-binary.ts`) |
 | Standard Schema (Zod, Valibot, ArkType, ...) for host functions (`hostFunction({ args, result, fn })`: guest arguments validated before `fn` runs, results validated before they reach the guest, parameter types inferred) and for eval results (`run`/`eval` `{ result }`, typed; `ERR_INVALID_RESULT`) | done |
 | Standard Schema everywhere else a user defines a shape: deployment entrypoint inputs/outputs and `env`, `globals`, host-function errors, `sockets`/`fetch` message bodies where useful; generate guest-side `.d.ts` from host-function schemas (via JSON Schema) so guest code type-checks against its host API | planned |
 | `vm.call(name, ...args)` for stateful isolates (call an exported/global function with schema-checked args) | idea |
@@ -408,9 +408,9 @@ Measured against isolated-vm (Linux x64 under Rosetta; re-measure natively):
 | Linux x64 build in CI (from source, sandbox on), incremental rebuilds via source manifest | done |
 | Linux arm64 (cross-compile from x64: Chromium's toolchains are x64-only) | planned |
 | macOS arm64/x64 (needs full Xcode; macOS CI runners) | planned |
-| **npm layout** (the esbuild/SWC/Biome/Rolldown pattern, not Prisma's postinstall download, which breaks offline, in locked-down installs, and with `--ignore-scripts`): `isolane` (the JS library) lists one `optionalDependencies` package per platform, each with `os`/`cpu`/`libc` fields so npm installs only the matching one: `@isolane/worker-linux-x64-gnu`, `@isolane/worker-linux-arm64-gnu`, `@isolane/worker-darwin-arm64`, `@isolane/worker-darwin-x64` (macOS: development only — no lockdown, strict mode refuses it). Later, maybe: `linux-*-musl` (Alpine; rusty_v8 doesn't support musl, so a real porting job). No Windows (no lockdown story). The library resolves its platform package, with `ISOLANE_WORKER` as an override | planned |
+| **npm layout** (the esbuild/SWC/Biome/Rolldown pattern, not Prisma's postinstall download, which breaks offline, in locked-down installs, and with `--ignore-scripts`): `isolane` (the JS library) lists one `optionalDependencies` package per platform, each with `os`/`cpu`/`libc` fields so npm installs only the matching one: `@isolane/worker-linux-x64-gnu`, `@isolane/worker-linux-arm64-gnu`, `@isolane/worker-darwin-arm64`, `@isolane/worker-darwin-x64` (macOS: development only — no lockdown, strict mode refuses it). Later, maybe: `linux-*-musl` (Alpine; rusty_v8 doesn't support musl, so a real porting job). No Windows (no lockdown story). The library resolves its platform package, with `ISOLANE_WORKER` as an override | done (linux-x64-gnu; other platforms with their build jobs) |
 | Sizes (Linux x64, October 2026): 71 MB unstripped, **53 MB stripped, ~18.7 MB gzipped per platform package** (cf. Biome 66 MB, esbuild/SWC ~11 MB unpacked); a little smaller with `symbol_level=0` | done (measured) |
-| Publishing from CI only, with npm trusted publishing (OIDC, no long-lived token) and provenance attestations; all packages versioned in lockstep; every V8 patch bump is a patch release | planned |
+| Publishing from CI only, with npm trusted publishing (OIDC, no long-lived token) and provenance attestations; all packages versioned in lockstep; every V8 patch bump is a patch release | done (`release.yml`; awaits the first release) |
 | npm org `isolane` created; unscoped `isolane` reserved with a 0.0.0 placeholder (October 2026) | done |
 | First real release: the owner adds a short-lived npm token as a repo secret for the first publish of each `@isolane/worker-*` package and the real `isolane`, then configures each package's trusted publisher (repo `ethndotsh/isolane`, workflow `release.yml`) and deletes the token; every release after is tokenless | to do (owner, at first release) |
 | Stripped binaries; the staleness warning reads the worker's V8 version against the newest patch release | planned |
