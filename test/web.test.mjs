@@ -438,6 +438,10 @@ test('crypto.subtle: lengths the guest picks are checked before anything is allo
     out.pssVerify = await subtle.verify({ name: 'RSA-PSS', saltLength: 256 * 1024 * 1024 }, pss.publicKey, new Uint8Array(256), new Uint8Array(4)).then((ok) => ok, (e) => e.name);
     out.pssOk = await subtle.sign({ name: 'RSA-PSS', saltLength: 32 }, pss.privateKey, new Uint8Array(4)).then((b) => b.byteLength, (e) => e.name);
     out.bigRsa = await subtle.importKey('jwk', big, { name: 'RSA-PSS', hash: 'SHA-256' }, false, ['sign']).then(() => 'imported', (e) => e.name);
+    // A 16 MiB public exponent and 1 MiB of SPKI are refused before parsing.
+    out.bigExponent = await subtle.generateKey({ name: 'RSA-PSS', modulusLength: 2048, publicExponent: new Uint8Array(16 << 20).fill(1), hash: 'SHA-256' }, false, ['sign']).then(() => 'generated', (e) => e.name);
+    out.zeroPaddedExponent = await subtle.generateKey({ name: 'RSASSA-PKCS1-v1_5', modulusLength: 1024, publicExponent: new Uint8Array([0, 0, 1, 0, 1]), hash: 'SHA-256' }, false, ['sign']).then(() => 'generated', (e) => e.name);
+    out.bigSpki = await subtle.importKey('spki', new Uint8Array(1 << 20), { name: 'RSA-PSS', hash: 'SHA-256' }, false, ['verify']).then(() => 'imported', (e) => e.name + ': ' + e.message);
     return out;
   })()`, { globals: { big } });
   assert.deepEqual(result, {
@@ -447,6 +451,9 @@ test('crypto.subtle: lengths the guest picks are checked before anything is allo
     pssVerify: false,
     pssOk: 256,
     bigRsa: 'DataError',
+    bigExponent: 'OperationError',
+    zeroPaddedExponent: 'generated',
+    bigSpki: 'DataError: isolane: RSA and EC key data is at most 64 KiB',
   });
 });
 

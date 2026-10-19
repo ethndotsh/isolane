@@ -97,6 +97,11 @@ fn generate_key_rsa(
   modulus_length: u32,
   public_exponent: &[u8],
 ) -> Result<Vec<u8>, GenerateKeyError> {
+  // isolane: the allowed exponents fit in 3 bytes; a longer one (leading
+  // zeros aside) is refused before it's turned into a big integer.
+  if public_exponent.iter().skip_while(|b| **b == 0).count() > 3 {
+    return Err(GenerateKeyError::BadPublicExponent);
+  }
   let exponent = BigUint::from_bytes_be(public_exponent);
   if exponent != *PUB_EXPONENT_1 && exponent != *PUB_EXPONENT_2 {
     return Err(GenerateKeyError::BadPublicExponent);

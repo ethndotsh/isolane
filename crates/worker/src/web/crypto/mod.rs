@@ -76,7 +76,13 @@ impl rand_core::CryptoRng for IsolaneRng {}
 /// themselves, everything else (`DOMException*`, `NotSupported`) as an
 /// Error named for its class, which runtime/core.js converts.
 fn throw(scope: &mut v8::PinScope, class: &str, message: &str) {
-    let msg = v8::String::new(scope, message).unwrap();
+    // An error can quote guest input (a serde message names the value it
+    // refused): keep it short, and never panic making the string.
+    let mut end = message.len().min(1024);
+    while !message.is_char_boundary(end) {
+        end -= 1;
+    }
+    let msg = v8::String::new(scope, &message[..end]).unwrap_or_else(|| v8::String::empty(scope));
     let error = match class {
         "TypeError" => v8::Exception::type_error(scope, msg),
         "RangeError" => v8::Exception::range_error(scope, msg),

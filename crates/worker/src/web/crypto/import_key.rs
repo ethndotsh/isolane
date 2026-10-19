@@ -30,6 +30,8 @@ pub enum ImportKeyError {
   InvalidModulus,
   #[error("isolane: RSA keys are at most 4096 bits")]
   ModulusTooLarge,
+  #[error("isolane: RSA and EC key data is at most 64 KiB")]
+  KeyDataTooLarge,
   #[error("invalid public exponent")]
   InvalidPublicExponent,
   #[error("invalid private exponent")]
@@ -166,10 +168,34 @@ const MAX_RSA_MODULUS_LENGTH: usize = 4096;
 /// rsa's largest public exponent is 2^33 - 1: five bytes.
 const MAX_RSA_PUBLIC_EXPONENT_BYTES: usize = 5;
 
+/// The most key data isolane parses for an RSA or EC key: a 4096-bit RSA
+/// private key is about 2.4 KB of DER (3.2 KB as a JWK), so this leaves
+/// room while keeping the parser's work small before the modulus cap.
+const MAX_ASYMMETRIC_KEY_DATA: usize = 64 * 1024;
+
+impl KeyData {
+  fn len(&self) -> usize {
+    match self {
+      KeyData::Spki(b) | KeyData::Pkcs8(b) | KeyData::Raw(b) => b.len(),
+      KeyData::JwkSecret { k } => k.len(),
+      KeyData::JwkPublicRsa { n, e } => n.len() + e.len(),
+      KeyData::JwkPrivateRsa { n, e, d, p, q, dp, dq, qi } => {
+        [n, e, d, p, q, dp, dq, qi].iter().map(|s| s.len()).sum()
+      }
+      KeyData::JwkPublicEc { x, y } => x.len() + y.len(),
+      KeyData::JwkPrivateEc { x, y, d } => x.len() + y.len() + d.len(),
+    }
+  }
+}
+
 pub fn op_crypto_import_key(
   opts: ImportKeyOptions,
   key_data: KeyData,
 ) -> Result<ImportKeyResult, ImportKeyError> {
+  let asymmetric = !matches!(opts, ImportKeyOptions::Aes {} | ImportKeyOptions::Hmac {});
+  if asymmetric && key_data.len() > MAX_ASYMMETRIC_KEY_DATA {
+    return Err(ImportKeyError::KeyDataTooLarge);
+  }
   let result = import_key(opts, key_data)?;
   if let ImportKeyResult::Rsa { modulus_length, public_exponent, .. } = &result {
     if *modulus_length > MAX_RSA_MODULUS_LENGTH {

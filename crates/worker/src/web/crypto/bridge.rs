@@ -94,7 +94,7 @@ pub fn to_v8<'s>(scope: &mut v8::PinScope<'s, '_>, val: &Val) -> v8::Local<'s, v
         Val::Map(entries) => {
             let object = v8::Object::new(scope);
             for (k, v) in entries {
-                let key = v8::String::new(scope, k).unwrap();
+                let Some(key) = v8::String::new(scope, k) else { continue };
                 let value = to_v8(scope, v);
                 object.set(scope, key.into(), value);
             }
