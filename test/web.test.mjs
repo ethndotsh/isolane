@@ -752,6 +752,36 @@ test('fetch: data: and blob: URLs', async () => {
   );
 });
 
+test('fetch: Subresource Integrity', async () => {
+  const { createHash } = await import('node:crypto');
+  const body = '{"hi":"wörld"}';
+  const sri = (alg, url = false) => {
+    const b64 = createHash(alg).update(body).digest('base64');
+    return `${alg}-${url ? b64.replaceAll('+', '-').replaceAll('/', '_').replace(/=+$/, '') : b64}`;
+  };
+  const bad = 'sha512-' + Buffer.alloc(64).toString('base64');
+  const check = (integrity) => fetchRun(`return fetch('${base}/json', { integrity: ${JSON.stringify(integrity)} }).then((r) => r.text(), (e) => e.name);`);
+  assert.equal(await check(sri('sha256')), body);
+  assert.equal(await check(sri('sha512', true)), body); // base64url, no padding
+  assert.equal(await check(`${bad.replace('512', '256')} ${sri('sha384')}`), body); // the strongest decides
+  assert.equal(await check(`${sri('sha384')} ${bad}`), 'TypeError');
+  assert.equal(await check('md5-abc'), body); // no metadata it knows: no check
+  assert.equal(await run(`fetch('data:,x', { integrity: 'sha256-AAAA' }).then(() => 'ok', (e) => e.name)`), 'TypeError');
+});
+
+test('Request follows the Fetch standard for credentials, duplex, and stream bodies', async () => {
+  const name = (code) => run(`try { ${code}; 'ok' } catch (e) { e.name }`);
+  assert.equal(await name(`new Request('https://user:pw@example.com/')`), 'TypeError');
+  assert.equal(await name(`new Request('https://example.com/', { method: 'POST', body: new ReadableStream() })`), 'TypeError');
+  assert.equal(await name(`new Request('https://example.com/', { method: 'POST', body: new ReadableStream(), duplex: 'half' })`), 'ok');
+  assert.equal(await name(`new Request('https://example.com/', { method: 'POST', body: 'x', duplex: 'full' })`), 'TypeError');
+  assert.equal(await name(`new Request('https://example.com/', { method: 'POST', body: new ReadableStream(), duplex: 'half', keepalive: true })`), 'TypeError');
+  assert.deepEqual(
+    await run(`const r = new Request('https://example.com/'); [r.destination, r.isReloadNavigation, r.isHistoryNavigation, r.duplex]`),
+    ['', false, false, 'half'],
+  );
+});
+
 test('without web, a fetch policy still gives the minimal fetch', async () => {
   assert.deepEqual(
     await runtime.run(`fetch('${base}/json').then(async (r) => [typeof Request, r.status, await r.json()])`, { tenant: 'web', ...NET }),

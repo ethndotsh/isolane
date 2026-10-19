@@ -93,18 +93,6 @@
       "category": "bug",
       "reason": "Event.timeStamp is always 0 and isTrusted isn't an own unforgeable attribute (Deno's vendored events, same in Deno) (roadmap: Event attributes)."
     },
-    "sri": {
-      "category": "bug",
-      "reason": "Subresource Integrity (`integrity`) isn't checked (same in Deno) (roadmap: fetch integrity)."
-    },
-    "request-attrs": {
-      "category": "bug",
-      "reason": "Request lacks destination, isReloadNavigation, isHistoryNavigation, and duplex, doesn't validate `duplex`, and accepts credentials in the URL (Deno's vendored Request) (roadmap: Request attributes)."
-    },
-    "request-streaming": {
-      "category": "bug",
-      "reason": "Request bodies are buffered before sending, so streaming-upload rules (HTTP/1.1 refusal, keepalive with a stream body) don't apply (roadmap: streamed request bodies)."
-    },
     "body-edge": {
       "category": "bug",
       "reason": "Response/Request body edge cases from Deno's vendored classes: BYOB readers on non-byte bodies, an Object.prototype.then injection, UTF-16 JSON, and an empty FormData serialized as text (roadmap: body conformance)."
@@ -342,27 +330,9 @@
       }
     },
     "fetch/api/basic/integrity.sub.any.js": {
+      "why": "no-tls",
       "subtests": {
-        "Invalid integrity": {
-          "status": "FAIL",
-          "why": "sri"
-        },
-        "Multiple integrities: invalid stronger than valid": {
-          "status": "FAIL",
-          "why": "sri"
-        },
-        "Multiple integrities: both are invalid": {
-          "status": "FAIL",
-          "why": "sri"
-        },
-        "CORS invalid integrity": {
-          "status": "FAIL",
-          "why": "cors-and-origin"
-        },
-        "Empty string integrity for opaque response": {
-          "status": "FAIL",
-          "why": "no-tls"
-        }
+        "Empty string integrity for opaque response": "FAIL"
       }
     },
     "fetch/api/basic/mode-no-cors.sub.any.js": {
@@ -497,12 +467,6 @@
       "why": "http2-retry",
       "subtests": {
         "Fetch with POST with text body on 421 response should be retried once on new connection.": "FAIL"
-      }
-    },
-    "fetch/api/basic/request-upload.any.js": {
-      "why": "request-streaming",
-      "subtests": {
-        "Streaming upload shouldn't work on Http/1.1.": "FAIL"
       }
     },
     "fetch/api/basic/request-upload.h2.any.js": {
@@ -1036,10 +1000,6 @@
           "status": "FAIL",
           "why": "request-window"
         },
-        "Input URL has credentials": {
-          "status": "FAIL",
-          "why": "request-attrs"
-        },
         "RequestInit's mode is no-cors and method is not simple": {
           "status": "FAIL",
           "why": "cors-and-origin"
@@ -1196,32 +1156,6 @@
           "status": "FAIL",
           "why": "cors-and-origin"
         }
-      }
-    },
-    "fetch/api/request/request-init-stream.any.js": {
-      "why": "request-attrs",
-      "subtests": {
-        "It is error to omit .duplex when the body is a ReadableStream.": "FAIL",
-        "It is error to set .duplex = 'full' when the body is null.": "FAIL",
-        "It is error to set .duplex = 'full' when the body is a string.": "FAIL",
-        "It is error to set .duplex = 'full' when the body is a Uint8Array.": "FAIL",
-        "It is error to set .duplex = 'full' when the body is a Blob.": "FAIL",
-        "It is error to set .duplex = 'full' when the body is a ReadableStream.": "FAIL"
-      }
-    },
-    "fetch/api/request/request-keepalive.any.js": {
-      "why": "request-streaming",
-      "subtests": {
-        "keepalive flag with stream body": "FAIL"
-      }
-    },
-    "fetch/api/request/request-structure.any.js": {
-      "why": "request-attrs",
-      "subtests": {
-        "Check destination attribute": "FAIL",
-        "Check isReloadNavigation attribute": "FAIL",
-        "Check isHistoryNavigation attribute": "FAIL",
-        "Check duplex attribute": "FAIL"
       }
     },
     "fetch/api/response/response-consume-empty.any.js": {

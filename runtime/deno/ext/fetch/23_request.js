@@ -394,6 +394,9 @@ class Request {
     // 5.
     if (typeof input === "string") {
       const parsedURL = new URL(input, baseURL);
+      if (parsedURL.username !== "" || parsedURL.password !== "") {
+        throw new TypeError("Request URL must not include credentials");
+      }
       request = newInnerRequest(
         "GET",
         parsedURL.href,
@@ -576,6 +579,22 @@ class Request {
     // 38.
     const inputOrInitBody = initBody ?? inputBody;
 
+    // 37 (extract with keepalive) and 39. A body with no source is a stream.
+    if (initBody !== null && initBody.source === null) {
+      if (request.keepalive) {
+        throw new TypeError("A keepalive request can't have a ReadableStream body");
+      }
+      if (init.duplex === undefined) {
+        throw new TypeError("RequestInit's duplex must be set when the body is a ReadableStream");
+      }
+    }
+    if (inputOrInitBody !== null && inputOrInitBody.source === null) {
+      const mode = request.mode ?? "cors";
+      if (mode !== "same-origin" && mode !== "cors") {
+        throw new TypeError("A request with a ReadableStream body must have mode same-origin or cors");
+      }
+    }
+
     // 40.
     let finalBody = inputOrInitBody;
 
@@ -638,6 +657,27 @@ class Request {
   get keepalive() {
     webidl.assertBranded(this, RequestPrototype);
     return this[_request].keepalive ?? false;
+  }
+
+  // No navigations or document destinations outside a browser.
+  get destination() {
+    webidl.assertBranded(this, RequestPrototype);
+    return "";
+  }
+
+  get isReloadNavigation() {
+    webidl.assertBranded(this, RequestPrototype);
+    return false;
+  }
+
+  get isHistoryNavigation() {
+    webidl.assertBranded(this, RequestPrototype);
+    return false;
+  }
+
+  get duplex() {
+    webidl.assertBranded(this, RequestPrototype);
+    return "half";
   }
 
   get mode() {
@@ -789,6 +829,10 @@ webidl.converters["RequestPriority"] = webidl.createEnumConverter(
     "high",
   ],
 );
+webidl.converters["RequestDuplex"] = webidl.createEnumConverter(
+  "RequestDuplex",
+  ["half"],
+);
 webidl.converters["ReferrerPolicy"] = webidl.createEnumConverter(
   "ReferrerPolicy",
   [
@@ -823,6 +867,7 @@ webidl.converters["RequestInit"] = webidl.createDictionaryConverter(
     { key: "integrity", converter: webidl.converters["DOMString"] },
     { key: "keepalive", converter: webidl.converters["boolean"] },
     { key: "priority", converter: webidl.converters["RequestPriority"] },
+    { key: "duplex", converter: webidl.converters["RequestDuplex"] },
     {
       key: "signal",
       converter: webidl.createNullableConverter(

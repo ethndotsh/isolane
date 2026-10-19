@@ -11,8 +11,9 @@
 //
 // Differences from Deno's fetch: request bodies are buffered (a streamed
 // request body is read to the end before sending); blob: and data: URLs are
-// fetched here, other non-HTTP(S) schemes are network errors; no HTTP
-// client options, telemetry, or inspector events.
+// fetched here, other non-HTTP(S) schemes are network errors; Subresource
+// Integrity (`integrity`) is checked; no HTTP client options, telemetry, or
+// inspector events.
 (function () {
 const { core, primordials } = __bootstrap;
 const {
@@ -23,8 +24,14 @@ const {
   PromisePrototypeCatch,
   PromisePrototypeThen,
   SafeArrayIterator,
+  StringPrototypeCharCodeAt,
+  StringPrototypeIndexOf,
+  StringPrototypeReplaceAll,
+  StringPrototypeSlice,
+  StringPrototypeToLowerCase,
   TypedArrayPrototypeGetSymbolToStringTag,
   TypeError,
+  Uint8Array,
 } = primordials;
 
 const webidl = core.loadExtScript("ext:deno_webidl/00_webidl.js");
@@ -47,6 +54,7 @@ const {
 } = core.loadExtScript("ext:deno_fetch/23_response.js");
 const abortSignal = core.loadExtScript("ext:deno_web/03_abort_signal.js");
 const { parseMimeType } = core.loadExtScript("ext:deno_web/01_mimesniff.js");
+const { forgivingBase64Decode } = core.loadExtScript("ext:deno_web/00_infra.js");
 
 // https://fetch.spec.whatwg.org/#bad-port, as in Deno's 26_fetch.js.
 const BAD_PORTS = {
@@ -143,7 +151,85 @@ function fetchDataUrl(url, req) {
   };
 }
 
+// https://w3c.github.io/webappsec-subresource-integrity/: the hash
+// functions, weakest first.
+const SRI_STRENGTH = { __proto__: null, sha256: 1, sha384: 2, sha512: 3 };
+
+const isAsciiWhitespace = (c) => c === 0x09 || c === 0x0a || c === 0x0c || c === 0x0d || c === 0x20;
+
+/** The string's tokens between runs of ASCII whitespace. (No regular
+ * expressions: guest code can replace RegExp.prototype's methods.) */
+function splitOnAsciiWhitespace(input) {
+  const tokens = [];
+  let start = -1;
+  for (let i = 0; i <= input.length; i++) {
+    const space = i === input.length || isAsciiWhitespace(StringPrototypeCharCodeAt(input, i));
+    if (space && start !== -1) {
+      ArrayPrototypePush(tokens, StringPrototypeSlice(input, start, i));
+      start = -1;
+    } else if (!space && start === -1) {
+      start = i;
+    }
+  }
+  return tokens;
+}
+
+/** "Parse metadata": the well-formed [algorithm, base64 digest] pairs. */
+function parseIntegrity(metadata) {
+  const parsed = [];
+  for (const token of new SafeArrayIterator(splitOnAsciiWhitespace(metadata))) {
+    const question = StringPrototypeIndexOf(token, "?"); // options: none defined
+    const expression = question === -1 ? token : StringPrototypeSlice(token, 0, question);
+    const dash = StringPrototypeIndexOf(expression, "-");
+    if (dash === -1) continue;
+    const algorithm = StringPrototypeToLowerCase(StringPrototypeSlice(expression, 0, dash));
+    if (SRI_STRENGTH[algorithm] === undefined) continue;
+    ArrayPrototypePush(parsed, [algorithm, StringPrototypeSlice(expression, dash + 1)]);
+  }
+  return parsed;
+}
+
+/** "Do bytes match metadataList": any digest of the strongest algorithm
+ * listed matches (base64 or base64url, padding optional); no well-formed
+ * metadata matches anything. */
+function integrityMatches(bytes, metadata) {
+  const parsed = parseIntegrity(metadata);
+  if (parsed.length === 0) return true;
+  let strongest = 0;
+  for (const { 0: algorithm } of new SafeArrayIterator(parsed)) {
+    if (SRI_STRENGTH[algorithm] > strongest) strongest = SRI_STRENGTH[algorithm];
+  }
+  for (const { 0: algorithm, 1: value } of new SafeArrayIterator(parsed)) {
+    if (SRI_STRENGTH[algorithm] !== strongest) continue;
+    let expected;
+    try {
+      // base64url's alphabet, as base64's.
+      expected = forgivingBase64Decode(StringPrototypeReplaceAll(StringPrototypeReplaceAll(value, "-", "+"), "_", "/"));
+    } catch {
+      continue;
+    }
+    const actual = core.digest(algorithm, bytes);
+    if (expected.length !== actual.length) continue;
+    let same = true;
+    for (let i = 0; i < actual.length; i++) same &&= expected[i] === actual[i];
+    if (same) return true;
+  }
+  return false;
+}
+
+/** Fetch's "main fetch", with Subresource Integrity: a request with
+ * integrity metadata waits for the whole body and checks it. */
 async function mainFetch(req, terminator) {
+  const response = await schemeFetch(req, terminator);
+  if (!req.integrity || response.type === "error" || response.aborted) return response;
+  let bytes = response.body === null ? new Uint8Array(0) : await response.body.consume();
+  if (typeof bytes === "string") bytes = core.encode(bytes);
+  if (!integrityMatches(bytes, req.integrity)) return networkError("the response doesn't match the request's integrity metadata");
+  if (response.body !== null) response.body = new InnerBody({ body: bytes, consumed: false });
+  return response;
+}
+
+async function schemeFetch(req, terminator) {
   const url = new URL(req.currentUrl());
   if ((url.protocol === "http:" || url.protocol === "https:") && url.port !== "" && BAD_PORTS[url.port] === true) {
     return networkError(`Requests to port ${url.port} are blocked`);
