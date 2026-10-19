@@ -117,14 +117,18 @@ export function isPublicAddress(address: string): boolean {
 type LookupCallback = (err: Error | null, address: string | LookupAddress[], family?: number) => void;
 
 /** A `lookup` for http/net/tls that only returns addresses the policy
- * allows, so the address checked is the address connected to. */
-function pinnedLookup(allowPrivate: boolean) {
+ * allows, so the address checked is the address connected to. `refused`
+ * hears when a name resolves only to addresses it doesn't. */
+function pinnedLookup(allowPrivate: boolean, refused: () => void) {
   return (hostname: string, options: { family?: number | string; all?: boolean }, cb: LookupCallback) => {
     const family = options.family === 'IPv4' ? 4 : options.family === 'IPv6' ? 6 : Number(options.family) || 0;
     dnsLookup(hostname, { all: true, family }, (err, addresses) => {
       if (err) return cb(err, []);
       const usable = allowPrivate ? addresses : addresses.filter((a) => isPublicAddress(a.address));
-      if (usable.length === 0) return cb(new Error(`${hostname} has no public address`), []);
+      if (usable.length === 0) {
+        refused();
+        return cb(new Error(`${hostname} has no public address`), []);
+      }
       if (options.all) cb(null, usable);
       else cb(null, usable[0].address, usable[0].family);
     });
@@ -228,8 +232,6 @@ export function fetchBroker(policy: FetchPolicy, denied: DenialReporter = () => 
   let requests = 0;
   const inFlight = new Map<number, InFlight>();
 
-  const lookup = pinnedLookup(allowPrivate);
-
   const check = async (url: URL, method: string) => {
     if (url.protocol !== 'https:' && url.protocol !== 'http:') {
       throw new TypeError(`fetch: ${url.protocol} URLs are not supported`);
@@ -258,6 +260,7 @@ export function fetchBroker(policy: FetchPolicy, denied: DenialReporter = () => 
   ) =>
     new Promise<http.IncomingMessage>((resolve, reject) => {
       const mod = url.protocol === 'https:' ? https : http;
+      const lookup = pinnedLookup(allowPrivate, () => denied('fetch', url.href, 'not a public address'));
       const req = mod.request(url, { method, headers, lookup: lookup as never, agent: false, signal });
       req.on('response', resolve);
       req.on('error', reject);
@@ -582,7 +585,6 @@ export function connectBroker(policy: ConnectPolicy, denied: DenialReporter = ()
     throw new TypeError('isolane: connect.hosts must be a list of host:port patterns or a function');
   }
   const allowPrivate = policy.privateNetworks === true;
-  const lookup = pinnedLookup(allowPrivate);
   const ca = policy.ca === undefined ? undefined : typeof policy.ca === 'string' ? policy.ca : [...policy.ca];
   const maxConnections = policy.limits?.connections ?? 8;
   const connectTimeoutMs = policy.limits?.connectMs ?? 10_000;
@@ -590,6 +592,8 @@ export function connectBroker(policy: ConnectPolicy, denied: DenialReporter = ()
   const sockets = new Map<number, GuestSocket>();
   /** Sockets between release and track in startTls: still open, still counted. */
   let upgrading = 0;
+  /** Opens not yet connected: counted too. */
+  let opening = 0;
   let nextId = 1;
   let disposed = false;
 
@@ -658,29 +662,37 @@ export function connectBroker(policy: ConnectPolicy, denied: DenialReporter = ()
     }
     const host = r.hostname.replace(/^\[|\]$/g, '').toLowerCase();
     const port = r.port as number;
-    if (sockets.size + upgrading >= maxConnections) {
+    // Counted from here, not once connected: opens racing each other
+    // (the policy check and the connection both wait) can't pass the cap.
+    if (sockets.size + upgrading + opening >= maxConnections) {
       denied('connect', `${host}:${port}`, `already has ${maxConnections} sockets open`);
       throw new Error(`connect: this isolate already has ${maxConnections} sockets open (connect.limits.connections)`);
     }
-    if (!allowPrivate && isIP(host) && !isPublicAddress(host)) {
-      denied('connect', `${host}:${port}`, 'not a public address');
-      throw new Error(`connect to ${host}:${port} is not allowed: not a public address`);
+    opening++;
+    try {
+      if (!allowPrivate && isIP(host) && !isPublicAddress(host)) {
+        denied('connect', `${host}:${port}`, 'not a public address');
+        throw new Error(`connect to ${host}:${port} is not allowed: not a public address`);
+      }
+      const allowed = typeof policy.hosts === 'function' ? await policy.hosts(host, port) : socketAllowed(policy.hosts, host, port);
+      if (allowed !== true) {
+        denied('connect', `${host}:${port}`, 'not allowed by the connect policy');
+        throw new Error(`connect to ${host}:${port} is not allowed by the connect policy`);
+      }
+      const lookup = pinnedLookup(allowPrivate, () => denied('connect', `${host}:${port}`, 'not a public address'));
+      const socket =
+        r.tls === true
+          ? await established(
+              tlsConnect({ host, port, servername: isIP(host) ? undefined : host, ca, lookup: lookup as never }),
+              'secureConnect',
+              `connect to ${host}:${port}`,
+            )
+          : await established(netConnect({ host, port, lookup: lookup as never }), 'connect', `connect to ${host}:${port}`);
+      const address = socket.remoteAddress ?? host;
+      return track(socket, `${isIP(address) === 6 ? `[${address}]` : address}:${socket.remotePort ?? port}`);
+    } finally {
+      opening--;
     }
-    const allowed = typeof policy.hosts === 'function' ? await policy.hosts(host, port) : socketAllowed(policy.hosts, host, port);
-    if (allowed !== true) {
-      denied('connect', `${host}:${port}`, 'not allowed by the connect policy');
-      throw new Error(`connect to ${host}:${port} is not allowed by the connect policy`);
-    }
-    const socket =
-      r.tls === true
-        ? await established(
-            tlsConnect({ host, port, servername: isIP(host) ? undefined : host, ca, lookup: lookup as never }),
-            'secureConnect',
-            `connect to ${host}:${port}`,
-          )
-        : await established(netConnect({ host, port, lookup: lookup as never }), 'connect', `connect to ${host}:${port}`);
-    const address = socket.remoteAddress ?? host;
-    return track(socket, `${isIP(address) === 6 ? `[${address}]` : address}:${socket.remotePort ?? port}`);
   };
 
   const read = async (id: unknown): Promise<Buffer | null> => {
@@ -844,7 +856,10 @@ export function fsBroker(policy: FsPolicy, denied: DenialReporter = () => {}): H
   // root, and the entry itself is never followed if it's a symlink.
   const resolveEntry = async (path: string) => {
     const guest = posix.normalize('/' + path);
-    if (guest === '/') throw new FsError('fs: the root itself cannot be replaced or removed', 'EPERM');
+    if (guest === '/') {
+      denied('fs', path, 'the root itself cannot be replaced or removed');
+      throw new FsError('fs: the root itself cannot be replaced or removed', 'EPERM');
+    }
     const parent = await resolveExisting(posix.dirname(guest));
     return join(parent, posix.basename(guest));
   };

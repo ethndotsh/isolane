@@ -291,3 +291,33 @@ test('a closed isolate closes its sockets', async () => {
   vm.close();
   await seen;
 });
+
+test('the connection limit holds for opens racing each other', async () => {
+  const slow = { ...local(echoPort), hosts: async () => (await new Promise((r) => setTimeout(r, 30)), true), limits: { connections: 2 } };
+  const out = await run(
+    `const all = Array.from({ length: 6 }, () => connect('localhost:${echoPort}'));
+     const r = await Promise.allSettled(all.map((s) => s.opened));
+     await Promise.all(all.map((s) => s.close().catch(() => {})));
+     return r.map((x) => x.status);`,
+    slow,
+  );
+  assert.equal(out.filter((s) => s === 'fulfilled').length, 2, out.join());
+});
+
+test('a name that resolves only to private addresses is a policy denial', async () => {
+  denials.length = 0;
+  const out = await run(
+    `const s = connect('localhost:${echoPort}');
+     return await s.opened.then(() => 'opened', (e) => e.message);`,
+    { hosts: [`localhost:${echoPort}`] },
+  );
+  assert.match(out, /no public address/);
+  assert.deepEqual(denials.map((d) => [d.api, d.target, d.reason]), [['connect', `localhost:${echoPort}`, 'not a public address']]);
+  denials.length = 0;
+  const fetched = await runtime.run(`fetch('http://localhost:${echoPort}/').then(() => 'ok', (e) => e.message)`, {
+    tenant: 'sockets',
+    fetch: { hosts: ['localhost'] },
+  });
+  assert.match(fetched, /no public address/);
+  assert.deepEqual(denials.map((d) => [d.api, d.target, d.reason]), [['fetch', `http://localhost:${echoPort}/`, 'not a public address']]);
+});
