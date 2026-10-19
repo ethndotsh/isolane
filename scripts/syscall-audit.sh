@@ -15,7 +15,7 @@ mkdir -p "$out/\$\$"
 exec $(command -v strace) -f -ff -tt -qq -o "$out/\$\$/t" "$worker" --no-lockdown
 WRAP
 chmod +x "$wrapper"
-ISOLANE_WORKER="$wrapper" node --test test/runtime.test.mjs >"$out/tests.log" 2>&1 || true
+ISOLANE_WORKER="$wrapper" node --test $(ls test/*.test.mjs | grep -v lockdown) >"$out/tests.log" 2>&1 || true
 python3 - "$out" <<'PY'
 import collections, glob, os, re, sys
 root = sys.argv[1]

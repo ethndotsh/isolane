@@ -4,14 +4,14 @@
 import { mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { Runtime } from '../dist/index.js';
+import { Runtime, hostFunction } from '../dist/index.js';
 
 const root = mkdtempSync(join(tmpdir(), 'isolane-bench-'));
 writeFileSync(join(root, 'big.bin'), Buffer.alloc(1 << 20, 7));
 
-const rt = new Runtime();
-const vm = rt.tenant('bench').createIsolate({
-  hostFunctions: { echo: (x) => x, nop: () => undefined, syncNop: { sync: true, fn: () => undefined } },
+const rt = new Runtime({ strict: process.env.ISOLANE_STRICT !== '0' });
+const vm = rt.tenant('bench').isolate({
+  host: { echo: (x) => x, nop: () => undefined, syncNop: hostFunction({ sync: true, handler: () => undefined }) },
 });
 await vm.eval('1');
 
@@ -42,9 +42,9 @@ for (const size of [1 << 10, 64 << 10, 1 << 20]) {
 // Bytes: a 1 MiB Uint8Array through a host call, and a 1 MiB file read.
 await vm.eval('globalThis.u8 = new Uint8Array(1 << 20).fill(3)');
 await time('echo 1 MiB Uint8Array through a host call', 200, () => vm.eval('echo(u8).then((r) => r.length ?? Object.keys(r).length)'));
-const fsVm = rt.tenant('bench').createIsolate({ fs: { root } });
+const fsVm = rt.tenant('bench').isolate({ fs: { root } });
 await fsVm.eval('1');
 await time('fs.readFile of a 1 MiB file', 200, () => fsVm.eval('fs.readFile("/big.bin").then((b) => b.length)'));
-fsVm.dispose();
-vm.dispose();
+fsVm.close();
+vm.close();
 rt.close();

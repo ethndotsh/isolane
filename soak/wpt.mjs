@@ -9,10 +9,10 @@
 // WPT files are served by a static HTTP server on localhost, and isolates
 // fetch them with the platform's own fetch() under a network policy that
 // allows it. WPT's Python handlers (.py) don't run here: tests that need
-// them fail. Harness-only scaffolding: a `location`, and fetch() resolving
-// relative URLs against it (the platform has no base URL; `new Request` with
-// a relative URL throws, as in a worker without one). Files that only run
-// in a window (META global=window) are skipped.
+// them fail. Each isolate's base URL (`web: { baseUrl }`) is the test file's
+// URL, so `location` and relative URLs in fetch() and `new Request` work as
+// in a worker. Files that only run in a window (META global=window) are
+// skipped.
 import { execFileSync } from 'node:child_process';
 import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs';
 import { createServer } from 'node:http';
@@ -131,18 +131,12 @@ const runsHere = (globals) =>
 const SETUP = `
   // What WPT's generated .any.worker.html wrapper defines.
   globalThis.GLOBAL = { isWindow: () => false, isWorker: () => true, isShadowRealm: () => false };
-  globalThis.location = { search: "", hash: "", href: __wpt_url, pathname: __wpt_path, toString() { return this.href; } };
   // Before phase 2 (no platform timers), fall back to timers through the host.
   if (typeof setTimeout === "undefined") {
     let __nextTimer = 1; const __cancelled = new Set();
     globalThis.setTimeout = (fn, ms = 0, ...a) => { const id = __nextTimer++; __wpt_sleep(Math.min(Number(ms) || 0, 30000)).then(() => { if (!__cancelled.has(id)) typeof fn === "function" && fn(...a); }); return id; };
     globalThis.clearTimeout = (id) => __cancelled.add(id);
   }
-  // fetch() with relative URLs, against the test's location.
-  const __fetch = fetch;
-  globalThis.fetch = function fetch(input, init) {
-    return __fetch(typeof input === "string" ? new URL(input, __wpt_url).href : input, init);
-  };
 `;
 
 const results = {};
@@ -154,9 +148,9 @@ const statusName = ['pass', 'fail', 'timeout', 'notrun', 'precondition'];
 const crashes = [];
 const runtime = new Runtime({
   strict: process.env.ISOLANE_STRICT === '1',
-  idleTimeoutMs: 5000,
+  defaults: { limits: { idleMs: 5000 } },
   quarantineMs: null,
-  onSecurityEvent: (e) => crashes.push(e),
+  hooks: { onSecurityEvent: (e) => crashes.push(e) },
 });
 
 async function runFile(file, lane) {
@@ -179,15 +173,12 @@ async function runFile(file, lane) {
   let step = 'create';
   const crashesBefore = crashes.length;
   try {
-  isolate = runtime.createIsolate({
-    tenant: `wpt-${lane}`,
-    webPlatform: true,
-    allowCodeGeneration: true, // idlharness.js evals
-    timeoutMs: m.timeout === 'long' ? 60000 : 20000,
-    memoryLimitBytes: 256 << 20,
-    globals: { __wpt_url: `${origin}/${rel}`, __wpt_path: `/${rel}` },
-    network: { allow: ['localhost'], allowPrivateNetworks: true, maxRequests: 10_000 },
-    hostFunctions: {
+  isolate = runtime.tenant(`wpt-${lane}`).isolate({
+    web: { baseUrl: `${origin}/${rel}` },
+    eval: true, // idlharness.js evals
+    limits: { timeoutMs: m.timeout === 'long' ? 60000 : 20000, heapBytes: 256 << 20 },
+    fetch: { hosts: ['localhost'], privateNetworks: true, limits: { requests: 10_000 } },
+    host: {
       __wpt_sleep: (ms) => new Promise((r) => setTimeout(r, ms)),
     },
   });
@@ -224,10 +215,10 @@ async function runFile(file, lane) {
   } catch (e) {
     bucket.harnessErrors++;
     const crash = crashes.slice(crashesBefore).find((c) => c.tenant === `wpt-${lane}`);
-    if (crash) workerCrashes.push({ file: rel, step, kind: crash.kind, signal: crash.signal, exitCode: crash.exitCode, detail: crash.detail?.slice(0, 300) });
+    if (crash) workerCrashes.push({ file: rel, step, kind: crash.kind, detail: crash.detail?.slice(0, 300) });
     failures.push({ file: rel, step, error: `${e.code ?? ''} ${e.message}`.slice(0, 400) });
   } finally {
-    isolate?.dispose();
+    isolate?.close();
   }
 }
 

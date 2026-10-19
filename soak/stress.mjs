@@ -9,7 +9,7 @@ import { Runtime } from '../dist/index.js';
 const MB = 1 << 20;
 const strict = process.env.ISOLANE_STRICT === '1';
 const events = [];
-const newPool = (o = {}) => new Runtime({ strict, onSecurityEvent: (e) => events.push(e), ...o });
+const newPool = (o = {}) => new Runtime({ strict, hooks: { onSecurityEvent: (e) => events.push(e) }, ...o });
 
 const status = (pid) => {
   try {
@@ -46,10 +46,10 @@ const scenarios = {
     try {
       while (vms.length < 3000) {
         const t0 = now();
-        const batch = Array.from({ length: 100 }, () => pool.createIsolate({ tenant: 'flood' }));
+        const batch = Array.from({ length: 100 }, () => pool.tenant('flood').isolate());
         vms.push(...batch);
         await Promise.all(batch.map((vm) => vm.eval('globalThis.x = new Array(1000).fill(1); 1')));
-        const st = status(pool._workerPid('flood'));
+        const st = status(pool.diagnostics.workerPid('flood'));
         steps.push({ vms: vms.length, batchMs: +ms(t0).toFixed(0), ...st });
         if (st.rssMB > 4096 || ms(t0) > 30000) break;
       }
@@ -75,7 +75,7 @@ const scenarios = {
     );
     const wall = ms(t0);
     let rss = 0;
-    for (let i = 0; i < n; i++) rss += status(pool._workerPid(`t${i}`)).rssMB || 0;
+    for (let i = 0; i < n; i++) rss += status(pool.diagnostics.workerPid(`t${i}`)).rssMB || 0;
     pool.close();
     return {
       tenants: n,
@@ -97,7 +97,7 @@ const scenarios = {
     for (let i = 0; i < 300; i++) {
       await pool.run('1', { tenant: 'churn' });
       ok++;
-      process.kill(pool._workerPid('churn'), 'SIGKILL');
+      process.kill(pool.diagnostics.workerPid('churn'), 'SIGKILL');
       await sleep(5);
     }
     await sleep(500);
@@ -110,7 +110,7 @@ const scenarios = {
   async vmCycleLeak() {
     const pool = newPool();
     await pool.run('1', { tenant: 'cycle' });
-    const pid = pool._workerPid('cycle');
+    const pid = pool.diagnostics.workerPid('cycle');
     const samples = [{ cycles: 0, ...status(pid) }];
     for (let i = 1; i <= 3000; i++) {
       await pool.run('new Array(10000).fill(Math.random()).length', { tenant: 'cycle' });
@@ -126,15 +126,15 @@ const scenarios = {
   // One long-lived VM, many evals that allocate: does its memory plateau?
   async evalLeak() {
     const pool = newPool();
-    const vm = pool.createIsolate({ tenant: 'leak', memoryLimitBytes: 256 * MB });
+    const vm = pool.tenant('leak').isolate({ limits: { heapBytes: 256 * MB } });
     await vm.eval('1');
-    const pid = pool._workerPid('leak');
+    const pid = pool.diagnostics.workerPid('leak');
     const samples = [{ evals: 0, ...status(pid) }];
     for (let i = 1; i <= 20000; i++) {
       await vm.eval('({ a: new Array(200).fill(Math.random()), s: "x".repeat(1000) }).a.length');
       if (i % 5000 === 0) samples.push({ evals: i, ...status(pid) });
     }
-    vm.dispose();
+    vm.close();
     pool.close();
     return { samples };
   },
@@ -143,8 +143,8 @@ const scenarios = {
   // a quiet tenant (separate process) and a quiet VM in the same worker?
   async noisyNeighbor() {
     const pool = newPool();
-    const quietOther = pool.createIsolate({ tenant: 'quiet' });
-    const quietSame = pool.createIsolate({ tenant: 'noisy' });
+    const quietOther = pool.tenant('quiet').isolate();
+    const quietSame = pool.tenant('noisy').isolate();
     await Promise.all([quietOther.eval('1'), quietSame.eval('1')]);
     const probe = async (vm, out, until) => {
       while (Date.now() < until) {
@@ -161,9 +161,9 @@ const scenarios = {
     const same = [];
     let timeouts = 0;
     const hogs = Array.from({ length: 8 }, async () => {
-      const vm = pool.createIsolate({ tenant: 'noisy', timeoutMs: 200 });
+      const vm = pool.tenant('noisy').isolate({ limits: { timeoutMs: 200 } });
       while (Date.now() < until) await vm.eval('for (;;) {}').catch(() => timeouts++);
-      vm.dispose();
+      vm.close();
     });
     await Promise.all([...hogs, probe(quietOther, other, until), probe(quietSame, same, until)]);
     pool.close();
@@ -185,9 +185,9 @@ const scenarios = {
     const n = 20;
     const t0 = now();
     let peak = 0;
-    const sampler = setInterval(() => (peak = Math.max(peak, status(pool._workerPid('bomb')).rssMB || 0)), 50);
+    const sampler = setInterval(() => (peak = Math.max(peak, status(pool.diagnostics.workerPid('bomb')).rssMB || 0)), 50);
     const results = await Promise.allSettled(
-      Array.from({ length: n }, () => pool.run('const a = []; for (;;) a.push(new Array(1e5).fill(1));', { tenant: 'bomb', memoryLimitBytes: 64 * MB, timeoutMs: 20000 })),
+      Array.from({ length: n }, () => pool.run('const a = []; for (;;) a.push(new Array(1e5).fill(1));', { tenant: 'bomb', limits: { heapBytes: 64 * MB, timeoutMs: 20000 } })),
     );
     clearInterval(sampler);
     const codes = {};
@@ -210,7 +210,7 @@ for (const name of pickNames) {
   }
   report[name].seconds = +(ms(t0) / 1000).toFixed(1);
   const evs = events.slice(before).filter((e) => !(name === 'crashChurn' && e.signal === 'SIGKILL'));
-  if (evs.length) report[name].securityEvents = evs.slice(0, 5).map((e) => `${e.kind} ${e.signal ?? e.exitCode} ${e.detail ?? ''}`.slice(0, 200));
+  if (evs.length) report[name].securityEvents = evs.slice(0, 5).map((e) => `${e.kind} ${e.detail}`.slice(0, 200));
   process.stderr.write(`${name}: ${JSON.stringify(report[name]).slice(0, 400)}\n`);
 }
 console.log(JSON.stringify(report, null, 2));

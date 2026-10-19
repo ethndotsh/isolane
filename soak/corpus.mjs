@@ -39,7 +39,7 @@ globalThis.__natives = new Proxy({}, { get: () => () => undefined });
 `;
 
 // No quarantine: one bad file must not stop the rest from running.
-const pool = new Runtime({ strict: process.env.ISOLANE_STRICT === '1', quarantineMs: null, onSecurityEvent: (e) => events.push(e) });
+const pool = new Runtime({ strict: process.env.ISOLANE_STRICT === '1', quarantineMs: null, hooks: { onSecurityEvent: (e) => events.push(e) } });
 const events = [];
 const outcomes = {};
 const crashes = [];
@@ -55,14 +55,17 @@ async function runFile(path, tenant) {
   }
   const before = events.length;
   try {
-    await pool.run(prelude + src, { tenant, timeoutMs: 2000, memoryLimitBytes: 128 << 20 });
+    await pool.run(prelude + src, { tenant, limits: { timeoutMs: 2000, heapBytes: 128 << 20 } });
     outcomes.ok = (outcomes.ok ?? 0) + 1;
   } catch (e) {
     const c = e?.code ?? 'non-IsolaneError';
     outcomes[c] = (outcomes[c] ?? 0) + 1;
     if (c === 'ERR_WORKER_CRASHED' || c === 'ERR_WORKER_UNRESPONSIVE') {
       const ev = events.slice(before).find((x) => x.tenant === tenant);
-      crashes.push({ file: relative(root, path), code: c, signal: ev?.signal ?? null, exitCode: ev?.exitCode ?? null, kind: ev?.kind, detail: (ev?.detail ?? e.message).slice(-300) });
+      // The event's detail leads with `killed by SIGx` or `exit code n`.
+      const signal = /killed by (SIG\w+)/.exec(ev?.detail ?? '')?.[1] ?? null;
+      const exitCode = Number(/exit code (-?\d+)/.exec(ev?.detail ?? '')?.[1] ?? NaN);
+      crashes.push({ file: relative(root, path), code: c, signal, exitCode: Number.isNaN(exitCode) ? null : exitCode, kind: ev?.kind, detail: (ev?.detail ?? e.message).slice(-300) });
     }
   }
 }

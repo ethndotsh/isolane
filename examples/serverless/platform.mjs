@@ -23,12 +23,13 @@ const PORT = Number(process.env.PORT ?? 8787);
 const HOST_CALL_TIMEOUT_MS = 5000;
 
 const runtime = new Runtime({
-  defaults: { timeoutMs: 2000, memoryLimitBytes: 64 << 20 },
-  workerMemoryLimitBytes: 512 << 20,
-  onSecurityEvent: (e) => console.warn(`[security] ${e.kind} in ${e.tenant}: ${e.detail ?? e.signal ?? ''}`),
+  // ISOLANE_STRICT=0 for a development worker on a host without full isolation.
+  strict: process.env.ISOLANE_STRICT !== '0',
+  defaults: { limits: { timeoutMs: 2000, heapBytes: 64 << 20, workerMemoryBytes: 512 << 20 } },
+  hooks: { onSecurityEvent: (e) => console.warn(`[security] ${e.kind} in ${e.tenant}: ${e.detail}`) },
 });
 
-/** app name → { code, hostFunctions, network, socket } */
+/** app name → { code, host, fetch, socket, log } */
 const apps = new Map();
 
 // ---- deployers ----
@@ -69,8 +70,8 @@ wss.on('connection', (socket) => {
       apps.set(m.app, {
         code: m.code,
         socket,
-        hostFunctions: Object.fromEntries(names.map((n) => [n, remote(n)])),
-        network: Array.isArray(m.network) ? { allow: m.network.filter((h) => typeof h === 'string') } : undefined,
+        host: Object.fromEntries(names.map((n) => [n, remote(n)])),
+        fetch: Array.isArray(m.network) ? { hosts: m.network.filter((h) => typeof h === 'string') } : undefined,
         log: (e) => send({ t: 'log', level: e.level, message: e.message }),
       });
       return send({ t: 'deployed', app: m.app, url: `http://localhost:${PORT}/${m.app}/` });
@@ -128,9 +129,9 @@ const server = createServer(async (req, res) => {
   try {
     const out = await runtime.tenant(appName).run(`${app.code}\n;${INVOKE}`, {
       globals: { request },
-      hostFunctions: app.hostFunctions,
-      network: app.network,
-      onLog: app.log,
+      host: app.host,
+      fetch: app.fetch,
+      hooks: { onLog: app.log },
     });
     const body = typeof out.body === 'string' ? out.body : JSON.stringify(out.body ?? null);
     res.writeHead(Number.isInteger(out.status) ? out.status : 200, {
