@@ -392,6 +392,15 @@ test('crypto.subtle: a key\'s slots can\'t be read, changed, or forged', async (
     out.sameObject = key.usages === key.usages && key.algorithm === key.algorithm;
     out.exportKey = await crypto.subtle.exportKey('raw', key).then((b) => 'exported ' + b.byteLength, (e) => e.name);
     out.decrypt = await crypto.subtle.decrypt({ name: 'AES-GCM', iv: new Uint8Array(12) }, key, new Uint8Array(32)).then(() => 'decrypted', (e) => e.name);
+    // Own properties that shadow the getters change nothing either.
+    const shadowed = await crypto.subtle.generateKey({ name: 'AES-GCM', length: 256 }, false, ['encrypt']);
+    for (const [name, value] of [['extractable', true], ['usages', ['encrypt', 'decrypt', 'wrapKey']], ['type', 'public'], ['algorithm', { name: 'AES-GCM', length: 256 }]]) {
+      Object.defineProperty(shadowed, name, { value });
+    }
+    out.shadowExport = await crypto.subtle.exportKey('raw', shadowed).then((b) => 'exported ' + b.byteLength, (e) => e.name);
+    out.shadowDecrypt = await crypto.subtle.decrypt({ name: 'AES-GCM', iv: new Uint8Array(12) }, shadowed, new Uint8Array(32)).then(() => 'decrypted', (e) => e.name);
+    const wrapper = await crypto.subtle.generateKey({ name: 'AES-KW', length: 128 }, false, ['wrapKey']);
+    out.shadowWrap = await crypto.subtle.wrapKey('raw', shadowed, wrapper, 'AES-KW').then(() => 'wrapped', (e) => e.name);
     // A copy of the key's own properties onto a CryptoKey-shaped object isn't a key.
     const forged = Object.create(CryptoKey.prototype);
     for (const k of Reflect.ownKeys(key)) forged[k] = key[k];
@@ -405,6 +414,9 @@ test('crypto.subtle: a key\'s slots can\'t be read, changed, or forged', async (
     sameObject: true,
     exportKey: 'InvalidAccessError',
     decrypt: 'InvalidAccessError',
+    shadowExport: 'InvalidAccessError',
+    shadowDecrypt: 'InvalidAccessError',
+    shadowWrap: 'InvalidAccessError',
     forgedExport: 'TypeError',
     forgedGetter: 'TypeError',
   });
