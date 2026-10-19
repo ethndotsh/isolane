@@ -1,5 +1,5 @@
 // The web platform (web: true): WinterTC Minimum Common API phases 1
-// to 3, end to end through a real worker. Needs ISOLANE_WORKER.
+// to 4, end to end through a real worker. Needs ISOLANE_WORKER.
 import { test, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { createServer } from 'node:http';
@@ -28,7 +28,7 @@ test('the globals exist and are non-enumerable', async () => {
     'TransformStream', 'ByteLengthQueuingStrategy', 'CountQueuingStrategy', 'ReadableStreamBYOBReader',
     'Blob', 'File', 'FileReader', 'TextEncoderStream', 'TextDecoderStream', 'CompressionStream',
     'DecompressionStream', 'Headers', 'Request', 'Response', 'FormData', 'fetch',
-    'MessageChannel', 'MessagePort', 'MessageEvent',
+    'MessageChannel', 'MessagePort', 'MessageEvent', 'Crypto', 'CryptoKey', 'SubtleCrypto',
   ];
   const types = await run(`${JSON.stringify(names)}.map((n) => typeof globalThis[n])`);
   assert.ok(types.every((t) => t !== 'undefined'), JSON.stringify(Object.fromEntries(names.map((n, i) => [n, types[i]]))));
@@ -262,6 +262,106 @@ test('crypto.getRandomValues and randomUUID', async () => {
   const draw = '[crypto.randomUUID(), [...crypto.getRandomValues(new Uint8Array(4))], Math.random()]';
   assert.deepEqual(await run(draw, { random: { seed: 9 } }), await run(draw, { random: { seed: 9 } }));
   assert.notDeepEqual(await run(draw), await run(draw));
+});
+
+test('crypto.subtle: digests, MACs, ciphers, signatures, and key derivation', async () => {
+  const result = await run(`(async () => {
+    const { subtle } = crypto;
+    const enc = new TextEncoder();
+    const hex = (b) => [...new Uint8Array(b)].map((x) => x.toString(16).padStart(2, '0')).join('');
+    const out = {};
+    out.sha256 = hex(await subtle.digest('SHA-256', enc.encode('abc')));
+    const hmacKey = await subtle.importKey('raw', enc.encode('key'), { name: 'HMAC', hash: 'SHA-256' }, false, ['sign', 'verify']);
+    const mac = await subtle.sign('HMAC', hmacKey, enc.encode('The quick brown fox jumps over the lazy dog'));
+    out.hmac = hex(mac);
+    out.hmacVerifies = await subtle.verify('HMAC', hmacKey, mac, enc.encode('The quick brown fox jumps over the lazy dog'));
+    const aes = await subtle.generateKey({ name: 'AES-GCM', length: 256 }, false, ['encrypt', 'decrypt']);
+    const iv = crypto.getRandomValues(new Uint8Array(12));
+    const sealed = await subtle.encrypt({ name: 'AES-GCM', iv }, aes, enc.encode('hello'));
+    out.aes = new TextDecoder().decode(await subtle.decrypt({ name: 'AES-GCM', iv }, aes, sealed));
+    new Uint8Array(sealed)[0] ^= 1;
+    out.tampered = await subtle.decrypt({ name: 'AES-GCM', iv }, aes, sealed).then(() => 'decrypted', (e) => e.name);
+    for (const alg of [{ name: 'ECDSA', namedCurve: 'P-256' }, { name: 'Ed25519' }]) {
+      const pair = await subtle.generateKey(alg, true, ['sign', 'verify']);
+      const params = { name: alg.name, hash: 'SHA-256' };
+      const sig = await subtle.sign(params, pair.privateKey, enc.encode('m'));
+      out[alg.name] = [await subtle.verify(params, pair.publicKey, sig, enc.encode('m')), await subtle.verify(params, pair.publicKey, sig, enc.encode('n'))];
+    }
+    const password = await subtle.importKey('raw', enc.encode('password'), 'PBKDF2', false, ['deriveBits']);
+    out.pbkdf2 = hex(await subtle.deriveBits({ name: 'PBKDF2', hash: 'SHA-256', salt: enc.encode('salt'), iterations: 1 }, password, 256));
+    return out;
+  })()`);
+  assert.deepEqual(result, {
+    sha256: 'ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad',
+    hmac: 'f7bc83f430538424b13298e6aa6fb143ef4d59a14946175997479dbc2d1a3cd8',
+    hmacVerifies: true,
+    aes: 'hello',
+    tampered: 'OperationError',
+    ECDSA: [true, false],
+    Ed25519: [true, false],
+    pbkdf2: '120fb6cffcf8b32c43e7225256c4f837a86548c92ccc35480805987cb70be17b',
+  });
+});
+
+test('crypto.subtle: keys come from the isolate\'s randomness, so a seed reproduces them', async () => {
+  const draw = `(async () => {
+    const key = await crypto.subtle.generateKey({ name: 'HMAC', hash: 'SHA-256' }, true, ['sign']);
+    const pair = await crypto.subtle.generateKey({ name: 'Ed25519' }, true, ['sign', 'verify']);
+    const bytes = async (k, f) => [...new Uint8Array(await crypto.subtle.exportKey(f, k))];
+    return [await bytes(key, 'raw'), await bytes(pair.publicKey, 'raw')];
+  })()`;
+  assert.deepEqual(await run(draw, { random: { seed: 7 } }), await run(draw, { random: { seed: 7 } }));
+  assert.notDeepEqual(await run(draw), await run(draw));
+});
+
+test('crypto.subtle: a non-extractable key\'s material stays out of reach', async () => {
+  const result = await run(`(async () => {
+    const key = await crypto.subtle.generateKey({ name: 'AES-GCM', length: 128 }, false, ['encrypt', 'decrypt']);
+    const out = {};
+    out.exportKey = await crypto.subtle.exportKey('raw', key).then(() => 'exported', (e) => e.name);
+    // Nothing on the key leads to its bytes: no string or symbol property,
+    // and Deno's registered host-object symbol isn't there.
+    const reachable = [];
+    for (const k of Reflect.ownKeys(key)) {
+      const v = key[k];
+      if (v instanceof Uint8Array || typeof v === 'function') reachable.push(String(k));
+      if (v && typeof v === 'object') for (const kk of Reflect.ownKeys(v)) if (v[kk] instanceof Uint8Array) reachable.push(String(k) + '.' + String(kk));
+    }
+    out.reachable = reachable;
+    out.hostObject = typeof key[Symbol.for('Deno.core.hostObject')];
+    // It still clones (within the isolate), as a working key.
+    const clone = structuredClone(key);
+    const iv = new Uint8Array(12);
+    const sealed = await crypto.subtle.encrypt({ name: 'AES-GCM', iv }, key, new Uint8Array([1, 2, 3]));
+    out.clone = [clone instanceof CryptoKey, [...new Uint8Array(await crypto.subtle.decrypt({ name: 'AES-GCM', iv }, clone, sealed))]];
+    // Guest code can't forge one from bytes of its choice through the host-object symbol.
+    const forged = { [Symbol.for('Deno.core.hostObject')]: () => ({ type: 'CryptoKey', keyType: 'secret', extractable: true, usages: ['encrypt'], algorithm: { name: 'AES-GCM', length: 128 }, keyData: { type: 'secret', data: new Uint8Array(16) } }) };
+    try { out.forged = structuredClone(forged) instanceof CryptoKey; } catch (e) { out.forged = e.name; }
+    return out;
+  })()`);
+  assert.equal(result.exportKey, 'InvalidAccessError');
+  assert.deepEqual(result.reachable, []);
+  assert.equal(result.hostObject, 'undefined');
+  assert.deepEqual(result.clone, [true, [1, 2, 3]]);
+  assert.notEqual(result.forged, true);
+});
+
+test('crypto.subtle: long native work stops at the isolate\'s limits', async () => {
+  // PBKDF2 with 2^32 - 1 iterations would run for hours; it stops with the eval.
+  const started = Date.now();
+  await assert.rejects(
+    run(`(async () => {
+      const k = await crypto.subtle.importKey('raw', new Uint8Array(8), 'PBKDF2', false, ['deriveBits']);
+      return crypto.subtle.deriveBits({ name: 'PBKDF2', hash: 'SHA-256', salt: new Uint8Array(8), iterations: 2 ** 32 - 1 }, k, 256);
+    })()`, { limits: { timeoutMs: 300 } }),
+    (err) => err.code === 'ERR_LIMIT' && err.limit === 'timeoutMs',
+  );
+  assert.ok(Date.now() - started < 10_000);
+  // RSA keys are capped at 4096 bits (generation can't be interrupted).
+  assert.equal(
+    await run(`crypto.subtle.generateKey({ name: 'RSA-PSS', modulusLength: 8192, publicExponent: new Uint8Array([1, 0, 1]), hash: 'SHA-256' }, false, ['sign']).then(() => 'generated', (e) => e.name)`),
+    'OperationError',
+  );
 });
 
 test('self and navigator', async () => {

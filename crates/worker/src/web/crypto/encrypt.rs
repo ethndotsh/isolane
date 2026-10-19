@@ -6,15 +6,6 @@ use aes::cipher::BlockEncryptMut;
 use aes::cipher::KeyIvInit;
 use aes::cipher::StreamCipher;
 use aes::cipher::block_padding::Pkcs7;
-use aes_gcm::AeadInPlace;
-use aes_gcm::KeyInit;
-use aes_gcm::Nonce;
-use aes_gcm::aead::generic_array::ArrayLength;
-use aes_gcm::aead::generic_array::typenum::U12;
-use aes_gcm::aead::generic_array::typenum::U16;
-use aes_gcm::aes::Aes128;
-use aes_gcm::aes::Aes192;
-use aes_gcm::aes::Aes256;
 use ctr::Ctr32BE;
 use ctr::Ctr64BE;
 use ctr::Ctr128BE;
@@ -234,42 +225,6 @@ fn encrypt_aes_cbc(
   Ok(ciphertext)
 }
 
-fn encrypt_aes_gcm_general<N: ArrayLength<u8>>(
-  key: &[u8],
-  iv: Vec<u8>,
-  length: usize,
-  ciphertext: &mut [u8],
-  additional_data: Vec<u8>,
-) -> Result<aes_gcm::Tag, EncryptError> {
-  let nonce = Nonce::<N>::from_slice(&iv);
-  let tag = match length {
-    128 => {
-      let cipher = aes_gcm::AesGcm::<Aes128, N>::new_from_slice(key)
-        .map_err(|_| EncryptError::Failed)?;
-      cipher
-        .encrypt_in_place_detached(nonce, &additional_data, ciphertext)
-        .map_err(|_| EncryptError::Failed)?
-    }
-    192 => {
-      let cipher = aes_gcm::AesGcm::<Aes192, N>::new_from_slice(key)
-        .map_err(|_| EncryptError::Failed)?;
-      cipher
-        .encrypt_in_place_detached(nonce, &additional_data, ciphertext)
-        .map_err(|_| EncryptError::Failed)?
-    }
-    256 => {
-      let cipher = aes_gcm::AesGcm::<Aes256, N>::new_from_slice(key)
-        .map_err(|_| EncryptError::Failed)?;
-      cipher
-        .encrypt_in_place_detached(nonce, &additional_data, ciphertext)
-        .map_err(|_| EncryptError::Failed)?
-    }
-    _ => return Err(EncryptError::InvalidLength),
-  };
-
-  Ok(tag)
-}
-
 fn encrypt_aes_gcm(
   key: V8RawKeyData,
   length: usize,
@@ -280,36 +235,16 @@ fn encrypt_aes_gcm(
 ) -> Result<Vec<u8>, EncryptError> {
   let key = key.as_secret_key()?;
   let additional_data = additional_data.unwrap_or_default();
-
-  let mut ciphertext = data.to_vec();
-  // Fixed 96-bit OR 128-bit nonce
-  let tag = match iv.len() {
-    12 => encrypt_aes_gcm_general::<U12>(
-      key,
-      iv,
-      length,
-      &mut ciphertext,
-      additional_data,
-    )?,
-    16 => encrypt_aes_gcm_general::<U16>(
-      key,
-      iv,
-      length,
-      &mut ciphertext,
-      additional_data,
-    )?,
-    _ => return Err(EncryptError::InvalidIvLength),
-  };
-
-  // Truncated tag to the specified tag length.
-  // `tag` is fixed to be 16 bytes long; the JS checks (tag_length / 8) <= 16,
-  // and this does too: slicing past it would panic, which aborts the worker.
-  let tag = tag.get(..(tag_length / 8)).ok_or(EncryptError::InvalidLength)?;
-
-  // C | T
-  ciphertext.extend_from_slice(tag);
-
-  Ok(ciphertext)
+  // isolane: any IV length and tag length (super::gcm), where Deno's
+  // aes-gcm crate takes 96- or 128-bit IVs only.
+  if ![128, 192, 256].contains(&length) {
+    return Err(EncryptError::InvalidLength);
+  }
+  if iv.is_empty() {
+    return Err(EncryptError::InvalidIvLength);
+  }
+  super::gcm::seal(length, key, &iv, &additional_data, data, tag_length / 8)
+    .ok_or(EncryptError::Failed)
 }
 
 fn encrypt_aes_ocb(

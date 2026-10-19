@@ -6,6 +6,7 @@ use base64::Engine;
 use super::bridge::JsBuffer;
 use super::bridge::ToJsBuffer;
 use elliptic_curve::pkcs8::PrivateKeyInfo;
+use elliptic_curve::sec1::ToEncodedPoint;
 use p256::pkcs8::EncodePrivateKey;
 use rsa::pkcs1::UintRef;
 use rsa::pkcs8::der::Encode;
@@ -113,9 +114,7 @@ pub enum KeyData {
     y: String,
   },
   JwkPrivateEc {
-    #[allow(dead_code, reason = "deserialized but not directly read")]
     x: String,
-    #[allow(dead_code, reason = "deserialized but not directly read")]
     y: String,
     d: String,
   },
@@ -546,6 +545,32 @@ fn decode_b64url_to_field_bytes<C: elliptic_curve::Curve>(
   Ok(bytes)
 }
 
+/// A JWK's 'd': exactly the curve's field size (RFC 7518 6.2.2.1), with
+/// none of the padding decode_b64url_to_field_bytes allows for coordinates
+/// (isolane; Deno pads it).
+fn decode_b64url_exact_field_bytes<C: elliptic_curve::Curve>(
+  b64: &str,
+) -> Result<elliptic_curve::FieldBytes<C>, ImportKeyError> {
+  let bytes = BASE64_URL_SAFE_FORGIVING
+    .decode(b64)
+    .map_err(|_| ImportKeyError::InvalidB64Coordinate)?;
+  let mut out = elliptic_curve::FieldBytes::<C>::default();
+  if bytes.len() != out.len() {
+    return Err(ImportKeyError::InvalidJWKPrivateKey);
+  }
+  out.copy_from_slice(&bytes);
+  Ok(out)
+}
+
+/// A base64url field, decoded as is (its length is checked against the
+/// curve's by the caller).
+fn decode_b64url_exact_field_bytes_or(
+  b64: &str,
+  err: ImportKeyError,
+) -> Result<Vec<u8>, ImportKeyError> {
+  BASE64_URL_SAFE_FORGIVING.decode(b64).map_err(|_| err)
+}
+
 fn import_key_ec_jwk_to_point(
   x: String,
   y: String,
@@ -587,25 +612,43 @@ fn import_key_ec_jwk(
         raw_data: RustRawKeyData::Public(point_bytes.into()),
       })
     }
-    KeyData::JwkPrivateEc { d, .. } => {
+    KeyData::JwkPrivateEc { x, y, d } => {
+      // isolane: 'x' and 'y' must be d's public key, at the field size
+      // (Deno ignores them).
+      let x = decode_b64url_exact_field_bytes_or(&x, ImportKeyError::InvalidB64Coordinate)?;
+      let y = decode_b64url_exact_field_bytes_or(&y, ImportKeyError::InvalidB64Coordinate)?;
+      let matches = |point: &[u8]| {
+        point.len() == 1 + x.len() + y.len()
+          && point[1..1 + x.len()] == x[..]
+          && point[1 + x.len()..] == y[..]
+      };
       let pkcs8_der = match named_curve {
         EcNamedCurve::P256 => {
-          let d = decode_b64url_to_field_bytes::<p256::NistP256>(&d)?;
+          let d = decode_b64url_exact_field_bytes::<p256::NistP256>(&d)?;
           let pk = p256::SecretKey::from_bytes(&d)?;
+          if !matches(pk.public_key().to_encoded_point(false).as_bytes()) {
+            return Err(ImportKeyError::InvalidJWKPrivateKey);
+          }
 
           pk.to_pkcs8_der()
             .map_err(|_| ImportKeyError::InvalidJWKPrivateKey)?
         }
         EcNamedCurve::P384 => {
-          let d = decode_b64url_to_field_bytes::<p384::NistP384>(&d)?;
+          let d = decode_b64url_exact_field_bytes::<p384::NistP384>(&d)?;
           let pk = p384::SecretKey::from_bytes(&d)?;
+          if !matches(pk.public_key().to_encoded_point(false).as_bytes()) {
+            return Err(ImportKeyError::InvalidJWKPrivateKey);
+          }
 
           pk.to_pkcs8_der()
             .map_err(|_| ImportKeyError::InvalidJWKPrivateKey)?
         }
         EcNamedCurve::P521 => {
-          let d = decode_b64url_to_field_bytes::<p521::NistP521>(&d)?;
+          let d = decode_b64url_exact_field_bytes::<p521::NistP521>(&d)?;
           let pk = p521::SecretKey::from_bytes(&d)?;
+          if !matches(pk.public_key().to_encoded_point(false).as_bytes()) {
+            return Err(ImportKeyError::InvalidJWKPrivateKey);
+          }
 
           pk.to_pkcs8_der()
             .map_err(|_| ImportKeyError::InvalidJWKPrivateKey)?

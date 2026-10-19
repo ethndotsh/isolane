@@ -52,8 +52,7 @@ const DIRS = [
   'FileAPI/reading-data-section',
   'FileAPI/url',
   'compression',
-  'WebCryptoAPI/getRandomValues.any.js',
-  'WebCryptoAPI/randomUUID.https.any.js',
+  'WebCryptoAPI',
   'fetch/api/headers',
   'fetch/api/request',
   'fetch/api/response',
@@ -123,7 +122,10 @@ if (!root) {
     execFileSync('git', ['-C', root, 'sparse-checkout', 'set', '--no-cone', ...sparse()]);
     retry('checking out WPT', () => execFileSync('git', ['-C', root, 'checkout', '-q', WPT_COMMIT]));
   } else {
-    const missing = sparse().filter((d) => !existsSync(join(root, d)));
+    // Patterns the cached checkout wasn't made with (a directory can exist
+    // with only the single files an earlier DIRS listed in it).
+    const have = new Set(execFileSync('git', ['-C', root, 'sparse-checkout', 'list'], { encoding: 'utf8' }).split('\n'));
+    const missing = sparse().filter((d) => !have.has(d));
     if (missing.length) retry('extending the WPT checkout', () => execFileSync('git', ['-C', root, 'sparse-checkout', 'add', ...missing]));
   }
 }

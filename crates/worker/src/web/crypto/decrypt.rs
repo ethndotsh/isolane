@@ -5,15 +5,6 @@
 use aes::cipher::BlockDecryptMut;
 use aes::cipher::KeyIvInit;
 use aes::cipher::block_padding::Pkcs7;
-use aes_gcm::AeadInPlace;
-use aes_gcm::KeyInit;
-use aes_gcm::Nonce;
-use aes_gcm::aead::generic_array::ArrayLength;
-use aes_gcm::aead::generic_array::typenum::U12;
-use aes_gcm::aead::generic_array::typenum::U16;
-use aes_gcm::aes::Aes128;
-use aes_gcm::aes::Aes192;
-use aes_gcm::aes::Aes256;
 use ctr::Ctr32BE;
 use ctr::Ctr64BE;
 use ctr::Ctr128BE;
@@ -272,58 +263,6 @@ where
   Ok(plaintext)
 }
 
-fn decrypt_aes_gcm_gen<N: ArrayLength<u8>>(
-  key: &[u8],
-  tag: &aes_gcm::Tag,
-  nonce: &[u8],
-  length: usize,
-  additional_data: Vec<u8>,
-  plaintext: &mut [u8],
-) -> Result<(), DecryptError> {
-  let nonce = Nonce::from_slice(nonce);
-  match length {
-    128 => {
-      let cipher = aes_gcm::AesGcm::<Aes128, N>::new_from_slice(key)
-        .map_err(|_| DecryptError::Failed)?;
-      cipher
-        .decrypt_in_place_detached(
-          nonce,
-          additional_data.as_slice(),
-          plaintext,
-          tag,
-        )
-        .map_err(|_| DecryptError::Failed)?
-    }
-    192 => {
-      let cipher = aes_gcm::AesGcm::<Aes192, N>::new_from_slice(key)
-        .map_err(|_| DecryptError::Failed)?;
-      cipher
-        .decrypt_in_place_detached(
-          nonce,
-          additional_data.as_slice(),
-          plaintext,
-          tag,
-        )
-        .map_err(|_| DecryptError::Failed)?
-    }
-    256 => {
-      let cipher = aes_gcm::AesGcm::<Aes256, N>::new_from_slice(key)
-        .map_err(|_| DecryptError::Failed)?;
-      cipher
-        .decrypt_in_place_detached(
-          nonce,
-          additional_data.as_slice(),
-          plaintext,
-          tag,
-        )
-        .map_err(|_| DecryptError::Failed)?
-    }
-    _ => return Err(DecryptError::InvalidLength),
-  };
-
-  Ok(())
-}
-
 fn decrypt_aes_ctr(
   key: V8RawKeyData,
   key_length: usize,
@@ -366,47 +305,16 @@ fn decrypt_aes_gcm(
 ) -> Result<Vec<u8>, DecryptError> {
   let key = key.as_secret_key()?;
   let additional_data = additional_data.unwrap_or_default();
-
-  // The `aes_gcm` crate only supports 128 bits tag length.
-  //
-  // Note that encryption won't fail, it instead truncates the tag
-  // to the specified tag length as specified in the spec.
-  if tag_length != 128 {
-    return Err(DecryptError::InvalidTagLength);
+  // isolane: any IV length and tag length (super::gcm), where Deno's
+  // aes-gcm crate takes 96- or 128-bit IVs, and 128-bit tags only here.
+  if ![128, 192, 256].contains(&length) {
+    return Err(DecryptError::InvalidLength);
   }
-
-  // Shorter than the tag: OperationError (subtracting would underflow).
-  let sep = data
-    .len()
-    .checked_sub(tag_length / 8)
-    .ok_or(DecryptError::Failed)?;
-  let tag = &data[sep..];
-
-  // The actual ciphertext, called plaintext because it is reused in place.
-  let mut plaintext = data[..sep].to_vec();
-
-  // Fixed 96-bit or 128-bit nonce
-  match iv.len() {
-    12 => decrypt_aes_gcm_gen::<U12>(
-      key,
-      tag.into(),
-      &iv,
-      length,
-      additional_data,
-      &mut plaintext,
-    )?,
-    16 => decrypt_aes_gcm_gen::<U16>(
-      key,
-      tag.into(),
-      &iv,
-      length,
-      additional_data,
-      &mut plaintext,
-    )?,
-    _ => return Err(DecryptError::InvalidIvLength),
+  if iv.is_empty() {
+    return Err(DecryptError::InvalidIvLength);
   }
-
-  Ok(plaintext)
+  super::gcm::open(length, key, &iv, &additional_data, data, tag_length / 8)
+    .ok_or(DecryptError::Failed)
 }
 
 fn decrypt_aes_ocb(

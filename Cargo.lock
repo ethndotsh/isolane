@@ -1001,6 +1001,7 @@ dependencies = [
  "encoding_rs",
  "flate2",
  "getrandom",
+ "ghash",
  "hkdf",
  "hmac",
  "landlock",

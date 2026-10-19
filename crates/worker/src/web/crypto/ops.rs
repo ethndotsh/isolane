@@ -275,6 +275,9 @@ pub fn op_crypto_sign_key(
               CryptoHash::Sha512 => sha2::Sha512::digest(data).to_vec(),
               _ => return Err(CryptoError::UnsupportedAlgorithm),
             };
+            // isolane: as for P-521 below; P-384's minimum is 24 bytes,
+            // more than SHA-1's 20.
+            let prehash = pad_prehash(prehash, 24);
             let signature: P384Signature =
               signing_key.sign_prehash(&prehash)?;
             signature.to_bytes().to_vec()
@@ -334,6 +337,18 @@ fn hmac_sign(hash: CryptoHash, key: &[u8], data: &[u8]) -> Result<Vec<u8>, Crypt
     CryptoHash::Sha512 => mac::<hmac::Hmac<Sha512>>(key, data),
     CryptoHash::Sha3_256 | CryptoHash::Sha3_384 | CryptoHash::Sha3_512 => Err(CryptoError::UnsupportedAlgorithm),
   }
+}
+
+/// A hash left-padded with zeros to the curve's minimum prehash length
+/// (half its field size): the same integer, as FIPS 186 has a hash shorter
+/// than the order.
+fn pad_prehash(prehash: Vec<u8>, min: usize) -> Vec<u8> {
+  if prehash.len() >= min {
+    return prehash;
+  }
+  let mut padded = vec![0u8; min - prehash.len()];
+  padded.extend_from_slice(&prehash);
+  padded
 }
 
 /// Constant-time comparison, for HMAC verification.
@@ -481,6 +496,7 @@ pub fn op_crypto_verify_key(
                   CryptoHash::Sha512 => sha2::Sha512::digest(data).to_vec(),
                   _ => return Err(CryptoError::UnsupportedAlgorithm),
                 };
+                let prehash = pad_prehash(prehash, 24);
                 verifying_key.verify_prehash(&prehash, &signature).is_ok()
               }
               _ => false,
@@ -736,6 +752,10 @@ fn pbkdf2<M: Mac + hmac::digest::KeyInit + Clone>(
     u.update(&(i as u32 + 1).to_be_bytes());
     let mut u = u.finalize().into_bytes();
     let mut t = u.clone();
+    done += 1;
+    if done.is_multiple_of(4096) && crate::vm::out_of_time() {
+      return Err(CryptoError::Interrupted);
+    }
     for _ in 1..iterations {
       let mut next = prf.clone();
       next.update(&u);

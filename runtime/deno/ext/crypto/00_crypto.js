@@ -44,6 +44,7 @@ const {
   op_crypto_verify_key,
   op_crypto_wrap_key,
   op_crypto_x25519_public_key,
+  op_crypto_x448_public_key,
 } = core.ops;
 const {
   ArrayBufferIsView,
@@ -53,6 +54,7 @@ const {
   ArrayPrototypeFilter,
   ArrayPrototypeFind,
   ArrayPrototypeIncludes,
+  ArrayPrototypeIndexOf,
   DataViewPrototypeGetBuffer,
   DataViewPrototypeGetByteLength,
   DataViewPrototypeGetByteOffset,
@@ -321,7 +323,27 @@ function normalizeAlgorithm(algorithm, op) {
  * @param {ArrayBufferView | ArrayBuffer} input
  * @returns {Uint8Array}
  */
+// The first `length` bits of `bytes`, as an ArrayBuffer: whole bytes, and
+// the bits past `length` in the last one cleared (isolane; Deno keeps them).
+function truncateBits(bytes, length) {
+  const out = TypedArrayPrototypeSlice(bytes, 0, MathCeil(length / 8));
+  if (length % 8 !== 0) {
+    out[out.length - 1] &= 0xff << (8 - (length % 8));
+  }
+  return TypedArrayPrototypeGetBuffer(out);
+}
+
 function copyBuffer(input) {
+  // A detached buffer (or a view onto one) holds no bytes: an empty copy,
+  // as WebIDL's "get a copy of the bytes held by the buffer source" has it.
+  try {
+    return copyBufferInner(input);
+  } catch {
+    return new Uint8Array(0);
+  }
+}
+
+function copyBufferInner(input) {
   if (isTypedArray(input)) {
     return TypedArrayPrototypeSlice(
       new Uint8Array(
@@ -429,7 +451,11 @@ function constructKey(type, extractable, usages, algorithm, handle) {
   const key = webidl.createBranded(CryptoKey);
   key[_type] = type;
   key[_extractable] = extractable;
-  key[_usages] = usages;
+  // Each usage once (WebCrypto's "normalized" usages).
+  key[_usages] = ArrayPrototypeFilter(
+    usages,
+    (u, i) => ArrayPrototypeIndexOf(usages, u) === i,
+  );
   key[_algorithm] = algorithm;
   key[_handle] = handle;
   // isolane: the clone data carries the key material, so it isn't on a
@@ -568,9 +594,10 @@ class SubtleCrypto {
     );
     data = webidl.converters.BufferSource(data, prefix, "Argument 2");
 
-    data = copyBuffer(data);
-
+    // isolane: normalize first (it can run guest getters), then copy.
     algorithm = normalizeAlgorithm(algorithm, "digest");
+
+    data = copyBuffer(data);
 
     const result = await op_crypto_subtle_digest(
       algorithm.name,
@@ -599,10 +626,10 @@ class SubtleCrypto {
     data = webidl.converters.BufferSource(data, prefix, "Argument 3");
 
     // 2.
-    data = copyBuffer(data);
+    const normalizedAlgorithm = normalizeAlgorithm(algorithm, "encrypt");
 
     // 3.
-    const normalizedAlgorithm = normalizeAlgorithm(algorithm, "encrypt");
+    data = copyBuffer(data);
 
     // 8.
     if (normalizedAlgorithm.name !== key[_algorithm].name) {
@@ -642,10 +669,10 @@ class SubtleCrypto {
     data = webidl.converters.BufferSource(data, prefix, "Argument 3");
 
     // 2.
-    data = copyBuffer(data);
+    const normalizedAlgorithm = normalizeAlgorithm(algorithm, "decrypt");
 
     // 3.
-    const normalizedAlgorithm = normalizeAlgorithm(algorithm, "decrypt");
+    data = copyBuffer(data);
 
     // 8.
     if (normalizedAlgorithm.name !== key[_algorithm].name) {
@@ -781,15 +808,11 @@ class SubtleCrypto {
           );
         }
 
-        // 3. We only support 96-bit and 128-bit nonce for GCM, 1-15 bytes for OCB
+        // 3. isolane: any IV length for GCM (web/crypto/gcm.rs); 1-15
+        // bytes for OCB
         const ivLen = TypedArrayPrototypeGetByteLength(normalizedAlgorithm.iv);
         if (algorithm.name === "AES-GCM") {
-          if (!ArrayPrototypeIncludes([12, 16], ivLen)) {
-            throw new DOMException(
-              "Initialization vector length not supported",
-              "NotSupportedError",
-            );
-          }
+          // (no limit)
         } else { // AES-OCB
           if (ivLen < 1 || ivLen > 15) {
             throw new DOMException(
@@ -851,10 +874,10 @@ class SubtleCrypto {
     data = webidl.converters.BufferSource(data, prefix, "Argument 3");
 
     // 1.
-    data = copyBuffer(data);
+    const normalizedAlgorithm = normalizeAlgorithm(algorithm, "sign");
 
     // 2.
-    const normalizedAlgorithm = normalizeAlgorithm(algorithm, "sign");
+    data = copyBuffer(data);
 
     const handle = key[_handle];
     const keyData = WeakMapPrototypeGet(KEY_STORE, handle);
@@ -1006,6 +1029,8 @@ class SubtleCrypto {
       "Argument 5",
     );
 
+    const normalizedAlgorithm = normalizeAlgorithm(algorithm, "importKey");
+
     // 2.
     if (format !== "jwk") {
       if (ArrayBufferIsView(keyData) || isArrayBuffer(keyData)) {
@@ -1018,8 +1043,6 @@ class SubtleCrypto {
         throw new TypeError("Cannot import key: 'keyData' is not a JsonWebKey");
       }
     }
-
-    const normalizedAlgorithm = normalizeAlgorithm(algorithm, "importKey");
 
     // 8.
     const result = await importKeyInner(
@@ -1133,7 +1156,11 @@ class SubtleCrypto {
     );
     baseKey = webidl.converters.CryptoKey(baseKey, prefix, "Argument 2");
     if (length !== null) {
-      length = webidl.converters["unsigned long"](length, prefix, "Argument 3");
+      // [EnforceRange] (isolane): NaN, Infinity, and out-of-range lengths
+      // are TypeErrors, not wrapped into range.
+      length = webidl.converters["unsigned long"](length, prefix, "Argument 3", {
+        enforceRange: true,
+      });
     }
 
     // 2.
@@ -1276,13 +1303,13 @@ class SubtleCrypto {
     signature = webidl.converters.BufferSource(signature, prefix, "Argument 3");
     data = webidl.converters.BufferSource(data, prefix, "Argument 4");
 
+    const normalizedAlgorithm = normalizeAlgorithm(algorithm, "verify");
+
     // 2.
     signature = copyBuffer(signature);
 
     // 3.
     data = copyBuffer(data);
-
-    const normalizedAlgorithm = normalizeAlgorithm(algorithm, "verify");
 
     const handle = key[_handle];
     const keyData = WeakMapPrototypeGet(KEY_STORE, handle);
@@ -1428,7 +1455,11 @@ class SubtleCrypto {
       );
     }
 
-    // 10. NotSupportedError will be thrown in step 12.
+    // 10. NotSupportedError will be thrown in step 12, except for keys of
+    // algorithms with no export at all, which come first (isolane).
+    if (key[_algorithm].name === "HKDF" || key[_algorithm].name === "PBKDF2") {
+      throw new DOMException("Not implemented", "NotSupportedError");
+    }
     // 11.
     if (key[_extractable] === false) {
       throw new DOMException(
@@ -1549,9 +1580,6 @@ class SubtleCrypto {
       "Argument 7",
     );
 
-    // 2.
-    wrappedKey = copyBuffer(wrappedKey);
-
     let normalizedAlgorithm;
 
     try {
@@ -1561,6 +1589,9 @@ class SubtleCrypto {
       // 4.
       normalizedAlgorithm = normalizeAlgorithm(unwrapAlgorithm, "decrypt");
     }
+
+    // 2.
+    wrappedKey = copyBuffer(wrappedKey);
 
     // 6.
     const normalizedKeyAlgorithm = normalizeAlgorithm(
@@ -2351,6 +2382,14 @@ function importKeyX448(
         throw new DOMException("Invalid key extractability", "DataError");
       }
 
+      // isolane: an OKP JWK always has 'x' (RFC 8037), private ones too.
+      if (jwk.x === undefined) {
+        throw new DOMException(
+          "'x' property of JsonWebKey is required for OKP keys",
+          "DataError",
+        );
+      }
+
       // 9.
       if (jwk.d !== undefined) {
         // https://www.rfc-editor.org/rfc/rfc8037#section-2
@@ -2362,6 +2401,11 @@ function importKeyX448(
         }
         if (TypedArrayPrototypeGetByteLength(privateKeyData) !== 56) {
           throw new DOMException("Invalid private key data", "DataError");
+        }
+
+        // isolane: 'x' must be the public key of 'd'.
+        if (op_crypto_x448_public_key(privateKeyData) !== jwk.x) {
+          throw new DOMException("Invalid key pair", "DataError");
         }
 
         const handle = {};
@@ -2589,9 +2633,22 @@ function importKeyEd25519(
         }
       }
 
+      // isolane: 'alg', if present, names the algorithm (w3c/webcrypto#401).
+      if (jwk.alg !== undefined && jwk.alg !== "Ed25519" && jwk.alg !== "EdDSA") {
+        throw new DOMException("Invalid algorithm", "DataError");
+      }
+
       // 7.
       if (jwk.ext !== undefined && jwk.ext === false && extractable) {
         throw new DOMException("Invalid key extractability", "DataError");
+      }
+
+      // isolane: an OKP JWK always has 'x' (RFC 8037), private ones too.
+      if (jwk.x === undefined) {
+        throw new DOMException(
+          "'x' property of JsonWebKey is required for OKP keys",
+          "DataError",
+        );
       }
 
       // 8.
@@ -2605,6 +2662,11 @@ function importKeyEd25519(
         }
         if (TypedArrayPrototypeGetByteLength(privateKeyData) !== 32) {
           throw new DOMException("Invalid private key data", "DataError");
+        }
+
+        // isolane: 'x' must be the public key of 'd'.
+        if (op_crypto_jwk_x_ed25519(privateKeyData) !== jwk.x) {
+          throw new DOMException("Invalid key pair", "DataError");
         }
 
         const handle = {};
@@ -2819,6 +2881,14 @@ function importKeyX25519(
         throw new DOMException("Invalid key extractability", "DataError");
       }
 
+      // isolane: an OKP JWK always has 'x' (RFC 8037), private ones too.
+      if (jwk.x === undefined) {
+        throw new DOMException(
+          "'x' property of JsonWebKey is required for OKP keys",
+          "DataError",
+        );
+      }
+
       // 9.
       if (jwk.d !== undefined) {
         // https://www.rfc-editor.org/rfc/rfc8037#section-2
@@ -2830,6 +2900,11 @@ function importKeyX25519(
         }
         if (TypedArrayPrototypeGetByteLength(privateKeyData) !== 32) {
           throw new DOMException("Invalid private key data", "DataError");
+        }
+
+        // isolane: 'x' must be the public key of 'd'.
+        if (op_crypto_x25519_public_key(privateKeyData) !== jwk.x) {
+          throw new DOMException("Invalid key pair", "DataError");
         }
 
         const handle = {};
@@ -3610,6 +3685,14 @@ function importKeyEC(
       if (jwk.ext === false && extractable === true) {
         throw new DOMException(
           "'ext' property of JsonWebKey must not be false if extractable is true",
+          "DataError",
+        );
+      }
+
+      // isolane: 'crv' must be the key's curve.
+      if (jwk.crv !== normalizedAlgorithm.namedCurve) {
+        throw new DOMException(
+          "'crv' property of JsonWebKey does not match the named curve",
           "DataError",
         );
       }
@@ -4655,6 +4738,8 @@ function exportKeyEd25519(format, key, innerKey) {
       const jwk = {
         kty: "OKP",
         crv: "Ed25519",
+        // isolane: the algorithm name (w3c/webcrypto#401).
+        alg: "Ed25519",
         x,
         "key_ops": key.usages,
         ext: key[_extractable],
@@ -4711,10 +4796,10 @@ function exportKeyX448(format, key, innerKey) {
       return TypedArrayPrototypeGetBuffer(pkcs8Der);
     }
     case "jwk": {
-      if (key[_type] === "private") {
-        throw new DOMException("Not implemented", "NotSupportedError");
-      }
-      const x = op_crypto_base64url_encode(innerKey);
+      // isolane: private keys too (as X25519's).
+      const x = key[_type] === "private"
+        ? op_crypto_x448_public_key(innerKey)
+        : op_crypto_base64url_encode(innerKey);
       const jwk = {
         kty: "OKP",
         crv: "X448",
@@ -4722,6 +4807,9 @@ function exportKeyX448(format, key, innerKey) {
         "key_ops": key.usages,
         ext: key[_extractable],
       };
+      if (key[_type] === "private") {
+        jwk.d = op_crypto_base64url_encode(innerKey);
+      }
       return jwk;
     }
     default:
@@ -4975,7 +5063,7 @@ async function deriveBits(normalizedAlgorithm, baseKey, length) {
   switch (normalizedAlgorithm.name) {
     case "PBKDF2": {
       // 1.
-      if (length == null || length == 0 || length % 8 !== 0) {
+      if (length == null || length % 8 !== 0) {
         throw new DOMException("Invalid length", "OperationError");
       }
 
@@ -4985,6 +5073,9 @@ async function deriveBits(normalizedAlgorithm, baseKey, length) {
           "OperationError",
         );
       }
+
+      // A zero length derives nothing.
+      if (length === 0) return new ArrayBuffer(0);
 
       const handle = baseKey[_handle];
       const keyData = WeakMapPrototypeGet(KEY_STORE, handle);
@@ -5054,11 +5145,7 @@ async function deriveBits(normalizedAlgorithm, baseKey, length) {
         } else if (TypedArrayPrototypeGetByteLength(buf) * 8 < length) {
           throw new DOMException("Invalid length", "OperationError");
         } else {
-          return ArrayBufferPrototypeSlice(
-            TypedArrayPrototypeGetBuffer(buf),
-            0,
-            MathCeil(length / 8),
-          );
+          return truncateBits(buf, length);
         }
       } else {
         throw new DOMException("Not implemented", "NotSupportedError");
@@ -5066,9 +5153,12 @@ async function deriveBits(normalizedAlgorithm, baseKey, length) {
     }
     case "HKDF": {
       // 1.
-      if (length === null || length === 0 || length % 8 !== 0) {
+      if (length === null || length % 8 !== 0) {
         throw new DOMException("Invalid length", "OperationError");
       }
+
+      // A zero length derives nothing.
+      if (length === 0) return new ArrayBuffer(0);
 
       const handle = baseKey[_handle];
       const keyDerivationKey = WeakMapPrototypeGet(KEY_STORE, handle);
@@ -5129,11 +5219,7 @@ async function deriveBits(normalizedAlgorithm, baseKey, length) {
       ) {
         throw new DOMException("Invalid length", "OperationError");
       } else {
-        return ArrayBufferPrototypeSlice(
-          TypedArrayPrototypeGetBuffer(secret),
-          0,
-          MathCeil(length / 8),
-        );
+        return truncateBits(secret, length);
       }
     }
     case "X25519": {
@@ -5178,11 +5264,7 @@ async function deriveBits(normalizedAlgorithm, baseKey, length) {
       ) {
         throw new DOMException("Invalid length", "OperationError");
       } else {
-        return ArrayBufferPrototypeSlice(
-          TypedArrayPrototypeGetBuffer(secret),
-          0,
-          MathCeil(length / 8),
-        );
+        return truncateBits(secret, length);
       }
     }
     default:
@@ -5521,6 +5603,10 @@ webidl.converters.KeyUsage = webidl.createEnumConverter("KeyUsage", [
   "deriveBits",
   "wrapKey",
   "unwrapKey",
+  "encapsulateKey",
+  "encapsulateBits",
+  "decapsulateKey",
+  "decapsulateBits",
 ]);
 
 webidl.converters["sequence<KeyUsage>"] = webidl.createSequenceConverter(

@@ -24,6 +24,7 @@ mod decrypt;
 mod ed25519;
 mod encrypt;
 mod export_key;
+mod gcm;
 mod generate_key;
 mod import_key;
 mod key;
@@ -391,6 +392,13 @@ fn op_crypto_export_pkcs8_x25519(scope: &mut v8::PinScope, args: Args, rv: Rv) {
 fn op_crypto_generate_x448_keypair(scope: &mut v8::PinScope, args: Args, _rv: Rv) {
     keypair_or_throw(scope, args, x448::op_crypto_generate_x448_keypair);
 }
+fn op_crypto_x448_public_key(scope: &mut v8::PinScope, args: Args, mut rv: Rv) {
+    let key = arg!(buf_arg(scope, &args, 0));
+    match x448::op_crypto_x448_public_key(&key) {
+        Ok(s) => set_string(scope, &mut rv, &s),
+        Err(e) => fail(scope, &e),
+    }
+}
 fn op_crypto_derive_bits_x448(scope: &mut v8::PinScope, args: Args, rv: Rv) {
     derive_bits_curve(scope, args, rv, x448::op_crypto_derive_bits_x448);
 }
@@ -472,6 +480,7 @@ pub(super) fn op_fns() -> Natives {
         "op_crypto_export_spki_x25519" => op_crypto_export_spki_x25519,
         "op_crypto_export_pkcs8_x25519" => op_crypto_export_pkcs8_x25519,
         "op_crypto_generate_x448_keypair" => op_crypto_generate_x448_keypair,
+        "op_crypto_x448_public_key" => op_crypto_x448_public_key,
         "op_crypto_derive_bits_x448" => op_crypto_derive_bits_x448,
         "op_crypto_import_spki_x448" => op_crypto_import_spki_x448,
         "op_crypto_import_pkcs8_x448" => op_crypto_import_pkcs8_x448,

@@ -44,6 +44,21 @@ pub fn op_crypto_generate_x448_keypair(
   true
 }
 
+/// The public key (base64url) for a private one: isolane's, for X448 JWKs
+/// (Deno's X25519 has the same op; its X448 had no private JWKs).
+pub fn op_crypto_x448_public_key(
+  private_key: &[u8],
+) -> Result<String, X448Error> {
+  use base64::Engine;
+  let private_key: [u8; 56] = private_key
+    .try_into()
+    .map_err(|_| X448Error::InvalidKeyLength)?;
+  Ok(base64::prelude::BASE64_URL_SAFE_NO_PAD.encode(x448::x448_unchecked(
+    private_key,
+    x448::X448_BASEPOINT_BYTES,
+  )))
+}
+
 const MONTGOMERY_IDENTITY: [u8; 56] = [0; 56];
 
 pub fn op_crypto_derive_bits_x448(

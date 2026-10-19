@@ -8,7 +8,6 @@ use base64::Engine;
 use base64::prelude::BASE64_URL_SAFE_NO_PAD;
 use ed25519_dalek::Signer;
 use ed25519_dalek::SigningKey;
-use ed25519_dalek::Verifier;
 use ed25519_dalek::VerifyingKey;
 use elliptic_curve::pkcs8::PrivateKeyInfo;
 use rand_core::RngCore;
@@ -81,7 +80,9 @@ pub fn op_crypto_verify_ed25519(
   let Ok(signature) = ed25519_dalek::Signature::from_slice(signature) else {
     return false;
   };
-  key.verify(data, &signature).is_ok()
+  // Strict (RFC 8032) verification: WebCrypto rejects small-order public
+  // keys and non-canonical encodings (aws-lc-rs, in Deno, doesn't).
+  key.verify_strict(data, &signature).is_ok()
 }
 
 // id-Ed25519 OBJECT IDENTIFIER ::= { 1 3 101 112 }

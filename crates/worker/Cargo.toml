@@ -41,6 +41,7 @@ sha2 = { version = "0.10", features = ["oid"] }
 # so every key and nonce comes from the isolate's `random` policy.
 aes = "0.8"
 aes-gcm = "0.10"
+ghash = "0.5"
 aes-kw = { version = "0.2", features = ["alloc"] }
 base64 = "0.22"
 cbc = { version = "0.1", features = ["alloc"] }
