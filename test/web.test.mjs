@@ -682,6 +682,42 @@ test('CompressionStream and DecompressionStream round trip', async () => {
   );
 });
 
+test('decompression bombs stop at decompressedBytes while decoding, not after', async () => {
+  const zlib = await import('node:zlib');
+  const { execFileSync } = await import('node:child_process');
+  const zeros = Buffer.alloc(256 << 20);
+  const bombs = {
+    gzip: zlib.gzipSync(zeros, { level: 9 }),
+    deflate: zlib.deflateSync(zeros, { level: 9 }),
+    'deflate-raw': zlib.deflateRawSync(zeros, { level: 9 }),
+    brotli: zlib.brotliCompressSync(zeros), // 421 bytes
+  };
+  await run('0');
+  const pid = runtime.diagnostics.workerPid('web');
+  const rss = () => Number(execFileSync('ps', ['-o', 'rss=', '-p', String(pid)]).toString().trim()) * 1024;
+  for (const [format, bomb] of Object.entries(bombs)) {
+    const before = rss();
+    let peak = before;
+    const sampler = setInterval(() => (peak = Math.max(peak, rss())), 10);
+    const result = await run(`(async () => {
+      const bytes = Uint8Array.from(atob(bomb), (c) => c.charCodeAt(0));
+      let n = 0;
+      try {
+        for await (const c of new Blob([bytes]).stream().pipeThrough(new DecompressionStream('${format}'))) n += c.length;
+        return ['no error', n];
+      } catch (e) {
+        return [e.name, n <= 2 * 1024 * 1024];
+      }
+    })()`, { globals: { bomb: bomb.toString('base64') }, limits: { decompressedBytes: 1 << 20 } });
+    clearInterval(sampler);
+    peak = Math.max(peak, rss());
+    assert.deepEqual(result, ['TypeError', true], `${format} (${bomb.length} bytes)`);
+    // The decoder stops near the limit, so the worker never holds the
+    // bomb's output (the bomb's base64 and the isolate's own heap aside).
+    assert.ok(peak - before < 48 << 20, `${format}: the worker grew by ${((peak - before) / 2 ** 20).toFixed(0)} MiB`);
+  }
+});
+
 test('decompression keeps the output before trailing garbage, then errors', async () => {
   assert.deepEqual(
     await run(`(async () => {

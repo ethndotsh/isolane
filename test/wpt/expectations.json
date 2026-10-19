@@ -120,6 +120,10 @@
     "urlpattern-v-flag": {
       "category": "bug",
       "reason": "The URL Pattern standard now compiles regexp groups with the `v` flag (set operations like `[[a-z]--a]`); the `urlpattern` crate (0.4.2, as Deno uses) still generates regexps for the `u` flag, which `v` rejects (it requires `/` escaped in classes). Needs the crate to follow the spec; Deno fails the same subtests."
+    },
+    "brotli-large-window": {
+      "category": "by-design",
+      "reason": "Brotli's large-window extension (tentative, not RFC 7932) lets a stream of a few hundred bytes declare a window of up to 1 GiB, which the decoder allocates outside the V8 heap. isolane's decoder is strict: RFC 7932 windows only, at most 16 MiB."
     }
   },
   "files": {
@@ -7641,6 +7645,12 @@
         "chunk of type shared Uint8Array should error the stream for gzip": "FAIL",
         "chunk of type SharedArrayBuffer should error the stream for brotli": "FAIL",
         "chunk of type shared Uint8Array should error the stream for brotli": "FAIL"
+      }
+    },
+    "compression/decompression-brotli-large-window.tentative.any.js": {
+      "why": "brotli-large-window",
+      "subtests": {
+        "DecompressionStream should support brotli large window": "FAIL"
       }
     },
     "compression/idlharness.https.any.js": {

@@ -5,8 +5,10 @@
 //!
 //! Handles are ids into a per-VM-thread table (runtime/core.js frees an
 //! abandoned one when its JS handle is collected). Output is bounded per
-//! call, so a decompression bomb fails with a TypeError instead of growing
-//! one buffer until the allocator gives up (which would abort the worker).
+//! call (limits.decompressedBytes), and the decoders check it as they
+//! decode, in steps of at most a few hundred KiB, so a decompression bomb
+//! fails with a TypeError near the limit: it never fills a buffer first
+//! (421 bytes of brotli are 256 MiB of output).
 //! A write that fails partway (input after the end of the compressed data)
 //! returns what it decoded, and the stream fails right after that output is
 //! enqueued (native.compressionCheck, from 14_compression.js's transform;
@@ -23,19 +25,28 @@ use std::io::Write;
 
 use brotli::enc::encode::{BrotliEncoderOperation, BrotliEncoderParameter, BrotliEncoderStateStruct};
 use brotli::enc::StandardAlloc;
-use brotli::DecompressorWriter as BrotliDecoder;
+use brotli::{BrotliDecompressStream, BrotliResult, BrotliState};
 use flate2::write::{DeflateEncoder, GzDecoder, GzEncoder, ZlibEncoder};
 use flate2::{Compression, Decompress, FlushDecompress, Status};
 
 use super::{copy_bytes, new_u8array, string_arg, throw_type, Args, Rv};
 
-/// Most bytes one write (or the finish) may produce.
 /// Most output one call may produce (limits.decompressedBytes).
 fn max_output() -> usize {
     crate::limits::get().decompressed_bytes
 }
 /// Input is fed in slices this big, checking the output size in between.
 const INPUT_SLICE: usize = 64 << 10;
+/// gzip input goes to flate2's write decoder in pieces this small: deflate
+/// expands at most ~1032:1, so each produces at most ~530 KB before the
+/// output size is checked again.
+const GZIP_PIECE: usize = 512;
+/// The brotli decoder's output step.
+const BROTLI_STEP: usize = 64 << 10;
+
+fn too_large() -> std::io::Error {
+    std::io::Error::other(format!("output larger than {} bytes", max_output()))
+}
 
 const BROTLI_QUALITY: u32 = 6;
 const BROTLI_LGWIN: u32 = 22;
@@ -110,7 +121,7 @@ impl Inflater {
 
     /// Decode `input` into `out`; an error after some output carries it
     /// (PartialOutput), like the write decoders' errors.
-    fn write(&mut self, mut input: &[u8], flush: FlushDecompress) -> std::io::Result<Vec<u8>> {
+    fn write(&mut self, mut input: &[u8], flush: FlushDecompress, budget: usize) -> std::io::Result<Vec<u8>> {
         let mut out = Vec::new();
         let fail = |out: Vec<u8>, e: std::io::Error| {
             if out.is_empty() {
@@ -140,8 +151,8 @@ impl Inflater {
                 self.ended = true;
                 continue;
             }
-            if out.len() > max_output() {
-                return Err(std::io::Error::other(format!("output larger than {} bytes", max_output())));
+            if out.len() > budget {
+                return Err(too_large());
             }
             let full = out.len() == out.capacity();
             let progressed = consumed > 0 || out.len() > out_before;
@@ -156,6 +167,68 @@ impl Inflater {
     }
 }
 
+/// A brotli decoder driven directly (its Writer decodes a whole write into
+/// one buffer before the size can be checked), in steps of BROTLI_STEP.
+struct BrotliDecoder {
+    state: BrotliState<StandardAlloc, StandardAlloc, StandardAlloc>,
+    ended: bool,
+}
+
+impl BrotliDecoder {
+    fn new() -> Self {
+        // Strict: RFC 7932's window (up to 16 MiB), not the large-window
+        // extension's 1 GiB.
+        let a = StandardAlloc::default;
+        BrotliDecoder { state: BrotliState::new_strict(a(), a(), a()), ended: false }
+    }
+
+    fn write(&mut self, input: &[u8], finish: bool, budget: usize) -> std::io::Result<Vec<u8>> {
+        let mut out = Vec::new();
+        let fail = |out: Vec<u8>, e: std::io::Error| {
+            if out.is_empty() {
+                e
+            } else {
+                std::io::Error::new(e.kind(), PartialOutput(out, e.to_string()))
+            }
+        };
+        let mut step = vec![0u8; BROTLI_STEP];
+        let (mut available_in, mut input_offset, mut total_out) = (input.len(), 0, 0);
+        loop {
+            if self.ended {
+                if available_in == 0 {
+                    return Ok(out);
+                }
+                return Err(fail(out, invalid("junk after the end of the compressed data")));
+            }
+            let (mut available_out, mut output_offset) = (step.len(), 0);
+            let result = BrotliDecompressStream(
+                &mut available_in,
+                &mut input_offset,
+                input,
+                &mut available_out,
+                &mut output_offset,
+                &mut step,
+                &mut total_out,
+                &mut self.state,
+            );
+            out.extend_from_slice(&step[..output_offset]);
+            if out.len() > budget {
+                return Err(too_large());
+            }
+            match result {
+                BrotliResult::ResultSuccess => self.ended = true,
+                BrotliResult::NeedsMoreOutput => {}
+                BrotliResult::NeedsMoreInput => break,
+                BrotliResult::ResultFailure => return Err(fail(out, invalid("brotli decompression failed"))),
+            }
+        }
+        if finish {
+            return Err(fail(out, invalid("the compressed data ends early")));
+        }
+        Ok(out)
+    }
+}
+
 enum Inner {
     DeflateDecoder(Inflater),
     DeflateEncoder(ZlibEncoder<Vec<u8>>),
@@ -163,7 +236,7 @@ enum Inner {
     DeflateRawEncoder(DeflateEncoder<Vec<u8>>),
     GzDecoder(GzDecoder<Vec<u8>>),
     GzEncoder(GzEncoder<Vec<u8>>),
-    BrotliDecoder(Box<BrotliDecoder<Vec<u8>>>),
+    BrotliDecoder(Box<BrotliDecoder>),
     BrotliEncoder(Box<RawBrotliEncoder>),
 }
 
@@ -190,7 +263,7 @@ pub fn compression_new(scope: &mut v8::PinScope, args: Args, mut rv: Rv) {
         ("deflate-raw", false) => Inner::DeflateRawEncoder(DeflateEncoder::new(w, Compression::default())),
         ("gzip", true) => Inner::GzDecoder(GzDecoder::new(w)),
         ("gzip", false) => Inner::GzEncoder(GzEncoder::new(w, Compression::default())),
-        ("brotli", true) => Inner::BrotliDecoder(Box::new(BrotliDecoder::new(w, 4096))),
+        ("brotli", true) => Inner::BrotliDecoder(Box::new(BrotliDecoder::new())),
         ("brotli", false) => Inner::BrotliEncoder(Box::new(RawBrotliEncoder::new())),
         _ => {
             throw_type(scope, "Unsupported format");
@@ -206,8 +279,9 @@ pub fn compression_new(scope: &mut v8::PinScope, args: Args, mut rv: Rv) {
     rv.set_uint32(id);
 }
 
-/// Feed one slice; returns the output it produced.
-fn write_slice(inner: &mut Inner, input: &[u8]) -> std::io::Result<Vec<u8>> {
+/// Feed one slice; returns the output it produced, at most about `budget`
+/// bytes (a decoder fails with too_large() past it).
+fn write_slice(inner: &mut Inner, input: &[u8], budget: usize) -> std::io::Result<Vec<u8>> {
     fn drain<W: Write>(w: &mut W, flush: bool, input: &[u8], out: impl FnOnce(&mut W) -> &mut Vec<u8>) -> std::io::Result<Vec<u8>> {
         let r = w.write_all(input).and_then(|_| if flush { w.flush() } else { Ok(()) });
         let produced = std::mem::take(out(w));
@@ -219,13 +293,32 @@ fn write_slice(inner: &mut Inner, input: &[u8]) -> std::io::Result<Vec<u8>> {
         }
     }
     match inner {
-        Inner::DeflateDecoder(d) => d.write(input, FlushDecompress::None),
+        Inner::DeflateDecoder(d) => d.write(input, FlushDecompress::None, budget),
         Inner::DeflateEncoder(d) => drain(d, false, input, |d| d.get_mut()),
-        Inner::DeflateRawDecoder(d) => d.write(input, FlushDecompress::None),
+        Inner::DeflateRawDecoder(d) => d.write(input, FlushDecompress::None, budget),
         Inner::DeflateRawEncoder(d) => drain(d, false, input, |d| d.get_mut()),
-        Inner::GzDecoder(d) => drain(d, true, input, |d| d.get_mut()),
+        Inner::GzDecoder(d) => {
+            let mut out = Vec::new();
+            for piece in input.chunks(GZIP_PIECE) {
+                match drain(d, true, piece, |d| d.get_mut()) {
+                    Ok(produced) => out.extend_from_slice(&produced),
+                    Err(e) if out.is_empty() => return Err(e),
+                    Err(e) => {
+                        let msg = e.to_string();
+                        if let Some(partial) = e.into_inner().and_then(|inner| inner.downcast::<PartialOutput>().ok()) {
+                            out.extend_from_slice(&partial.0);
+                        }
+                        return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, PartialOutput(out, msg)));
+                    }
+                }
+                if out.len() > budget {
+                    return Err(too_large());
+                }
+            }
+            Ok(out)
+        }
         Inner::GzEncoder(d) => drain(d, false, input, |d| d.get_mut()),
-        Inner::BrotliDecoder(d) => drain(d.as_mut(), true, input, |d| d.get_mut()),
+        Inner::BrotliDecoder(d) => d.write(input, false, budget),
         Inner::BrotliEncoder(e) => e.compress(input, BrotliEncoderOperation::BROTLI_OPERATION_PROCESS),
     }
 }
@@ -255,8 +348,9 @@ pub fn compression_write(scope: &mut v8::PinScope, args: Args, mut rv: Rv) {
             None => return Err("resource is closed".to_string()),
         };
         let mut out = Vec::new();
-        for slice in input.chunks(INPUT_SLICE.max(1)) {
-            match write_slice(inner, slice) {
+        for slice in input.chunks(INPUT_SLICE) {
+            let budget = max_output().saturating_sub(out.len());
+            match write_slice(inner, slice, budget) {
                 Ok(produced) => out.extend_from_slice(&produced),
                 Err(e) => {
                     let msg = e.to_string();
@@ -307,15 +401,13 @@ pub fn compression_finish(scope: &mut v8::PinScope, args: Args, mut rv: Rv) {
         }
     };
     let out = match inner {
-        Inner::DeflateDecoder(mut d) => d.write(&[], FlushDecompress::Finish),
+        Inner::DeflateDecoder(mut d) => d.write(&[], FlushDecompress::Finish, max_output()),
         Inner::DeflateEncoder(d) => d.finish(),
-        Inner::DeflateRawDecoder(mut d) => d.write(&[], FlushDecompress::Finish),
+        Inner::DeflateRawDecoder(mut d) => d.write(&[], FlushDecompress::Finish, max_output()),
         Inner::DeflateRawEncoder(d) => d.finish(),
         Inner::GzDecoder(d) => d.finish(),
         Inner::GzEncoder(d) => d.finish(),
-        Inner::BrotliDecoder(d) => d
-            .into_inner()
-            .map_err(|_| std::io::Error::new(std::io::ErrorKind::InvalidData, "brotli decompression failed")),
+        Inner::BrotliDecoder(mut d) => d.write(&[], true, max_output()),
         Inner::BrotliEncoder(mut e) => e.compress(&[], BrotliEncoderOperation::BROTLI_OPERATION_FINISH),
     };
     match out {
