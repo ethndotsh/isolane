@@ -278,6 +278,37 @@ test('console output stays within logLineBytes and logBytes, with or without the
   }
 });
 
+test('console formats any value without throwing', async () => {
+  for (const web of [false, true]) {
+    const logs = [];
+    const result = await pool.run(
+      `const cyclic = {}; cyclic.self = cyclic;
+       const { proxy, revoke } = Proxy.revocable({}, {}); revoke();
+       const values = [
+         Symbol('x'), Symbol(), [Symbol('in array')],
+         { [Symbol.toPrimitive]() { throw new Error('no'); }, toJSON() { throw new Error('no'); } },
+         { get boom() { throw new Error('getter'); } },
+         new Proxy({}, { get() { throw new Error('trap'); }, ownKeys() { throw new Error('trap'); } }),
+         proxy, cyclic, new Array(1e6).fill(1), 10n, Object.create(null),
+       ];
+       for (const v of values) console.log('v', v);
+       console.log(...values);
+       try { throw Symbol('thrown'); } catch {}
+       'done'`,
+      { ...T, web, limits: { logLineBytes: 4096 }, hooks: { onLog: (e) => logs.push(e.message) } },
+    );
+    assert.equal(result, 'done', `web ${web}`);
+    assert.equal(logs.length, 12, `web ${web}: ${JSON.stringify(logs)}`);
+    assert.equal(logs[0], 'v Symbol(x)');
+    assert.equal(logs[1], 'v Symbol()');
+    assert.ok(logs.every((m) => Buffer.byteLength(m) <= 4096 + 3));
+  }
+  // A thrown symbol is reported, not lost.
+  const err = await pool.run(`throw Symbol('thrown')`, T).catch((e) => e);
+  assert.equal(err.code, 'ERR_GUEST_EXCEPTION');
+  assert.match(err.guest.message, /Symbol\(thrown\)/);
+});
+
 test('a huge unhandled error is cut to size, not a protocol violation', async () => {
   const rt = new Runtime({ strict });
   const security = [];

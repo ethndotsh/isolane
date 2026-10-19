@@ -10,8 +10,27 @@ use crate::proto::Out;
 /// `value`'s string form, at most `max` bytes of UTF-8 (cut at a character
 /// boundary, with "…" after a cut). Only what's kept is copied out of V8's
 /// heap, so a guest string of any size costs at most `max` bytes here.
+///
+/// Never throws: a value whose string conversion throws (a symbol, a
+/// `toString` or `Symbol.toPrimitive` that throws, a revoked proxy) gets
+/// V8's side-effect-free description instead (`Symbol(x)`, `#<Object>`).
+/// Termination (the watchdog) still propagates.
 pub(crate) fn bounded_string(scope: &mut v8::PinScope, value: v8::Local<v8::Value>, max: usize) -> String {
-    let Some(s) = value.to_string(scope) else { return String::new() };
+    let s = if value.is_string() {
+        value.cast::<v8::String>()
+    } else {
+        v8::tc_scope!(let tc, scope);
+        let converted = if value.is_symbol() { None } else { value.to_string(tc) };
+        if tc.has_terminated() {
+            tc.rethrow();
+            return String::new();
+        }
+        tc.reset();
+        match converted.or_else(|| value.to_detail_string(tc)) {
+            Some(s) => s,
+            None => return String::new(),
+        }
+    };
     let mut buf = vec![0u8; max.min(s.length().saturating_mul(3))];
     let n = s.write_utf8_v2(scope, &mut buf, v8::WriteFlags::kReplaceInvalidUtf8, None);
     buf.truncate(n);
@@ -69,6 +88,10 @@ fn console_method(scope: &mut v8::PinScope, args: v8::FunctionCallbackArguments,
             v8::tc_scope!(let tc, scope);
             match v8::json::stringify(tc, v) {
                 Some(s) => bounded_string(tc, s.into(), room),
+                None if tc.has_terminated() => {
+                    tc.rethrow();
+                    return;
+                }
                 None => {
                     tc.reset();
                     bounded_string(tc, v, room)
