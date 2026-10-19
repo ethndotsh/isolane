@@ -7,7 +7,8 @@
 //!    thread and its future children, hence before V8 starts its threads.
 //! 2. V8 initializes (the caller does this between the two steps).
 //! 3. seccomp-bpf on every thread (TSYNC): a syscall allowlist; anything
-//!    else kills the process.
+//!    else kills the process, except opening files, which fails with
+//!    EACCES as under Landlock.
 
 use serde::Serialize;
 
@@ -94,10 +95,19 @@ mod linux {
         libc::SYS_exit_group,
     ];
 
-    /// Install the allowlist on every thread. Two stacked filters, because a
+    /// Opening files fails with EACCES instead of killing the process: V8 and
+    /// abseil probe a few files lazily (CPU info under /sys) and fall back
+    /// when that fails, as they must under Landlock anyway.
+    #[cfg(target_arch = "x86_64")]
+    const OPEN: &[i64] = &[libc::SYS_open, libc::SYS_openat, libc::SYS_openat2];
+    #[cfg(not(target_arch = "x86_64"))]
+    const OPEN: &[i64] = &[libc::SYS_openat, libc::SYS_openat2];
+
+    /// Install the allowlist on every thread. Stacked filters, because a
     /// single seccompiler filter has one match action:
     /// - `clone3` returns ENOSYS, so libc falls back to `clone`, whose flags
     ///   the allowlist can inspect (`clone3` passes them in memory).
+    /// - opening files returns EACCES.
     /// - the allowlist kills the process on anything else, and allows
     ///   `clone` only with CLONE_THREAD (threads, never new processes).
     /// The kernel applies the most restrictive result across filters.
@@ -112,8 +122,18 @@ mod linux {
             arch,
         )
         .map_err(err)?;
+        let no_open = SeccompFilter::new(
+            OPEN.iter().map(|&s| (s, vec![])).collect(),
+            SeccompAction::Allow,
+            SeccompAction::Errno(libc::EACCES as u32),
+            arch,
+        )
+        .map_err(err)?;
 
-        let mut rules: BTreeMap<i64, Vec<SeccompRule>> = ALLOWED.iter().map(|&s| (s, vec![])).collect();
+        // Syscalls refused by the filters above must pass this one, or its
+        // kill (the most restrictive action) would win.
+        let mut rules: BTreeMap<i64, Vec<SeccompRule>> =
+            ALLOWED.iter().chain(OPEN).map(|&s| (s, vec![])).collect();
         rules.insert(libc::SYS_clone3, vec![]);
         let thread_only = SeccompCondition::new(
             0,
@@ -125,7 +145,7 @@ mod linux {
         rules.insert(libc::SYS_clone, vec![SeccompRule::new(vec![thread_only]).map_err(err)?]);
         let allowlist = SeccompFilter::new(rules, SeccompAction::KillProcess, SeccompAction::Allow, arch).map_err(err)?;
 
-        for filter in [no_clone3, allowlist] {
+        for filter in [no_clone3, no_open, allowlist] {
             let prog: BpfProgram = filter.try_into().map_err(err)?;
             seccompiler::apply_filter_all_threads(&prog).map_err(|e| format!("seccomp: {e}"))?;
         }

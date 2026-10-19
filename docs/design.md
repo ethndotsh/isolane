@@ -216,7 +216,7 @@ deploying. Development mode warns instead of refusing.
 | P0 V8 build | V8 from source with the sandbox, for darwin-arm64 (this machine) and linux-x64 (OrbStack) | A test binary asserts the sandbox is active on both |
 | P1 Worker | Isolate per VM, run/eval, limits, `TerminateExecution`, frozen clocks, codegen off, Promise host calls | Port of clockwork's lane tests passes against a bare worker |
 | P2 Library | Supervisor in TS, framed IPC, process per tenant, lifecycle, `LanePool` API | Same tests pass through `npm`-style usage in Node |
-| P3 Lockdown | seccomp, Landlock, opportunistic namespaces, Seatbelt, strict mode, `isolane doctor` | Escape suite: a test-only "compromised worker" mode tries `open`/`socket`/`execve`/`ptrace` and is killed every time, on each row of the host table |
+| P3 Lockdown | seccomp, Landlock, opportunistic namespaces, Seatbelt, strict mode, `isolane doctor` | Escape suite: a test-only "compromised worker" mode is refused `open` (EACCES) and killed on `socket`/`execve`/`ptrace`/`fork` every time, on each row of the host table |
 | P4 Packaging | CI matrix building V8 for six targets, per-platform npm packages, staleness checks | `npm install isolane` works on a clean machine per target |
 | P5 Security program | Patch pipeline, Fuzzilli, external review | **Gate: not recommended for untrusted code before P5 is complete** |
 

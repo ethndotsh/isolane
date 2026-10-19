@@ -44,7 +44,29 @@ const V8_FLAGS: &str = "--disallow-code-generation-from-strings \
     --enable-sharedarraybuffer-per-context \
     --no-harmony-temporal";
 
+/// V8's seed for Math.random and its hash tables. Without an entropy
+/// source, V8 on Linux reads /dev/urandom per isolate, which the lockdown
+/// forbids, and then falls back to seeding from the clock.
+#[cfg(target_os = "linux")]
+fn entropy(buf: &mut [u8]) -> bool {
+    let mut filled = 0;
+    while filled < buf.len() {
+        let rest = &mut buf[filled..];
+        let n = unsafe { libc::getrandom(rest.as_mut_ptr().cast(), rest.len(), 0) };
+        if n < 0 {
+            if std::io::Error::last_os_error().raw_os_error() == Some(libc::EINTR) {
+                continue;
+            }
+            return false;
+        }
+        filled += n as usize;
+    }
+    true
+}
+
 fn init_v8() {
+    #[cfg(target_os = "linux")]
+    v8::V8::set_entropy_source(entropy);
     v8::V8::set_flags_from_string(V8_FLAGS);
     let platform = v8::new_default_platform(0, false).make_shared();
     v8::V8::initialize_platform(platform);
@@ -198,7 +220,16 @@ fn escape_test(probe: &str) -> ExitCode {
     let path = CString::new("/etc/hostname").unwrap();
     let r = unsafe {
         match probe {
-            "open" => libc::open(path.as_ptr(), libc::O_RDONLY) as i64,
+            "open" => {
+                // Refused with EACCES, as Landlock would (V8 and abseil
+                // probe files and handle the failure).
+                let r = libc::open(path.as_ptr(), libc::O_RDONLY);
+                if r == -1 && std::io::Error::last_os_error().raw_os_error() == Some(libc::EACCES) {
+                    locked("DENIED");
+                    return ExitCode::SUCCESS;
+                }
+                r as i64
+            }
             "socket" => libc::socket(libc::AF_INET, libc::SOCK_STREAM, 0) as i64,
             "execve" => {
                 let bin = CString::new("/bin/true").unwrap();

@@ -20,7 +20,7 @@ test('the host provides strict-mode isolation', { skip: !linux || !process.env.I
 
 const probe = (name) => spawnSync(escapeWorker, ['--escape-test', name], { env: {}, encoding: 'utf8', timeout: 30_000 });
 
-for (const name of ['open', 'socket', 'execve', 'ptrace', 'fork']) {
+for (const name of ['socket', 'execve', 'ptrace', 'fork']) {
   test(`seccomp kills the worker on ${name}`, { skip: !linux || !escapeWorker }, () => {
     const r = probe(name);
     assert.match(r.stdout, /LOCKED/, `lockdown did not complete: ${r.stderr}`);
@@ -28,6 +28,12 @@ for (const name of ['open', 'socket', 'execve', 'ptrace', 'fork']) {
     assert.equal(r.signal, 'SIGSYS');
   });
 }
+
+test('seccomp refuses opening files with EACCES', { skip: !linux || !escapeWorker }, () => {
+  const r = probe('open');
+  assert.match(r.stdout, /DENIED/, `${r.stdout} ${r.stderr}`);
+  assert.equal(r.status, 0);
+});
 
 test('clone3 is refused with ENOSYS (threads fall back to clone)', { skip: !linux || !escapeWorker }, () => {
   const r = probe('clone3');
