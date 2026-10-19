@@ -12,17 +12,23 @@ architecture.
 ```js
 import { LanePool } from 'isolane';
 
-const pool = new LanePool({ strict: true });
-await pool.run('1 + 2', { tenant: 'acme' }); // 3
+using pool = new LanePool({ strict: true, onLog: (e) => console.log(`[${e.tenant}]`, e.message) });
+const acme = pool.tenant('acme', { timeoutMs: 1000, memoryLimitBytes: 64 << 20 });
 
-const vm = pool.createVm({
-  tenant: 'acme',
-  timeoutMs: 1000,
-  memoryLimitBytes: 64 << 20,
+await acme.run('1 + 2'); // 3
+
+// Inputs go in as data, never spliced into code.
+await acme.run('order.items.length', { globals: { order } });
+
+// Host functions are async in the guest.
+await acme.run('getUser(42).then((u) => u.plan)', {
   hostFunctions: { getUser: async (id) => db.users.find(id) },
 });
-await vm.eval('getUser(42).then((u) => u.plan)');
-vm.dispose();
+
+// Stateful VMs keep their globals between evals.
+using vm = acme.createVm();
+await vm.eval('globalThis.count = 0');
+await vm.eval('++count'); // 1
 ```
 
 ### What guest code can reach
@@ -37,6 +43,8 @@ code runs. Each VM can opt in to more:
 | `randomSeed` | none (OS randomness) | Seeds `Math.random` for reproducible runs. |
 | `allowCodeGeneration` | `false` | Allows `eval` and `new Function`. |
 | `network` | none | `fetch`, limited by a policy: `{ allow: ['api.example.com', '*.example.org'] }` or a function; methods, size, time, and request-count limits. Private and link-local addresses (cloud metadata) are refused, checked on the address actually connected to, and every redirect is re-checked. |
+| `sockets` | none | `connect('db.example.com:5432', { secureTransport: 'on' })` returning `{ read, write, close }`, limited by `host:port` patterns, the same address rules as `network`, and connection and idle limits. |
+| `allowWebAssembly` | `false` | Keeps `WebAssembly`. Off by default: its compilers are a large share of V8's attack surface. |
 | `fs` | none | A promise-based `fs` (readFile, writeFile, readdir, stat, exists, mkdir, rm) confined to `{ root }`, read-only unless `write: true`. Symlinks out of the root are refused, and errors never reveal host paths. |
 
 ```js
@@ -50,8 +58,13 @@ await pool.run(`
 });
 ```
 
-Network and file access are brokered: the worker still can't open a socket
-or a file. `fetch` and `fs` are host calls that this library checks against
+`console` always exists; its output goes to the pool's (or the VM's)
+`onLog`, up to 1 MiB per eval. Each tenant's worker is capped at
+`workerMemoryLimitBytes` (default 2 GiB; Linux), which covers ArrayBuffer
+and WebAssembly memory that a VM's heap limit doesn't.
+
+Network, socket, and file access are brokered: the worker still can't open a socket
+or a file. `fetch`, `connect`, and `fs` are host calls that this library checks against
 the policy and performs on the guest's behalf.
 
 ### Isolation

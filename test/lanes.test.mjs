@@ -242,6 +242,64 @@ test('network and fs policies reach the guest through the worker', async () => {
   }
 });
 
+test('console output reaches onLog', async () => {
+  const logs = [];
+  const logged = new LanePool({ strict: process.env.ISOLANE_STRICT === '1', onLog: (e) => logs.push(e) });
+  await logged.run('console.log("hi", 1, { a: [2] }); console.error(new Error("bad").message); console.warn(undefined, null)', T);
+  assert.deepEqual(logs, [
+    { tenant: 'acme', level: 'log', message: 'hi 1 {"a":[2]}' },
+    { tenant: 'acme', level: 'error', message: 'bad' },
+    { tenant: 'acme', level: 'warn', message: 'undefined null' },
+  ]);
+  const mine = [];
+  await logged.run('console.info("x".repeat(10))', { ...T, onLog: (e) => mine.push(e.message) });
+  assert.deepEqual(mine, ['xxxxxxxxxx']);
+  logs.length = 0;
+  await logged.run('for (let i = 0; i < 1e5; i++) console.log("y".repeat(100))', T);
+  assert.ok(logs.length < 12000, `${logs.length} lines got through the per-eval budget`);
+  assert.match(logs.at(-1).message, /output limit reached/);
+  logged.close();
+});
+
+test('globals pass inputs without touching the code string', async () => {
+  const input = { name: 'O\'Brien"); throw 1; //', n: 41 };
+  assert.deepEqual(await pool.run('[input.name, input.n + 1]', { ...T, globals: { input } }), [input.name, 42]);
+});
+
+test('tenant handles and defaults', async () => {
+  const acme = pool.tenant('acme', { globals: { a: 1 }, hostFunctions: { two: () => 2 } });
+  assert.equal(await acme.run('two().then((t) => a + t + b)', { globals: { b: 3 } }), 6);
+  const vm = acme.createVm();
+  await vm.eval('globalThis.k = a');
+  assert.equal(await vm.eval('k'), 1);
+  vm.dispose();
+  const withDefaults = new LanePool({ strict: process.env.ISOLANE_STRICT === '1', defaults: { globals: { d: 'yes' } } });
+  assert.equal(await withDefaults.tenant('t').run('d'), 'yes');
+  withDefaults.close();
+});
+
+test('allowWebAssembly opts in to WebAssembly', async () => {
+  // (module (func (export "add") (param i32 i32) (result i32) local.get 0 local.get 1 i32.add))
+  const wasm = [0, 97, 115, 109, 1, 0, 0, 0, 1, 7, 1, 96, 2, 127, 127, 1, 127, 3, 2, 1, 0, 7, 7, 1, 3, 97, 100, 100, 0, 0, 10, 9, 1, 7, 0, 32, 0, 32, 1, 106, 11];
+  const code = 'WebAssembly.instantiate(new Uint8Array(bytes)).then(({ instance }) => instance.exports.add(2, 3))';
+  assert.equal(await pool.run(code, { ...T, allowWebAssembly: true, globals: { bytes: wasm } }), 5);
+  await assert.rejects(pool.run(code, { ...T, globals: { bytes: wasm } }), /WebAssembly is not defined/);
+});
+
+test('the worker memory limit bounds memory outside the heap', { skip: process.platform !== 'linux' }, async () => {
+  const events = [];
+  const capped = new LanePool({ strict: process.env.ISOLANE_STRICT === '1', workerMemoryLimitBytes: 256 << 20, onSecurityEvent: (e) => events.push(e) });
+  const bomb = 'const keep = []; for (;;) keep.push(new Uint8Array(16 << 20).fill(1));';
+  const err = await capped.run(bomb, { ...T, timeoutMs: 20000 }).catch((e) => e);
+  assert.ok(
+    err.code === 'ERR_MEMORY_LIMIT' || (err.code === 'ERR_GUEST_EXCEPTION' && /allocation failed/i.test(err.message)),
+    `${err.code}: ${err.message}`,
+  );
+  assert.equal(await capped.run('1 + 1', T), 2); // the tenant keeps working
+  assert.deepEqual(events, []); // running out of memory isn't a security event
+  capped.close();
+});
+
 test('host functions: sync, async, and errors', async () => {
   const hostFunctions = {
     add: (a, b) => a + b,

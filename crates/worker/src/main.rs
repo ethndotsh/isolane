@@ -105,7 +105,7 @@ fn self_check() -> ExitCode {
     }
 }
 
-fn serve(lock_down: bool) -> ExitCode {
+fn serve(lock_down: bool, memory_limit: Option<u64>) -> ExitCode {
     let none = lockdown::Level::None;
     // Lockdown order matters: Landlock before V8 starts threads, seccomp
     // (on all threads) after V8 has initialized. A layer the host lacks
@@ -118,6 +118,12 @@ fn serve(lock_down: bool) -> ExitCode {
             return ExitCode::from(5);
         }
     };
+    if let Some(bytes) = memory_limit {
+        if let Err(e) = lockdown::memory_limit(bytes) {
+            eprintln!("isolane-worker: {e}");
+            return ExitCode::from(5);
+        }
+    }
     init_v8();
     if !sandbox_secure() {
         eprintln!("isolane-worker: the V8 sandbox is not securely configured; refusing to run guest code");
@@ -140,6 +146,7 @@ fn serve(lock_down: bool) -> ExitCode {
     });
 
     let mut vms: HashMap<u64, Sender<VmMsg>> = HashMap::new();
+    let mut failed: HashMap<u64, String> = HashMap::new();
     let mut stdin = BufReader::new(std::io::stdin().lock());
     loop {
         let frame = match read_frame(&mut stdin) {
@@ -167,6 +174,7 @@ fn serve(lock_down: bool) -> ExitCode {
                 clock,
                 random_seed,
                 allow_code_generation,
+                allow_web_assembly,
                 prelude,
             } => {
                 let (tx, rx) = mpsc::channel();
@@ -177,12 +185,26 @@ fn serve(lock_down: bool) -> ExitCode {
                     clock,
                     random_seed,
                     allow_code_generation,
+                    allow_web_assembly,
                     prelude,
                 };
-                vm::spawn(vm, config, rx, out.clone());
-                vms.insert(vm, tx);
+                match vm::spawn(vm, config, rx, out.clone()) {
+                    Ok(()) => {
+                        vms.insert(vm, tx);
+                    }
+                    // Out of threads or memory: this VM's evals fail, the
+                    // worker carries on.
+                    Err(e) => {
+                        failed.insert(vm, format!("vm could not start: {e}"));
+                    }
+                }
             }
             In::Eval { vm, req, code } => {
+                if let Some(cause) = failed.get(&vm) {
+                    let f = fail(ErrorCode::MemoryLimit, cause.clone());
+                    out.send(&Out::Result { req, ok: false, value: None, code: Some(f.code), message: Some(&f.message) });
+                    continue;
+                }
                 let sent = vms.get(&vm).map(|tx| tx.send(VmMsg::Eval { req, code }).is_ok());
                 if sent != Some(true) {
                     let f = fail(ErrorCode::VmDisposed, "vm has been disposed");
@@ -195,6 +217,7 @@ fn serve(lock_down: bool) -> ExitCode {
                 }
             }
             In::Dispose { vm } => {
+                failed.remove(&vm);
                 if let Some(tx) = vms.remove(&vm) {
                     let _ = tx.send(VmMsg::Dispose);
                 }
@@ -285,16 +308,36 @@ fn escape_test(probe: &str) -> ExitCode {
 }
 
 fn main() -> ExitCode {
+    let args: Vec<String> = std::env::args().skip(1).collect();
     #[cfg(all(feature = "escape-tests", target_os = "linux"))]
-    if std::env::args().nth(1).as_deref() == Some("--escape-test") {
-        return escape_test(&std::env::args().nth(2).unwrap_or_default());
+    if args.first().map(String::as_str) == Some("--escape-test") {
+        return escape_test(args.get(1).map(String::as_str).unwrap_or_default());
     }
-    match std::env::args().nth(1).as_deref() {
+    let mut mode = None;
+    let mut memory_limit = None;
+    for arg in &args {
+        if let Some(n) = arg.strip_prefix("--memory-limit=") {
+            match n.parse::<u64>() {
+                Ok(n) => memory_limit = Some(n),
+                Err(_) => {
+                    eprintln!("isolane-worker: bad --memory-limit {n}");
+                    return ExitCode::from(2);
+                }
+            }
+        } else if mode.is_none() {
+            mode = Some(arg.as_str());
+        } else {
+            mode = Some("");
+        }
+    }
+    match mode {
         Some("--self-check") => self_check(),
-        None | Some("--serve") => serve(true),
-        Some("--no-lockdown") => serve(false),
+        None | Some("--serve") => serve(true, memory_limit),
+        Some("--no-lockdown") => serve(false, memory_limit),
         Some(other) => {
-            eprintln!("usage: isolane-worker [--serve | --self-check | --no-lockdown] (got {other})");
+            eprintln!(
+                "usage: isolane-worker [--serve | --self-check | --no-lockdown] [--memory-limit=BYTES] (got {other})"
+            );
             ExitCode::from(2)
         }
     }

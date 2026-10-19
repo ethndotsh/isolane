@@ -5,14 +5,16 @@ import { test, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdirSync, mkdtempSync, readFileSync, symlinkSync, writeFileSync } from 'node:fs';
 import { createServer } from 'node:http';
+import { createServer as createTcpServer } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import vm from 'node:vm';
 import { capabilities, isPublicAddress } from '../dist/capabilities.js';
 
 /** A guest context with the policies installed; returns an async eval. */
-function guest(policies) {
+function guest(policies, track) {
   const caps = capabilities(policies, {});
+  track?.(caps);
   const ctx = vm.createContext({});
   const GuestError = vm.runInContext('Error', ctx);
   for (const [name, fn] of Object.entries(caps.hostFunctions)) {
@@ -119,6 +121,60 @@ test('fetch: a policy function decides each hop', async () => {
   const run = guest({ network: { allow: (url, method) => (seen.push(`${method} ${url.pathname}`), url.pathname !== '/json'), allowPrivateNetworks: true } });
   await assert.rejects(run(`await fetch('${base}/to-json')`), /not allowed/);
   assert.deepEqual(seen, ['GET /to-json', 'GET /json']);
+});
+
+// ---- sockets ----
+
+const tcp = createTcpServer((sock) => {
+  sock.on('data', (d) => {
+    if (d.toString() === 'bye') sock.end('ok bye');
+    else sock.write(Buffer.concat([Buffer.from('echo:'), d]));
+  });
+});
+await new Promise((r) => tcp.listen(0, '127.0.0.1', r));
+after(() => tcp.close());
+const tcpPort = tcp.address().port;
+
+test('sockets: connect, write, read, end of stream', async () => {
+  const run = guest({ sockets: { allow: [`localhost:${tcpPort}`], allowPrivateNetworks: true } });
+  const out = await run(`
+    const s = await connect('localhost:${tcpPort}');
+    await s.write('hi ✓');
+    const first = await s.read();
+    await s.write('bye');
+    let rest = '', chunk;
+    while ((chunk = await s.read()) !== null) rest += String.fromCharCode(...chunk);
+    return [first.length, rest];`);
+  assert.deepEqual(out, [Buffer.byteLength('echo:hi ✓'), 'ok bye']);
+});
+
+test('sockets: the allowlist and private-address rules apply', async () => {
+  const run = guest({ sockets: { allow: ['localhost:1', '*.example.com:443', 'db.example.com:*'] } });
+  await assert.rejects(run(`await connect('localhost:${tcpPort}')`), /not allowed by the socket policy/);
+  await assert.rejects(run(`await connect('localhost:1')`), /no public address/);
+  await assert.rejects(run(`await connect({ hostname: '10.0.0.1', port: 5432 })`), /not a public address/);
+  await assert.rejects(run(`await connect('example.com:443')`), /not allowed/); // apex isn't a subdomain
+  await assert.rejects(run(`await connect('localhost:99999')`), /port from 1 to 65535/);
+});
+
+test('sockets: connection cap, and disposal closes them', async () => {
+  let caps;
+  const run = guest({ sockets: { allow: [`localhost:${tcpPort}`], allowPrivateNetworks: true, maxConnections: 1 } }, (c) => (caps = c));
+  await run(`globalThis.s = await connect('localhost:${tcpPort}')`);
+  await assert.rejects(run(`await connect('localhost:${tcpPort}')`), /already has 1 sockets open/);
+  caps.dispose();
+  await assert.rejects(run(`await s.write('x')`), /socket is closed/);
+});
+
+// ---- globals ----
+
+test('globals arrive as plain data', async () => {
+  const caps = capabilities({ globals: { input: { n: 21, s: '"); throw 1; ("' } } }, {});
+  const ctx = vm.createContext({});
+  vm.runInContext(caps.prelude, ctx);
+  assert.equal(vm.runInContext('input.n * 2 + input.s.length', ctx), 42 + 15);
+  assert.throws(() => capabilities({ globals: JSON.parse('{"__proto__": 1}') }, {}), /reserved/);
+  assert.throws(() => capabilities({ globals: { f: 1 } }, { f: () => 1 }), /reserved or already a host function/);
 });
 
 // ---- fs ----

@@ -153,6 +153,25 @@ mod linux {
     }
 }
 
+/// Cap the worker's writable private memory (RLIMIT_DATA): V8's heap,
+/// ArrayBuffer and WebAssembly memory, JIT pages, thread stacks. The V8
+/// sandbox's address-space reservation is inaccessible until used, so it
+/// doesn't count. Past the cap, allocations fail: a guest ArrayBuffer throws
+/// a RangeError, and V8 itself running out exits the worker (code 6).
+/// Not enforced on macOS, which ignores RLIMIT_DATA.
+pub fn memory_limit(bytes: u64) -> Result<(), String> {
+    #[cfg(target_os = "linux")]
+    {
+        let lim = libc::rlimit { rlim_cur: bytes, rlim_max: bytes };
+        if unsafe { libc::setrlimit(libc::RLIMIT_DATA, &lim) } != 0 {
+            return Err(format!("setrlimit(RLIMIT_DATA): {}", std::io::Error::last_os_error()));
+        }
+    }
+    #[cfg(not(target_os = "linux"))]
+    let _ = bytes;
+    Ok(())
+}
+
 /// Step 1 (before V8 starts any threads).
 pub fn before_v8() -> Result<Level, String> {
     #[cfg(target_os = "linux")]

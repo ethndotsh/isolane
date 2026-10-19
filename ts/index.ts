@@ -4,17 +4,26 @@
 
 import { resolve as resolvePath } from 'node:path';
 
-import { capabilities, type FsPolicy, type NetworkPolicy } from './capabilities.js';
-import { WorkerProcess, meetsStrict, type IsolationInfo, type WorkerExit, type WorkerMessage } from './worker.js';
+import { capabilities, type FsPolicy, type NetworkPolicy, type SocketPolicy } from './capabilities.js';
+import {
+  OOM_EXIT_CODE,
+  WorkerProcess,
+  meetsStrict,
+  type IsolationInfo,
+  type LogLevel,
+  type WorkerExit,
+  type WorkerMessage,
+} from './worker.js';
 
-export type { IsolationInfo, LockdownLevel } from './worker.js';
-export type { FsPolicy, NetworkPolicy } from './capabilities.js';
+export type { IsolationInfo, LockdownLevel, LogLevel } from './worker.js';
+export type { FsPolicy, NetworkPolicy, SocketPolicy } from './capabilities.js';
 
 /**
  * Why an eval failed:
  * - `ERR_TIMEOUT`: `timeoutMs` elapsed. The VM stays usable.
  * - `ERR_GUEST_EXCEPTION`: the guest threw, or its result promise rejected.
- * - `ERR_MEMORY_LIMIT`: the VM exceeded `memoryLimitBytes`; it is retired.
+ * - `ERR_MEMORY_LIMIT`: the VM exceeded `memoryLimitBytes` (it is retired),
+ *   or the tenant's worker hit `workerMemoryLimitBytes` (it is restarted).
  * - `ERR_VM_TERMINATED`: an earlier eval retired this VM; create a new one.
  * - `ERR_VM_DISPOSED`: `dispose()` was called.
  * - `ERR_NOT_SERIALIZABLE`: the completion value isn't JSON-serializable.
@@ -64,15 +73,32 @@ export class LaneError extends Error {
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 export type HostFunction = (...args: any[]) => unknown;
 
-export interface EvalOptions {
-  /** Which tenant's worker process runs this code. Required. */
+/** A line of guest console output. */
+export interface LogEntry {
   tenant: string;
+  level: LogLevel;
+  message: string;
+}
+
+/** Everything about a VM except which tenant it belongs to. */
+export interface VmOptions {
   /** Wall-clock budget per eval (and per host-reply continuation). */
   timeoutMs?: number;
-  /** Cap on the V8 heap. Exceeding it retires the VM. */
+  /**
+   * Cap on the VM's V8 heap. Exceeding it retires the VM. (ArrayBuffer and
+   * WebAssembly memory live outside the heap; the tenant's worker as a
+   * whole is capped by `workerMemoryLimitBytes`.)
+   */
   memoryLimitBytes?: number;
   /** Functions installed as guest globals, by name. */
   hostFunctions?: Record<string, HostFunction>;
+  /**
+   * JSON values installed as guest globals before any code runs: the safe
+   * way to pass inputs, instead of splicing them into the code string.
+   */
+  globals?: Record<string, unknown>;
+  /** Where this VM's `console` output goes. Default: the pool's `onLog`. */
+  onLog?: (entry: LogEntry) => void;
   /**
    * The wall clock guest code sees (`Date`, `Intl`'s default "now").
    * - `'frozen'` (default): moves only when an eval starts and when a host
@@ -89,8 +115,13 @@ export interface EvalOptions {
    * every VM. A seeded VM's hash seeds are predictable to its own code.
    */
   randomSeed?: number;
-  /** Allow `eval` and `new Function`. Default false. WebAssembly stays off. */
+  /** Allow `eval` and `new Function`. Default false. */
   allowCodeGeneration?: boolean;
+  /**
+   * Keep the `WebAssembly` global and allow compiling modules. Default
+   * false: WebAssembly's compilers are a large share of V8's attack surface.
+   */
+  allowWebAssembly?: boolean;
   /**
    * Give guest code `fetch` (with `Response` and `Headers`), brokered by
    * this process under the policy. Default: no network.
@@ -102,6 +133,25 @@ export interface EvalOptions {
    * this process under the policy. Default: no files.
    */
   fs?: FsPolicy;
+  /**
+   * Give guest code `connect(address, { secureTransport })`, TCP or TLS
+   * sockets brokered by this process under the policy. Default: none.
+   */
+  sockets?: SocketPolicy;
+}
+
+export interface EvalOptions extends VmOptions {
+  /** Which tenant's worker process runs this code. Required. */
+  tenant: string;
+}
+
+/** Later options win; host functions and globals merge by name. */
+function mergeOptions<T extends VmOptions>(base: VmOptions | undefined, over: T): T {
+  if (!base) return over;
+  const merged = { ...base, ...over } as T;
+  if (base.hostFunctions || over.hostFunctions) merged.hostFunctions = { ...base.hostFunctions, ...over.hostFunctions };
+  if (base.globals || over.globals) merged.globals = { ...base.globals, ...over.globals };
+  return merged;
 }
 
 type ClockSpec = { mode: 'frozen' } | { mode: 'realtime' } | { mode: 'fixed'; fixedMs: number };
@@ -110,6 +160,7 @@ interface VmSetup {
   clock: ClockSpec;
   hostFunctions: Record<string, HostFunction>;
   prelude?: string;
+  dispose(): void;
 }
 
 /** Validate a VM's options and build what its worker needs. Throws on bad options. */
@@ -120,7 +171,7 @@ function vmSetup(opts: EvalOptions): VmSetup {
   }
   const user = { ...(opts.hostFunctions ?? {}) };
   const caps = capabilities(opts, user);
-  return { clock, hostFunctions: { ...user, ...caps.hostFunctions }, prelude: caps.prelude };
+  return { clock, hostFunctions: { ...user, ...caps.hostFunctions }, prelude: caps.prelude, dispose: caps.dispose };
 }
 
 function clockSpec(clock: EvalOptions['clock']): ClockSpec {
@@ -157,7 +208,20 @@ export interface LanePoolOptions {
    * suspend the tenant's account.
    */
   onSecurityEvent?: (event: SecurityEvent) => void;
+  /** Where guest `console` output goes, unless a VM sets its own. Default: dropped. */
+  onLog?: (entry: LogEntry) => void;
+  /**
+   * Cap on each tenant worker's memory (Linux; RLIMIT_DATA): every VM's
+   * heap, ArrayBuffers, and WebAssembly memory together. A worker past it
+   * exits, its in-flight evals reject with `ERR_MEMORY_LIMIT`, and the next
+   * call starts a fresh one. Default 2 GiB; `null` for no cap.
+   */
+  workerMemoryLimitBytes?: number | null;
+  /** Options every VM starts from; a tenant's and a call's options override them. */
+  defaults?: VmOptions;
 }
+
+const DEFAULT_WORKER_MEMORY_LIMIT = 2 * 1024 ** 3;
 
 interface Pending {
   resolve(value: unknown): void;
@@ -179,6 +243,8 @@ class TenantWorker {
   #proc: WorkerProcess;
   #requests = new Map<number, Pending>();
   #hostFunctions = new Map<number, Record<string, HostFunction>>();
+  #disposers = new Map<number, () => void>();
+  #loggers = new Map<number, ((entry: LogEntry) => void) | undefined>();
   #timeouts = new Map<number, number | undefined>();
   // When each VM's queued evals will have run out their timeouts: a VM runs
   // its evals one at a time, so a queued eval's clock starts after these.
@@ -193,6 +259,7 @@ class TenantWorker {
     workerPath: string,
     idleTimeoutMs: number,
     strict: boolean,
+    memoryLimitBytes: number | undefined,
     onGone: (worker: TenantWorker, exit: WorkerExit) => void,
   ) {
     this.tenant = tenant;
@@ -205,6 +272,7 @@ class TenantWorker {
         onExit: (exit) => this.#onExit(exit),
       },
       strict,
+      memoryLimitBytes,
     );
   }
 
@@ -216,8 +284,10 @@ class TenantWorker {
     return this.#proc.pid;
   }
 
-  createVm(vm: number, opts: EvalOptions, setup: VmSetup): void {
+  createVm(vm: number, opts: VmOptions, setup: VmSetup, onLog: ((entry: LogEntry) => void) | undefined): void {
     this.#hostFunctions.set(vm, setup.hostFunctions);
+    this.#disposers.set(vm, setup.dispose);
+    this.#loggers.set(vm, onLog);
     this.#timeouts.set(vm, opts.timeoutMs);
     this.#vmCount++;
     this.#touch();
@@ -230,6 +300,7 @@ class TenantWorker {
       clock: setup.clock,
       randomSeed: opts.randomSeed,
       allowCodeGeneration: opts.allowCodeGeneration === true,
+      allowWebAssembly: opts.allowWebAssembly === true,
       prelude: setup.prelude,
     });
   }
@@ -259,6 +330,9 @@ class TenantWorker {
 
   disposeVm(vm: number): void {
     if (!this.#hostFunctions.delete(vm)) return;
+    this.#disposers.get(vm)?.();
+    this.#disposers.delete(vm);
+    this.#loggers.delete(vm);
     this.#timeouts.delete(vm);
     this.#busyUntil.delete(vm);
     this.#vmCount--;
@@ -291,6 +365,15 @@ class TenantWorker {
         pending.reject(new LaneError(code, msg.message));
       }
       this.#touch();
+      return;
+    }
+    if (msg.t === 'log') {
+      const log = this.#loggers.get(msg.vm);
+      try {
+        log?.({ tenant: this.tenant, level: msg.level, message: msg.message });
+      } catch {
+        // A throwing logger must not take the worker connection down.
+      }
       return;
     }
     // hostCall
@@ -334,7 +417,10 @@ class TenantWorker {
 
   #onExit(exit: WorkerExit): void {
     clearTimeout(this.#idleTimer);
-    const err = new LaneError('ERR_WORKER_CRASHED', `worker for tenant ${this.tenant} ${describeExit(exit)}`);
+    for (const dispose of this.#disposers.values()) dispose();
+    this.#disposers.clear();
+    const code: LaneErrorCode = isOutOfMemory(exit) ? 'ERR_MEMORY_LIMIT' : 'ERR_WORKER_CRASHED';
+    const err = new LaneError(code, `worker for tenant ${this.tenant} ${describeExit(exit)}`);
     for (const p of this.#requests.values()) {
       clearTimeout(p.timer);
       p.reject(err);
@@ -344,7 +430,10 @@ class TenantWorker {
   }
 }
 
+const isOutOfMemory = (exit: WorkerExit) => exit.reason === 'exited' && exit.code === OOM_EXIT_CODE;
+
 function describeExit(exit: WorkerExit): string {
+  if (isOutOfMemory(exit)) return 'ran out of memory (workerMemoryLimitBytes)';
   if (exit.reason === 'protocol-violation') return `broke the protocol (${exit.detail})`;
   if (exit.reason === 'insufficient-isolation') return `was refused (${exit.detail})`;
   if (exit.reason === 'unresponsive') return `stopped responding and was killed (${exit.detail})`;
@@ -362,6 +451,9 @@ export class LanePool {
   #workerPath: string;
   #idleTimeoutMs: number;
   #onSecurityEvent: ((e: SecurityEvent) => void) | undefined;
+  #onLog: ((e: LogEntry) => void) | undefined;
+  #memoryLimit: number | undefined;
+  #defaults: VmOptions | undefined;
   #strict: boolean;
   #workers = new Map<string, TenantWorker>();
   #nextVm = 1;
@@ -378,6 +470,22 @@ export class LanePool {
     this.#idleTimeoutMs = options.idleTimeoutMs ?? DEFAULT_IDLE_TIMEOUT_MS;
     this.#onSecurityEvent = options.onSecurityEvent;
     this.#strict = options.strict ?? process.env.NODE_ENV === 'production';
+    this.#onLog = options.onLog;
+    this.#defaults = options.defaults;
+    const limit = options.workerMemoryLimitBytes === undefined ? DEFAULT_WORKER_MEMORY_LIMIT : options.workerMemoryLimitBytes;
+    if (limit !== null && !(Number.isSafeInteger(limit) && limit >= 64 * 1024 * 1024)) {
+      throw new TypeError('isolane: workerMemoryLimitBytes must be at least 64 MiB, or null');
+    }
+    this.#memoryLimit = limit ?? undefined;
+  }
+
+  /**
+   * A handle for one tenant, with options its VMs start from:
+   * `pool.tenant('acme', { timeoutMs: 1000 }).run('1 + 1')`.
+   */
+  tenant(name: string, defaults?: VmOptions): Tenant {
+    if (typeof name !== 'string' || name === '') throw new TypeError('isolane: tenant name is required');
+    return new Tenant(this, name, defaults);
   }
 
   /**
@@ -411,10 +519,11 @@ export class LanePool {
     if (typeof options?.tenant !== 'string' || options.tenant === '') {
       throw new TypeError('isolane: options.tenant is required');
     }
-    const setup = vmSetup(options);
-    const worker = this.#workerFor(options.tenant);
+    const opts = mergeOptions(this.#defaults, options);
+    const setup = vmSetup(opts);
+    const worker = this.#workerFor(opts.tenant);
     const id = this.#nextVm++;
-    worker.createVm(id, options, setup);
+    worker.createVm(id, opts, setup, opts.onLog ?? this.#onLog);
     return new LaneVm(worker, id, () => this.#nextReq++);
   }
 
@@ -430,12 +539,17 @@ export class LanePool {
     this.#workers.clear();
   }
 
+  [Symbol.dispose](): void {
+    this.close();
+  }
+
   #workerFor(tenant: string): TenantWorker {
     let w = this.#workers.get(tenant);
     if (!w) {
-      w = new TenantWorker(tenant, this.#workerPath, this.#idleTimeoutMs, this.#strict, (gone, exit) => {
+      w = new TenantWorker(tenant, this.#workerPath, this.#idleTimeoutMs, this.#strict, this.#memoryLimit, (gone, exit) => {
         if (this.#workers.get(tenant) === gone) this.#workers.delete(tenant);
-        if (exit.reason === 'killed' || exit.reason === 'insufficient-isolation') return;
+        // Expected ends: stopped by us, refused by strict mode, or out of memory.
+        if (exit.reason === 'killed' || exit.reason === 'insufficient-isolation' || isOutOfMemory(exit)) return;
         // A clean exit only happens when stdin closes; anything else from a
         // worker that ran guest code is treated as a possible exploit.
         if (exit.reason === 'protocol-violation' || exit.reason === 'unresponsive' || exit.signal || exit.code !== 0) {
@@ -456,6 +570,34 @@ export class LanePool {
       this.#workers.set(tenant, w);
     }
     return w;
+  }
+}
+
+/** One tenant's view of a pool, with default options for its VMs. */
+export class Tenant {
+  readonly name: string;
+  #pool: LanePool;
+  #defaults: VmOptions | undefined;
+
+  /** @internal Use `pool.tenant(name)`. */
+  constructor(pool: LanePool, name: string, defaults: VmOptions | undefined) {
+    this.#pool = pool;
+    this.name = name;
+    this.#defaults = defaults;
+  }
+
+  /** Evaluate `code` in a fresh VM. */
+  run(code: string, options?: VmOptions): Promise<unknown> {
+    return this.#pool.run(code, this.#options(options));
+  }
+
+  /** Create a stateful VM. */
+  createVm(options?: VmOptions): LaneVm {
+    return this.#pool.createVm(this.#options(options));
+  }
+
+  #options(options: VmOptions | undefined): EvalOptions {
+    return { ...mergeOptions(this.#defaults, options ?? {}), tenant: this.name };
   }
 }
 

@@ -19,8 +19,16 @@ use crate::proto::{fail, ErrorCode, Failure, Out};
 
 pub type Output = Arc<Writer<Stdout>>;
 
-/// Native stack for VM threads; V8's own stack limit sits well inside it.
-const VM_THREAD_STACK: usize = 8 << 20;
+/// Native stack for VM threads; V8's own stack limit (about 1 MiB) sits
+/// well inside it. Stacks count against the worker's memory limit, so keep
+/// them modest.
+const VM_THREAD_STACK: usize = 4 << 20;
+const WATCHDOG_STACK: usize = 64 << 10;
+
+/// Bytes of console output a VM may send per eval; the rest is dropped.
+const LOG_BUDGET: usize = 1 << 20;
+/// Longest single console message.
+const LOG_MESSAGE_MAX: usize = 16 << 10;
 
 pub struct VmConfig {
     pub heap_bytes: Option<u64>,
@@ -29,6 +37,7 @@ pub struct VmConfig {
     pub clock: crate::clock::Mode,
     pub random_seed: Option<u64>,
     pub allow_code_generation: bool,
+    pub allow_web_assembly: bool,
     pub prelude: Option<String>,
 }
 
@@ -64,12 +73,12 @@ pub enum VmMsg {
     Dispose,
 }
 
-pub fn spawn(id: u64, config: VmConfig, rx: Receiver<VmMsg>, out: Output) {
+pub fn spawn(id: u64, config: VmConfig, rx: Receiver<VmMsg>, out: Output) -> std::io::Result<()> {
     std::thread::Builder::new()
         .name(format!("vm-{id}"))
         .stack_size(VM_THREAD_STACK)
         .spawn(move || vm_main(id, config, rx, out))
-        .expect("spawn VM thread");
+        .map(drop)
 }
 
 // ---- watchdog ----
@@ -89,13 +98,13 @@ struct Watchdog {
 }
 
 impl Watchdog {
-    fn start(handle: v8::IsolateHandle) -> Arc<Watchdog> {
+    fn start(handle: v8::IsolateHandle) -> std::io::Result<Arc<Watchdog>> {
         let w = Arc::new(Watchdog {
             state: Mutex::new(WatchState::default()),
             cv: Condvar::new(),
         });
         let watch = w.clone();
-        std::thread::spawn(move || {
+        let spawned = std::thread::Builder::new().stack_size(WATCHDOG_STACK).spawn(move || {
             let mut s = watch.state.lock().unwrap();
             loop {
                 if s.closed {
@@ -116,7 +125,7 @@ impl Watchdog {
                 }
             }
         });
-        w
+        spawned.map(|_| w)
     }
 
     fn arm(&self, budget: Duration) -> Instant {
@@ -164,6 +173,8 @@ struct Bridge {
     vm: u64,
     out: Output,
     next_call: Cell<u64>,
+    /// Console bytes left this eval.
+    log_budget: Cell<usize>,
     pending: RefCell<HashMap<u64, v8::Global<v8::PromiseResolver>>>,
 }
 
@@ -222,16 +233,104 @@ fn apply_host_reply(
     }
 }
 
+// ---- console ----
+
+/// `console.log` and friends: format the arguments like a terminal would
+/// (strings as-is, other values as JSON where possible) and send a one-way
+/// log frame. Output past the VM's per-eval budget is dropped.
+fn console_method(scope: &mut v8::PinScope, args: v8::FunctionCallbackArguments, _rv: v8::ReturnValue<v8::Value>) {
+    let level = args.data().to_rust_string_lossy(scope);
+    let Some(bridge) = scope.get_slot::<Rc<Bridge>>().cloned() else { return };
+    if bridge.log_budget.get() == 0 {
+        return;
+    }
+    let mut message = String::new();
+    for i in 0..args.length() {
+        if i > 0 {
+            message.push(' ');
+        }
+        let v = args.get(i);
+        let part = if v.is_string() {
+            v.to_rust_string_lossy(scope)
+        } else if v.is_function() || v.is_symbol() || v.is_undefined() || v.is_big_int() {
+            v.to_rust_string_lossy(scope)
+        } else {
+            v8::tc_scope!(let tc, scope);
+            match v8::json::stringify(tc, v) {
+                Some(s) => s.to_rust_string_lossy(tc),
+                None => {
+                    tc.reset();
+                    v.to_rust_string_lossy(tc)
+                }
+            }
+        };
+        message.push_str(&part);
+        if message.len() >= LOG_MESSAGE_MAX {
+            break;
+        }
+    }
+    if message.len() > LOG_MESSAGE_MAX {
+        let mut cut = LOG_MESSAGE_MAX;
+        while !message.is_char_boundary(cut) {
+            cut -= 1;
+        }
+        message.truncate(cut);
+        message.push('…');
+    }
+    let left = bridge.log_budget.get();
+    if message.len() >= left {
+        bridge.log_budget.set(0);
+        message = "[isolane] console output limit reached for this eval; further output dropped".into();
+    } else {
+        bridge.log_budget.set(left - message.len());
+    }
+    bridge.out.send(&Out::Log { vm: bridge.vm, level: &level, message: &message });
+}
+
+fn install_console(scope: &mut v8::PinScope, global: v8::Local<v8::Object>) {
+    let console = v8::Object::new(scope);
+    for (name, level) in [("log", "log"), ("info", "info"), ("debug", "debug"), ("warn", "warn"), ("error", "error"), ("trace", "debug")] {
+        let level = v8::String::new(scope, level).unwrap();
+        let func = v8::Function::builder(console_method).data(level.into()).build(scope).expect("build console method");
+        let key = v8::String::new(scope, name).unwrap();
+        console.set(scope, key.into(), func.into());
+    }
+    let key = v8::String::new(scope, "console").unwrap();
+    global.set(scope, key.into(), console.into());
+}
+
 // ---- context setup ----
 
-/// Refuse every WebAssembly compilation (the global is also deleted).
+/// WebAssembly compilation, refused unless the VM allows it (the global is
+/// also deleted then).
 unsafe extern "C" fn deny_wasm(_: v8::Local<v8::Context>, _: v8::Local<v8::String>) -> bool {
     false
 }
+unsafe extern "C" fn allow_wasm(_: v8::Local<v8::Context>, _: v8::Local<v8::String>) -> bool {
+    true
+}
 
-/// Globals removed from every context: no WebAssembly, and nothing to build
-/// a shared-memory timer from.
-const REMOVED_GLOBALS: &[&str] = &["WebAssembly", "SharedArrayBuffer", "Atomics"];
+/// V8 couldn't get memory (the worker's memory limit, not a VM's heap
+/// limit, which `near_heap_limit` handles). V8 can't continue; exit with a
+/// code the supervisor reports as a memory limit, not a crash.
+unsafe extern "C" fn out_of_memory(_location: *const std::ffi::c_char, _details: &v8::OomDetails) {
+    const MSG: &[u8] = b"isolane-worker: out of memory (worker memory limit)\n";
+    #[cfg(target_os = "linux")]
+    unsafe {
+        libc::write(2, MSG.as_ptr().cast(), MSG.len());
+        libc::_exit(OOM_EXIT_CODE);
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = MSG;
+        std::process::exit(OOM_EXIT_CODE);
+    }
+}
+pub const OOM_EXIT_CODE: i32 = 6;
+
+/// Globals removed from every context: nothing to build a shared-memory
+/// timer from, and WebAssembly unless the VM allows it.
+const REMOVED_GLOBALS: &[&str] = &["SharedArrayBuffer", "Atomics"];
 
 fn new_context(isolate: &mut v8::Isolate, config: &VmConfig) -> Result<v8::Global<v8::Context>, String> {
     v8::scope!(let scope, isolate);
@@ -239,10 +338,12 @@ fn new_context(isolate: &mut v8::Isolate, config: &VmConfig) -> Result<v8::Globa
     context.set_allow_generation_from_strings(config.allow_code_generation);
     let scope = &mut v8::ContextScope::new(scope, context);
     let global = context.global(scope);
-    for name in REMOVED_GLOBALS {
+    let wasm: &[&str] = if config.allow_web_assembly { &[] } else { &["WebAssembly"] };
+    for name in REMOVED_GLOBALS.iter().chain(wasm) {
         let key = v8::String::new(scope, name).unwrap();
         global.delete(scope, key.into());
     }
+    install_console(scope, global);
     for name in &config.host_functions {
         let key = v8::String::new(scope, name).unwrap();
         let func = v8::Function::builder(host_function)
@@ -321,6 +422,9 @@ fn eval(
     };
 
     crate::clock::advance();
+    if let Some(bridge) = tc.get_slot::<Rc<Bridge>>() {
+        bridge.log_budget.set(LOG_BUDGET);
+    }
     let Some(source) = v8::String::new(tc, code) else {
         return EvalEnd::Done(Err(fail(ErrorCode::Internal, "source too large")));
     };
@@ -380,6 +484,17 @@ fn eval(
     }
 }
 
+/// A VM that couldn't start: fail its evals until it is disposed.
+fn refuse_all(rx: &Receiver<VmMsg>, out: &Output, cause: String) {
+    while let Ok(msg) = rx.recv() {
+        match msg {
+            VmMsg::Eval { req, .. } => send_result(out, req, Err(fail(ErrorCode::MemoryLimit, cause.clone()))),
+            VmMsg::HostReply { .. } => {}
+            VmMsg::Dispose => return,
+        }
+    }
+}
+
 fn send_result(out: &Output, req: u64, result: Result<String, Failure>) {
     match result {
         Ok(json) => {
@@ -405,10 +520,14 @@ fn vm_main(id: u64, config: VmConfig, rx: Receiver<VmMsg>, out: Output) {
     }
     let mut isolate = v8::Isolate::new(params);
     isolate.set_microtasks_policy(v8::MicrotasksPolicy::Explicit);
-    isolate.set_allow_wasm_code_generation_callback(deny_wasm);
+    isolate.set_allow_wasm_code_generation_callback(if config.allow_web_assembly { allow_wasm } else { deny_wasm });
+    isolate.set_oom_error_handler(out_of_memory);
 
     let handle = isolate.thread_safe_handle();
-    let watchdog = Watchdog::start(handle.clone());
+    let watchdog = match Watchdog::start(handle.clone()) {
+        Ok(w) => w,
+        Err(e) => return refuse_all(&rx, &out, format!("vm could not start: {e}")),
+    };
     let oom = Box::new(OomState { handle, hit: AtomicBool::new(false) });
     isolate.add_near_heap_limit_callback(near_heap_limit, &*oom as *const OomState as *mut c_void);
 
@@ -416,6 +535,7 @@ fn vm_main(id: u64, config: VmConfig, rx: Receiver<VmMsg>, out: Output) {
         vm: id,
         out: out.clone(),
         next_call: Cell::new(1),
+        log_budget: Cell::new(LOG_BUDGET),
         pending: RefCell::new(HashMap::new()),
     }));
     let mut backlog: VecDeque<VmMsg> = VecDeque::new();

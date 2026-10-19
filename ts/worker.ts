@@ -26,7 +26,14 @@ export type WorkerMessage =
   | ({ t: 'ready' } & IsolationInfo)
   | { t: 'result'; req: number; ok: true; value: unknown }
   | { t: 'result'; req: number; ok: false; code: string; message: string }
-  | { t: 'hostCall'; vm: number; call: number; name: string; args: unknown[] };
+  | { t: 'hostCall'; vm: number; call: number; name: string; args: unknown[] }
+  | { t: 'log'; vm: number; level: LogLevel; message: string };
+
+export type LogLevel = 'log' | 'info' | 'debug' | 'warn' | 'error';
+const LOG_LEVELS = new Set<string>(['log', 'info', 'debug', 'warn', 'error']);
+
+/** Exit code a worker uses when it hits its memory limit. */
+export const OOM_EXIT_CODE = 6;
 
 const isUint = (v: unknown): v is number => typeof v === 'number' && Number.isSafeInteger(v) && v >= 0;
 
@@ -56,6 +63,10 @@ export function parseWorkerMessage(raw: unknown): WorkerMessage | null {
     case 'hostCall':
       return isUint(m.vm) && isUint(m.call) && typeof m.name === 'string' && Array.isArray(m.args)
         ? { t: 'hostCall', vm: m.vm, call: m.call, name: m.name, args: m.args }
+        : null;
+    case 'log':
+      return isUint(m.vm) && typeof m.level === 'string' && LOG_LEVELS.has(m.level) && typeof m.message === 'string'
+        ? { t: 'log', vm: m.vm, level: m.level as LogLevel, message: m.message }
         : null;
     default:
       return null;
@@ -88,11 +99,13 @@ export class WorkerProcess {
   #alive = true;
   #stderrTail = '';
 
-  constructor(workerPath: string, handlers: WorkerHandlers, strict: boolean) {
+  constructor(workerPath: string, handlers: WorkerHandlers, strict: boolean, memoryLimitBytes?: number) {
+    const args = ['--serve'];
+    if (memoryLimitBytes !== undefined) args.push(`--memory-limit=${memoryLimitBytes}`);
     // Empty environment and no inherited fds beyond the three pipes: nothing
     // from the application process (secrets in env vars, open sockets) is
     // reachable from the worker.
-    this.#child = spawn(workerPath, ['--serve'], {
+    this.#child = spawn(workerPath, args, {
       stdio: ['pipe', 'pipe', 'pipe'],
       env: {},
       cwd: '/',

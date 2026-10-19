@@ -26,6 +26,9 @@ pub enum In {
         /// eval and new Function.
         #[serde(default)]
         allow_code_generation: bool,
+        /// Keep the WebAssembly global and allow compiling modules.
+        #[serde(default)]
+        allow_web_assembly: bool,
         /// Trusted setup run in the context before guest code (the
         /// supervisor's fetch/fs wrappers).
         prelude: Option<String>,
@@ -105,6 +108,12 @@ pub enum Out<'a> {
         code: Option<ErrorCode>,
         #[serde(skip_serializing_if = "Option::is_none")]
         message: Option<&'a str>,
+    },
+    /// A console call from guest code. One-way: no reply.
+    Log {
+        vm: u64,
+        level: &'a str,
+        message: &'a str,
     },
     HostCall {
         vm: u64,

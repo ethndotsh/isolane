@@ -10,7 +10,8 @@ import { constants as fsConstants } from 'node:fs';
 import { lstat, mkdir, open, readdir, realpath, rm, stat } from 'node:fs/promises';
 import http from 'node:http';
 import https from 'node:https';
-import { BlockList, isIP } from 'node:net';
+import { BlockList, connect as netConnect, isIP, type Socket } from 'node:net';
+import { connect as tlsConnect } from 'node:tls';
 import { join, posix, sep } from 'node:path';
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -105,6 +106,23 @@ export function isPublicAddress(address: string): boolean {
   return family === 4 ? !NON_PUBLIC_V4.check(address, 'ipv4') : !NON_PUBLIC_V6.check(address, 'ipv6');
 }
 
+type LookupCallback = (err: Error | null, address: string | LookupAddress[], family?: number) => void;
+
+/** A `lookup` for http/net/tls that only returns addresses the policy
+ * allows, so the address checked is the address connected to. */
+function pinnedLookup(allowPrivate: boolean) {
+  return (hostname: string, options: { family?: number | string; all?: boolean }, cb: LookupCallback) => {
+    const family = options.family === 'IPv4' ? 4 : options.family === 'IPv6' ? 6 : Number(options.family) || 0;
+    dnsLookup(hostname, { all: true, family }, (err, addresses) => {
+      if (err) return cb(err, []);
+      const usable = allowPrivate ? addresses : addresses.filter((a) => isPublicAddress(a.address));
+      if (usable.length === 0) return cb(new Error(`${hostname} has no public address`), []);
+      if (options.all) cb(null, usable);
+      else cb(null, usable[0].address, usable[0].family);
+    });
+  };
+}
+
 function hostAllowed(patterns: readonly string[], host: string): boolean {
   return patterns.some((p) => {
     const pattern = p.toLowerCase();
@@ -154,22 +172,7 @@ export function networkBroker(policy: NetworkPolicy): HostFunction {
   const allowPrivate = policy.allowPrivateNetworks === true;
   let requests = 0;
 
-  // Resolve, then connect only to addresses the policy allows. Passed to
-  // http.request, so the checked address is the one connected to.
-  const lookup = (
-    hostname: string,
-    options: { family?: number | string; all?: boolean },
-    cb: (err: Error | null, address: string | LookupAddress[], family?: number) => void,
-  ) => {
-    const family = options.family === 'IPv4' ? 4 : options.family === 'IPv6' ? 6 : Number(options.family) || 0;
-    dnsLookup(hostname, { all: true, family }, (err, addresses) => {
-      if (err) return cb(err, []);
-      const usable = allowPrivate ? addresses : addresses.filter((a) => isPublicAddress(a.address));
-      if (usable.length === 0) return cb(new Error(`${hostname} has no public address`), []);
-      if (options.all) cb(null, usable);
-      else cb(null, usable[0].address, usable[0].family);
-    });
-  };
+  const lookup = pinnedLookup(allowPrivate);
 
   const check = async (url: URL, method: string) => {
     if (url.protocol !== 'https:' && url.protocol !== 'http:') {
@@ -280,6 +283,182 @@ export function networkBroker(policy: NetworkPolicy): HostFunction {
       };
     }
   };
+}
+
+// ---- sockets ----
+
+export interface SocketPolicy {
+  /**
+   * `host:port` pairs the guest may connect to: `db.example.com:5432`,
+   * `*.example.com:443` (subdomains), `cache.example.com:*` (any port), or
+   * `[2001:db8::1]:80`. Or a function deciding each connection.
+   */
+  allow: readonly string[] | ((hostname: string, port: number) => boolean | Promise<boolean>);
+  /** As for `NetworkPolicy`: non-public addresses are refused by default. */
+  allowPrivateNetworks?: boolean;
+  /** Sockets a VM may have open at once. Default 8. */
+  maxConnections?: number;
+  /** Default 10 s. */
+  connectTimeoutMs?: number;
+  /** Close a socket with no traffic for this long. Default 60 s. */
+  idleTimeoutMs?: number;
+}
+
+/** Buffered, unread bytes per socket before reading from the network pauses. */
+const SOCKET_HIGH_WATER = 1 * MiB;
+
+function socketAllowed(patterns: readonly string[], host: string, port: number): boolean {
+  return patterns.some((p) => {
+    const at = p.lastIndexOf(':');
+    if (at <= 0) return false;
+    const hostPattern = p.slice(0, at).replace(/^\[|\]$/g, '').toLowerCase();
+    const portPattern = p.slice(at + 1);
+    if (portPattern !== '*' && Number(portPattern) !== port) return false;
+    return hostPattern.startsWith('*.') ? host.endsWith(hostPattern.slice(1)) : host === hostPattern;
+  });
+}
+
+interface GuestSocket {
+  socket: Socket;
+  chunks: Buffer[];
+  buffered: number;
+  ended: boolean;
+  error?: Error;
+  wake?: () => void;
+}
+
+export function socketBroker(policy: SocketPolicy): { fn: HostFunction; dispose: () => void } {
+  if (!policy || (!Array.isArray(policy.allow) && typeof policy.allow !== 'function')) {
+    throw new TypeError('isolane: sockets.allow must be a list of host:port patterns or a function');
+  }
+  const allowPrivate = policy.allowPrivateNetworks === true;
+  const lookup = pinnedLookup(allowPrivate);
+  const maxConnections = policy.maxConnections ?? 8;
+  const connectTimeoutMs = policy.connectTimeoutMs ?? 10_000;
+  const idleTimeoutMs = policy.idleTimeoutMs ?? 60_000;
+  const sockets = new Map<number, GuestSocket>();
+  let nextId = 1;
+  let disposed = false;
+
+  const get = (id: unknown) => {
+    const s = typeof id === 'number' ? sockets.get(id) : undefined;
+    if (!s) throw new Error('socket is closed');
+    return s;
+  };
+
+  const open = async (raw: unknown) => {
+    const r = raw as { hostname?: unknown; port?: unknown; tls?: unknown } | null;
+    if (!r || typeof r.hostname !== 'string' || !Number.isInteger(r.port) || (r.port as number) < 1 || (r.port as number) > 65535) {
+      throw new TypeError('connect: expected a hostname and a port from 1 to 65535');
+    }
+    const host = r.hostname.replace(/^\[|\]$/g, '').toLowerCase();
+    const port = r.port as number;
+    if (sockets.size >= maxConnections) throw new Error(`connect: this VM already has ${maxConnections} sockets open`);
+    if (!allowPrivate && isIP(host) && !isPublicAddress(host)) {
+      throw new Error(`connect to ${host}:${port} is not allowed: not a public address`);
+    }
+    const allowed = typeof policy.allow === 'function' ? await policy.allow(host, port) : socketAllowed(policy.allow, host, port);
+    if (allowed !== true) throw new Error(`connect to ${host}:${port} is not allowed by the socket policy`);
+
+    const socket = await new Promise<Socket>((resolve, reject) => {
+      const s =
+        r.tls === true
+          ? tlsConnect({ host, port, servername: isIP(host) ? undefined : host, lookup: lookup as never })
+          : netConnect({ host, port, lookup: lookup as never });
+      const timer = setTimeout(() => s.destroy(new Error('timed out')), connectTimeoutMs);
+      s.once(r.tls === true ? 'secureConnect' : 'connect', () => {
+        clearTimeout(timer);
+        s.removeAllListeners('error');
+        resolve(s);
+      });
+      s.once('error', (err) => {
+        clearTimeout(timer);
+        reject(new Error(`connect to ${host}:${port} failed: ${err.message}`));
+      });
+    });
+    if (disposed) {
+      socket.destroy();
+      throw new Error('socket is closed');
+    }
+    const id = nextId++;
+    const g: GuestSocket = { socket, chunks: [], buffered: 0, ended: false };
+    const wake = () => {
+      const w = g.wake;
+      g.wake = undefined;
+      w?.();
+    };
+    socket.on('data', (chunk: Buffer) => {
+      g.chunks.push(chunk);
+      g.buffered += chunk.length;
+      if (g.buffered >= SOCKET_HIGH_WATER) socket.pause();
+      wake();
+    });
+    socket.on('end', () => {
+      g.ended = true;
+      wake();
+    });
+    socket.on('error', (err) => {
+      g.error = err;
+      wake();
+    });
+    socket.on('close', () => {
+      g.ended = true;
+      wake();
+    });
+    socket.setTimeout(idleTimeoutMs, () => socket.destroy(new Error('idle timeout')));
+    sockets.set(id, g);
+    return id;
+  };
+
+  const read = async (id: unknown) => {
+    const g = get(id);
+    if (g.wake) throw new Error('socket.read: another read is already waiting');
+    while (g.chunks.length === 0 && !g.ended && !g.error) {
+      await new Promise<void>((r) => (g.wake = r));
+    }
+    if (g.chunks.length) {
+      const data = Buffer.concat(g.chunks);
+      g.chunks = [];
+      g.buffered = 0;
+      g.socket.resume();
+      return data.toString('base64');
+    }
+    if (g.error) throw new Error(`socket error: ${g.error.message}`);
+    return null; // end of stream
+  };
+
+  const write = async (id: unknown, data: unknown) => {
+    const g = get(id);
+    if (typeof data !== 'string') throw new TypeError('socket.write: malformed data');
+    if (g.error) throw new Error(`socket error: ${g.error.message}`);
+    await new Promise<void>((resolve, reject) =>
+      g.socket.write(Buffer.from(data, 'base64'), (err) => (err ? reject(new Error(`socket error: ${err.message}`)) : resolve())),
+    );
+  };
+
+  const close = async (id: unknown) => {
+    const g = typeof id === 'number' ? sockets.get(id) : undefined;
+    if (!g) return;
+    sockets.delete(id as number);
+    g.socket.destroy();
+    g.ended = true;
+    const w = g.wake;
+    g.wake = undefined;
+    w?.();
+  };
+
+  const fn: HostFunction = (op: unknown, ...args: unknown[]) => {
+    if (op === 'open') return open(args[0]);
+    if (op === 'read') return read(args[0]);
+    if (op === 'write') return write(args[0], args[1]);
+    if (op === 'close') return close(args[0]);
+    throw new TypeError('socket: unknown operation');
+  };
+  const dispose = () => {
+    disposed = true;
+    for (const id of [...sockets.keys()]) void close(id);
+  };
+  return { fn, dispose };
 }
 
 // ---- filesystem ----
@@ -423,6 +602,7 @@ export function fsBroker(policy: FsPolicy): HostFunction {
 
 export const FETCH_HOST_FUNCTION = '__isolane_fetch';
 export const FS_HOST_FUNCTION = '__isolane_fs';
+export const SOCKET_HOST_FUNCTION = '__isolane_socket';
 
 /**
  * Trusted setup the worker runs in a VM's context before any guest code:
@@ -437,8 +617,10 @@ export const PRELUDE = String.raw`(() => {
   const g = globalThis;
   const rawFetch = g.${FETCH_HOST_FUNCTION};
   const rawFs = g.${FS_HOST_FUNCTION};
+  const rawSocket = g.${SOCKET_HOST_FUNCTION};
   delete g.${FETCH_HOST_FUNCTION};
   delete g.${FS_HOST_FUNCTION};
+  delete g.${SOCKET_HOST_FUNCTION};
 
   const B64 = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/';
   const B64_INDEX = new Uint8Array(128);
@@ -567,6 +749,30 @@ export const PRELUDE = String.raw`(() => {
     };
   }
 
+  if (rawSocket) {
+    g.connect = async function connect(address, options = {}) {
+      let hostname, port;
+      if (typeof address === 'string') {
+        const at = address.lastIndexOf(':');
+        hostname = address.slice(0, at);
+        port = Number(address.slice(at + 1));
+      } else {
+        hostname = address?.hostname;
+        port = Number(address?.port);
+      }
+      const tls = options.secureTransport === 'on';
+      const id = await rawSocket('open', { hostname, port, tls });
+      return Object.freeze({
+        async read() {
+          const data = await rawSocket('read', id);
+          return data === null ? null : fromBase64(data);
+        },
+        write: (data) => rawSocket('write', id, toBase64(toBytes(data))),
+        close: () => rawSocket('close', id),
+      });
+    };
+  }
+
   if (rawFs) {
     const encodingOf = (options) => (typeof options === 'string' ? options : options?.encoding);
     g.fs = Object.freeze({
@@ -590,15 +796,18 @@ export const PRELUDE = String.raw`(() => {
 export interface Capabilities {
   hostFunctions: Record<string, HostFunction>;
   prelude?: string;
+  /** Release what the VM holds open (sockets) when it goes away. */
+  dispose(): void;
 }
 
-/** The host functions and setup script for a VM's network and fs policies. */
+/** The host functions, setup script, and cleanup for a VM's policies. */
 export function capabilities(
-  opts: { network?: NetworkPolicy; fs?: FsPolicy },
+  opts: { network?: NetworkPolicy; fs?: FsPolicy; sockets?: SocketPolicy; globals?: Record<string, unknown> },
   userHostFunctions: Record<string, HostFunction>,
 ): Capabilities {
   const hostFunctions: Record<string, HostFunction> = {};
   const reserved = new Set<string>();
+  const disposers: (() => void)[] = [];
   if (opts.network) {
     hostFunctions[FETCH_HOST_FUNCTION] = networkBroker(opts.network);
     for (const n of ['fetch', 'Headers', 'Response']) reserved.add(n);
@@ -607,10 +816,33 @@ export function capabilities(
     hostFunctions[FS_HOST_FUNCTION] = fsBroker(opts.fs);
     reserved.add('fs');
   }
+  if (opts.sockets) {
+    const broker = socketBroker(opts.sockets);
+    hostFunctions[SOCKET_HOST_FUNCTION] = broker.fn;
+    disposers.push(broker.dispose);
+    reserved.add('connect');
+  }
   for (const name of Object.keys(userHostFunctions)) {
     if (reserved.has(name) || name.startsWith('__isolane_')) {
-      throw new TypeError(`isolane: host function name ${name} is reserved by the network or fs policy`);
+      throw new TypeError(`isolane: host function name ${name} is reserved by the network, fs, or sockets policy`);
     }
   }
-  return { hostFunctions, prelude: reserved.size ? PRELUDE : undefined };
+  let prelude = reserved.size ? PRELUDE : '';
+  if (opts.globals !== undefined) {
+    if (opts.globals === null || typeof opts.globals !== 'object') throw new TypeError('isolane: globals must be an object');
+    for (const name of Object.keys(opts.globals)) {
+      if (name === '__proto__' || reserved.has(name) || Object.hasOwn(userHostFunctions, name)) {
+        throw new TypeError(`isolane: global name ${name} is reserved or already a host function`);
+      }
+    }
+    // JSON text inside a JS string literal: values arrive as plain data.
+    const json = JSON.stringify(opts.globals);
+    if (json === undefined) throw new TypeError('isolane: globals must be JSON-serializable');
+    prelude = `Object.assign(globalThis, JSON.parse(${JSON.stringify(json)}));\n` + prelude;
+  }
+  return {
+    hostFunctions,
+    prelude: prelude || undefined,
+    dispose: () => disposers.forEach((d) => d()),
+  };
 }
