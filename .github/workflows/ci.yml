@@ -117,6 +117,31 @@ jobs:
           ISOLANE_STRICT: '1'
         run: node --test --test-reporter=spec $(ls test/*.test.mjs | grep -v lockdown)
 
+      # web-platform-tests as a per-subtest gate (test/wpt/expectations.json),
+      # served by WPT's own server (Python), against the sandboxed worker.
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Pinned WPT commit
+        id: wpt
+        run: echo "commit=$(sed -n "s/^export const WPT_COMMIT = '\(.*\)';/\1/p" test/wpt/run.mjs)" >>"$GITHUB_OUTPUT"
+
+      # Keyed by the commit; the runner's hash too, since it lists the
+      # directories to check out (it adds missing ones to a restored copy).
+      - uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}/wpt
+          key: wpt-${{ steps.wpt.outputs.commit }}-${{ hashFiles('test/wpt/run.mjs') }}
+          restore-keys: wpt-${{ steps.wpt.outputs.commit }}-
+
+      - name: WPT gate (strict mode, lockdown on)
+        env:
+          ISOLANE_WORKER: ${{ runner.temp }}/isolane-worker
+          ISOLANE_STRICT: '1'
+          ISOLANE_WPT_DIR: ${{ runner.temp }}/wpt
+        run: node test/wpt/run.mjs --report wpt-report.json --summary "$GITHUB_STEP_SUMMARY"
+
       - name: Seccomp kills (kernel log)
         if: always()
         run: sudo dmesg | grep -iE 'seccomp|audit.*sig=31' | tail -40 || true
@@ -133,6 +158,7 @@ jobs:
           name: linux-x64
           path: |
             syscall-audit.txt
+            wpt-report.json
             build/logs/*.log
           if-no-files-found: ignore
 
