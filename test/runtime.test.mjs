@@ -6,14 +6,14 @@ import { chmodSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { createServer } from 'node:http';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { LanePool, LaneError } from '../dist/index.js';
+import { Runtime, IsolaneError } from '../dist/index.js';
 
 // ISOLANE_STRICT=1 runs everything under strict mode (CI on native Linux).
-const pool = new LanePool({ strict: process.env.ISOLANE_STRICT === '1' });
+const pool = new Runtime({ strict: process.env.ISOLANE_STRICT === '1' });
 after(() => pool.close());
 
 const T = { tenant: 'acme' };
-const code = (c) => (err) => err instanceof LaneError && err.code === c;
+const code = (c) => (err) => err instanceof IsolaneError && err.code === c;
 
 // ---- basics (ported from clockwork's lane tests) ----
 
@@ -82,7 +82,7 @@ test('the guest cannot catch termination', async () => {
 });
 
 test('a timed-out vm keeps its state', async () => {
-  const vm = pool.createVm({ ...T, timeoutMs: 50 });
+  const vm = pool.createIsolate({ ...T, timeoutMs: 50 });
   await vm.eval('globalThis.kept = "yes"');
   for (let i = 0; i < 5; i++) await assert.rejects(vm.eval('while (true) {}'), code('ERR_TIMEOUT'));
   assert.equal(await vm.eval('kept'), 'yes');
@@ -94,7 +94,7 @@ test('runaway recursion is a catchable RangeError', async () => {
 });
 
 test('the heap limit retires the vm', async () => {
-  const vm = pool.createVm({ ...T, memoryLimitBytes: 16 << 20 });
+  const vm = pool.createIsolate({ ...T, memoryLimitBytes: 16 << 20 });
   await assert.rejects(
     vm.eval('const a = []; for (;;) a.push({ x: "y".repeat(1000) + Math.random() })'),
     code('ERR_MEMORY_LIMIT'),
@@ -112,8 +112,8 @@ test('one-shot runs are isolated', async () => {
 });
 
 test('stateful vms keep globals; vms are isolated', async () => {
-  const a = pool.createVm(T);
-  const b = pool.createVm(T);
+  const a = pool.createIsolate(T);
+  const b = pool.createIsolate(T);
   await a.eval('globalThis.counter = 10');
   await a.eval('counter += 5');
   assert.equal(await a.eval('counter'), 15);
@@ -123,14 +123,14 @@ test('stateful vms keep globals; vms are isolated', async () => {
 });
 
 test('disposed vms reject', async () => {
-  const vm = pool.createVm(T);
+  const vm = pool.createIsolate(T);
   await vm.eval('1');
   vm.dispose();
   await assert.rejects(vm.eval('2'), code('ERR_VM_DISPOSED'));
 });
 
 test('a tenant is required', () => {
-  assert.throws(() => pool.createVm({}), TypeError);
+  assert.throws(() => pool.createIsolate({}), TypeError);
 });
 
 // ---- hardening ----
@@ -181,7 +181,7 @@ test('the clock moves forward at I/O', async () => {
     hostFunctions,
   });
   assert.ok(elapsed >= 40, `clock moved ${elapsed}ms across a 50ms host call`);
-  const vm = pool.createVm(T);
+  const vm = pool.createIsolate(T);
   const t0 = await vm.eval('globalThis.t0 = Date.now()');
   await new Promise((r) => setTimeout(r, 50));
   assert.ok((await vm.eval('Date.now()')) - t0 >= 40);
@@ -195,11 +195,11 @@ test('clock: realtime and fixed', async () => {
   });
   assert.ok(elapsed > 0, `realtime clock didn't move over a busy loop (${elapsed}ms)`);
   const hostFunctions = { wait: () => new Promise((r) => setTimeout(r, 20)) };
-  const vm = pool.createVm({ ...T, clock: { fixedMs: 1e12 }, hostFunctions });
+  const vm = pool.createIsolate({ ...T, clock: { fixedMs: 1e12 }, hostFunctions });
   assert.equal(await vm.eval('Date.now()'), 1e12);
   assert.equal(await vm.eval('wait().then(() => new Date().toISOString())'), new Date(1e12).toISOString());
   vm.dispose();
-  assert.throws(() => pool.createVm({ ...T, clock: 'sometimes' }), TypeError);
+  assert.throws(() => pool.createIsolate({ ...T, clock: 'sometimes' }), TypeError);
 });
 
 test('randomSeed makes Math.random reproducible', async () => {
@@ -212,7 +212,7 @@ test('randomSeed makes Math.random reproducible', async () => {
   assert.deepEqual(a, b);
   assert.notDeepEqual(a, c);
   assert.notDeepEqual(d, e);
-  assert.throws(() => pool.createVm({ ...T, randomSeed: -1 }), TypeError);
+  assert.throws(() => pool.createIsolate({ ...T, randomSeed: -1 }), TypeError);
 });
 
 test('allowCodeGeneration opts in to eval and new Function', async () => {
@@ -244,7 +244,7 @@ test('network and fs policies reach the guest through the worker', async () => {
 
 test('console output reaches onLog', async () => {
   const logs = [];
-  const logged = new LanePool({ strict: process.env.ISOLANE_STRICT === '1', onLog: (e) => logs.push(e) });
+  const logged = new Runtime({ strict: process.env.ISOLANE_STRICT === '1', onLog: (e) => logs.push(e) });
   await logged.run('console.log("hi", 1, { a: [2] }); console.error(new Error("bad").message); console.warn(undefined, null)', T);
   assert.deepEqual(logs, [
     { tenant: 'acme', level: 'log', message: 'hi 1 {"a":[2]}' },
@@ -269,11 +269,11 @@ test('globals pass inputs without touching the code string', async () => {
 test('tenant handles and defaults', async () => {
   const acme = pool.tenant('acme', { globals: { a: 1 }, hostFunctions: { two: () => 2 } });
   assert.equal(await acme.run('two().then((t) => a + t + b)', { globals: { b: 3 } }), 6);
-  const vm = acme.createVm();
+  const vm = acme.createIsolate();
   await vm.eval('globalThis.k = a');
   assert.equal(await vm.eval('k'), 1);
   vm.dispose();
-  const withDefaults = new LanePool({ strict: process.env.ISOLANE_STRICT === '1', defaults: { globals: { d: 'yes' } } });
+  const withDefaults = new Runtime({ strict: process.env.ISOLANE_STRICT === '1', defaults: { globals: { d: 'yes' } } });
   assert.equal(await withDefaults.tenant('t').run('d'), 'yes');
   withDefaults.close();
 });
@@ -288,7 +288,7 @@ test('allowWebAssembly opts in to WebAssembly', async () => {
 
 test('the worker memory limit bounds memory outside the heap', { skip: process.platform !== 'linux' }, async () => {
   const events = [];
-  const capped = new LanePool({ strict: process.env.ISOLANE_STRICT === '1', workerMemoryLimitBytes: 256 << 20, onSecurityEvent: (e) => events.push(e) });
+  const capped = new Runtime({ strict: process.env.ISOLANE_STRICT === '1', workerMemoryLimitBytes: 256 << 20, onSecurityEvent: (e) => events.push(e) });
   const bomb = 'const keep = []; for (;;) keep.push(new Uint8Array(16 << 20).fill(1));';
   const err = await capped.run(bomb, { ...T, timeoutMs: 20000 }).catch((e) => e);
   assert.ok(
@@ -327,7 +327,7 @@ test('host functions: sync, async, and errors', async () => {
 
 test('host functions on a stateful vm', async () => {
   const log = [];
-  const vm = pool.createVm({ ...T, hostFunctions: { log: (m) => void log.push(m) } });
+  const vm = pool.createIsolate({ ...T, hostFunctions: { log: (m) => void log.push(m) } });
   await vm.eval('log("a"); log({ b: 2 })');
   await vm.eval('log("c")');
   // Calls not awaited by the guest still reach the host.
@@ -344,7 +344,7 @@ test('a slow host function counts against the timeout', async () => {
 });
 
 test('concurrent vms keep their own host functions', async () => {
-  const vms = Array.from({ length: 8 }, (_, i) => pool.createVm({ ...T, hostFunctions: { whoami: async () => i } }));
+  const vms = Array.from({ length: 8 }, (_, i) => pool.createIsolate({ ...T, hostFunctions: { whoami: async () => i } }));
   const got = await Promise.all(vms.map((vm) => vm.eval('whoami().then((n) => n * 10)')));
   assert.deepEqual(got, [0, 10, 20, 30, 40, 50, 60, 70]);
   vms.forEach((vm) => vm.dispose());
@@ -353,9 +353,9 @@ test('concurrent vms keep their own host functions', async () => {
 // ---- tenants and worker processes ----
 
 test('each tenant gets its own worker process', async () => {
-  const a = pool.createVm({ tenant: 'tenant-a' });
-  const a2 = pool.createVm({ tenant: 'tenant-a' });
-  const b = pool.createVm({ tenant: 'tenant-b' });
+  const a = pool.createIsolate({ tenant: 'tenant-a' });
+  const a2 = pool.createIsolate({ tenant: 'tenant-a' });
+  const b = pool.createIsolate({ tenant: 'tenant-b' });
   await Promise.all([a.eval('1'), a2.eval('1'), b.eval('1')]);
   const pa = pool._workerPid('tenant-a');
   const pb = pool._workerPid('tenant-b');
@@ -367,7 +367,7 @@ test('each tenant gets its own worker process', async () => {
 test('workers get an empty environment', { skip: process.platform !== 'linux' }, async () => {
   process.env.ISOLANE_TEST_SECRET = 'leak';
   try {
-    const vm = pool.createVm({ tenant: 'env-check' });
+    const vm = pool.createIsolate({ tenant: 'env-check' });
     await vm.eval('1');
     const environ = readFileSync(`/proc/${pool._workerPid('env-check')}/environ`);
     assert.equal(environ.length, 0);
@@ -396,7 +396,7 @@ function fakeWorker(body) {
 
 test('a crashing worker rejects in-flight evals and raises a security event', async () => {
   const events = [];
-  const crashy = new LanePool({
+  const crashy = new Runtime({
     workerPath: fakeWorker(`send({ t: 'ready', v8: 'fake', sandboxSecure: true, lockdown: { landlock: 'full', seccomp: 'full' } }); process.stdin.once('data', () => process.abort());`),
     onSecurityEvent: (e) => events.push(e),
   });
@@ -410,7 +410,7 @@ test('a crashing worker rejects in-flight evals and raises a security event', as
 
 test('a worker that breaks the protocol is killed', async () => {
   const events = [];
-  const hostile = new LanePool({
+  const hostile = new Runtime({
     workerPath: fakeWorker(`send({ t: 'ready', v8: 'fake', sandboxSecure: true, lockdown: { landlock: 'full', seccomp: 'full' } }); process.stdin.once('data', () => send({ t: 'result', req: 'not-a-number' })); setInterval(() => {}, 1000);`),
     onSecurityEvent: (e) => events.push(e),
   });
@@ -423,7 +423,7 @@ test('a worker claiming an insecure sandbox never runs code', async (t) => {
   const dev = process.env.ISOLANE_DEV_INSECURE;
   delete process.env.ISOLANE_DEV_INSECURE;
   t.after(() => dev !== undefined && (process.env.ISOLANE_DEV_INSECURE = dev));
-  const insecure = new LanePool({
+  const insecure = new Runtime({
     workerPath: fakeWorker(`send({ t: 'ready', v8: 'fake', sandboxSecure: false, lockdown: { landlock: 'full', seccomp: 'full' } }); setInterval(() => {}, 1000);`),
   });
   await assert.rejects(insecure.run('1', { tenant: 't' }), code('ERR_WORKER_CRASHED'));
@@ -432,7 +432,7 @@ test('a worker claiming an insecure sandbox never runs code', async (t) => {
 
 test('a worker that stops answering is killed after its timeout', async () => {
   const events = [];
-  const silent = new LanePool({
+  const silent = new Runtime({
     workerPath: fakeWorker(`send({ t: 'ready', v8: 'fake', sandboxSecure: true, lockdown: { landlock: 'full', seccomp: 'full' } }); setInterval(() => {}, 1000);`),
     onSecurityEvent: (e) => events.push(e),
   });
@@ -444,7 +444,7 @@ test('a worker that stops answering is killed after its timeout', async () => {
 });
 
 test('queued evals on one vm are not mistaken for an unresponsive worker', async () => {
-  const vm = pool.createVm({ ...T, timeoutMs: 400 });
+  const vm = pool.createIsolate({ ...T, timeoutMs: 400 });
   const loops = Array.from({ length: 4 }, () => vm.eval('for (;;) {}'));
   for (const r of await Promise.allSettled(loops)) assert.equal(r.reason?.code, 'ERR_TIMEOUT');
   assert.equal(await vm.eval('2'), 2);
@@ -452,7 +452,7 @@ test('queued evals on one vm are not mistaken for an unresponsive worker', async
 });
 
 test('an oversized frame is a protocol violation', async () => {
-  const big = new LanePool({
+  const big = new Runtime({
     workerPath: fakeWorker(`send({ t: 'ready', v8: 'fake', sandboxSecure: true, lockdown: { landlock: 'full', seccomp: 'full' } }); process.stdin.once('data', () => { const h = Buffer.alloc(4); h.writeUInt32LE(0xffffffff); process.stdout.write(h); }); setInterval(() => {}, 1000);`),
   });
   await assert.rejects(big.run('1', { tenant: 't' }), code('ERR_WORKER_CRASHED'));

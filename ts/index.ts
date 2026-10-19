@@ -1,6 +1,7 @@
 // isolane: run untrusted multi-tenant JavaScript in sandboxed V8 worker
-// processes. The API mirrors clockwork's LanePool; the difference is that
-// every run names a tenant, and each tenant gets its own worker process.
+// processes. A Runtime runs each tenant in its own worker process; each
+// Isolate is one V8 isolate in it. (The API descends from clockwork's
+// LanePool, with tenants added.)
 
 import { resolve as resolvePath } from 'node:path';
 
@@ -32,7 +33,7 @@ export type { FsPolicy, NetworkPolicy, SocketPolicy } from './capabilities.js';
  *   exploit attempt; see `onSecurityEvent`).
  * - `ERR_INTERNAL`: an isolane bug or resource failure.
  */
-export type LaneErrorCode =
+export type IsolaneErrorCode =
   | 'ERR_TIMEOUT'
   | 'ERR_GUEST_EXCEPTION'
   | 'ERR_MEMORY_LIMIT'
@@ -55,12 +56,12 @@ const KNOWN_CODES = new Set<string>([
   'ERR_INTERNAL',
 ]);
 
-export class LaneError extends Error {
-  readonly code: LaneErrorCode;
+export class IsolaneError extends Error {
+  readonly code: IsolaneErrorCode;
 
-  constructor(code: LaneErrorCode, message: string) {
+  constructor(code: IsolaneErrorCode, message: string) {
     super(message);
-    this.name = 'LaneError';
+    this.name = 'IsolaneError';
     this.code = code;
   }
 }
@@ -81,7 +82,7 @@ export interface LogEntry {
 }
 
 /** Everything about a VM except which tenant it belongs to. */
-export interface VmOptions {
+export interface IsolateOptions {
   /** Wall-clock budget per eval (and per host-reply continuation). */
   timeoutMs?: number;
   /**
@@ -140,13 +141,13 @@ export interface VmOptions {
   sockets?: SocketPolicy;
 }
 
-export interface EvalOptions extends VmOptions {
+export interface RunOptions extends IsolateOptions {
   /** Which tenant's worker process runs this code. Required. */
   tenant: string;
 }
 
 /** Later options win; host functions and globals merge by name. */
-function mergeOptions<T extends VmOptions>(base: VmOptions | undefined, over: T): T {
+function mergeOptions<T extends IsolateOptions>(base: IsolateOptions | undefined, over: T): T {
   if (!base) return over;
   const merged = { ...base, ...over } as T;
   if (base.hostFunctions || over.hostFunctions) merged.hostFunctions = { ...base.hostFunctions, ...over.hostFunctions };
@@ -164,7 +165,7 @@ interface VmSetup {
 }
 
 /** Validate a VM's options and build what its worker needs. Throws on bad options. */
-function vmSetup(opts: EvalOptions): VmSetup {
+function vmSetup(opts: RunOptions): VmSetup {
   const clock = clockSpec(opts.clock);
   if (opts.randomSeed !== undefined && !(Number.isSafeInteger(opts.randomSeed) && opts.randomSeed >= 0)) {
     throw new TypeError('isolane: randomSeed must be an integer from 0 to 2^53 - 1');
@@ -174,7 +175,7 @@ function vmSetup(opts: EvalOptions): VmSetup {
   return { clock, hostFunctions: { ...user, ...caps.hostFunctions }, prelude: caps.prelude, dispose: caps.dispose };
 }
 
-function clockSpec(clock: EvalOptions['clock']): ClockSpec {
+function clockSpec(clock: RunOptions['clock']): ClockSpec {
   if (clock === undefined || clock === 'frozen') return { mode: 'frozen' };
   if (clock === 'realtime') return { mode: 'realtime' };
   if (typeof clock === 'object' && clock !== null && Number.isFinite(clock.fixedMs)) {
@@ -191,7 +192,7 @@ export interface SecurityEvent {
   detail?: string;
 }
 
-export interface LanePoolOptions {
+export interface RuntimeOptions {
   /** Path to the isolane-worker binary. Defaults to `$ISOLANE_WORKER`. */
   workerPath?: string;
   /** Stop a tenant's worker after this long with no VMs and no runs. */
@@ -218,14 +219,14 @@ export interface LanePoolOptions {
    */
   workerMemoryLimitBytes?: number | null;
   /** Options every VM starts from; a tenant's and a call's options override them. */
-  defaults?: VmOptions;
+  defaults?: IsolateOptions;
 }
 
 const DEFAULT_WORKER_MEMORY_LIMIT = 2 * 1024 ** 3;
 
 interface Pending {
   resolve(value: unknown): void;
-  reject(err: LaneError): void;
+  reject(err: IsolaneError): void;
   timer?: NodeJS.Timeout;
 }
 
@@ -284,7 +285,7 @@ class TenantWorker {
     return this.#proc.pid;
   }
 
-  createVm(vm: number, opts: VmOptions, setup: VmSetup, onLog: ((entry: LogEntry) => void) | undefined): void {
+  createIsolate(vm: number, opts: IsolateOptions, setup: VmSetup, onLog: ((entry: LogEntry) => void) | undefined): void {
     this.#hostFunctions.set(vm, setup.hostFunctions);
     this.#disposers.set(vm, setup.dispose);
     this.#loggers.set(vm, onLog);
@@ -308,7 +309,7 @@ class TenantWorker {
   eval(vm: number, req: number, code: string): Promise<unknown> {
     return new Promise((resolve, reject) => {
       if (!this.#proc.alive) {
-        reject(new LaneError('ERR_WORKER_CRASHED', `worker for tenant ${this.tenant} is gone`));
+        reject(new IsolaneError('ERR_WORKER_CRASHED', `worker for tenant ${this.tenant} is gone`));
         return;
       }
       const pending: Pending = { resolve, reject };
@@ -361,8 +362,8 @@ class TenantWorker {
       clearTimeout(pending.timer);
       if (msg.ok) pending.resolve(msg.value);
       else {
-        const code = KNOWN_CODES.has(msg.code) ? (msg.code as LaneErrorCode) : 'ERR_INTERNAL';
-        pending.reject(new LaneError(code, msg.message));
+        const code = KNOWN_CODES.has(msg.code) ? (msg.code as IsolaneErrorCode) : 'ERR_INTERNAL';
+        pending.reject(new IsolaneError(code, msg.message));
       }
       this.#touch();
       return;
@@ -419,8 +420,8 @@ class TenantWorker {
     clearTimeout(this.#idleTimer);
     for (const dispose of this.#disposers.values()) dispose();
     this.#disposers.clear();
-    const code: LaneErrorCode = isOutOfMemory(exit) ? 'ERR_MEMORY_LIMIT' : 'ERR_WORKER_CRASHED';
-    const err = new LaneError(code, `worker for tenant ${this.tenant} ${describeExit(exit)}`);
+    const code: IsolaneErrorCode = isOutOfMemory(exit) ? 'ERR_MEMORY_LIMIT' : 'ERR_WORKER_CRASHED';
+    const err = new IsolaneError(code, `worker for tenant ${this.tenant} ${describeExit(exit)}`);
     for (const p of this.#requests.values()) {
       clearTimeout(p.timer);
       p.reject(err);
@@ -445,22 +446,22 @@ const DEFAULT_IDLE_TIMEOUT_MS = 30_000;
 
 /**
  * Runs guest code in per-tenant sandboxed worker processes. Results are
- * JSON values; failures reject with a {@link LaneError}.
+ * JSON values; failures reject with a {@link IsolaneError}.
  */
-export class LanePool {
+export class Runtime {
   #workerPath: string;
   #idleTimeoutMs: number;
   #onSecurityEvent: ((e: SecurityEvent) => void) | undefined;
   #onLog: ((e: LogEntry) => void) | undefined;
   #memoryLimit: number | undefined;
-  #defaults: VmOptions | undefined;
+  #defaults: IsolateOptions | undefined;
   #strict: boolean;
   #workers = new Map<string, TenantWorker>();
   #nextVm = 1;
   #nextReq = 1;
   #closed = false;
 
-  constructor(options: LanePoolOptions = {}) {
+  constructor(options: RuntimeOptions = {}) {
     const workerPath = options.workerPath ?? process.env.ISOLANE_WORKER;
     if (!workerPath) {
       throw new Error('isolane: no worker binary (pass workerPath or set ISOLANE_WORKER)');
@@ -483,7 +484,7 @@ export class LanePool {
    * A handle for one tenant, with options its VMs start from:
    * `pool.tenant('acme', { timeoutMs: 1000 }).run('1 + 1')`.
    */
-  tenant(name: string, defaults?: VmOptions): Tenant {
+  tenant(name: string, defaults?: IsolateOptions): Tenant {
     if (typeof name !== 'string' || name === '') throw new TypeError('isolane: tenant name is required');
     return new Tenant(this, name, defaults);
   }
@@ -504,8 +505,8 @@ export class LanePool {
   }
 
   /** Evaluate `code` in a fresh VM on the tenant's worker. */
-  async run(code: string, options: EvalOptions): Promise<unknown> {
-    const vm = this.createVm(options);
+  async run(code: string, options: RunOptions): Promise<unknown> {
+    const vm = this.createIsolate(options);
     try {
       return await vm.eval(code);
     } finally {
@@ -514,7 +515,7 @@ export class LanePool {
   }
 
   /** Create a stateful VM on the tenant's worker. */
-  createVm(options: EvalOptions): LaneVm {
+  createIsolate(options: RunOptions): Isolate {
     if (this.#closed) throw new Error('isolane: pool is closed');
     if (typeof options?.tenant !== 'string' || options.tenant === '') {
       throw new TypeError('isolane: options.tenant is required');
@@ -523,8 +524,8 @@ export class LanePool {
     const setup = vmSetup(opts);
     const worker = this.#workerFor(opts.tenant);
     const id = this.#nextVm++;
-    worker.createVm(id, opts, setup, opts.onLog ?? this.#onLog);
-    return new LaneVm(worker, id, () => this.#nextReq++);
+    worker.createIsolate(id, opts, setup, opts.onLog ?? this.#onLog);
+    return new Isolate(worker, id, () => this.#nextReq++);
   }
 
   /** @internal The tenant's worker pid, if it has one (tests and diagnostics). */
@@ -576,33 +577,33 @@ export class LanePool {
 /** One tenant's view of a pool, with default options for its VMs. */
 export class Tenant {
   readonly name: string;
-  #pool: LanePool;
-  #defaults: VmOptions | undefined;
+  #pool: Runtime;
+  #defaults: IsolateOptions | undefined;
 
   /** @internal Use `pool.tenant(name)`. */
-  constructor(pool: LanePool, name: string, defaults: VmOptions | undefined) {
+  constructor(pool: Runtime, name: string, defaults: IsolateOptions | undefined) {
     this.#pool = pool;
     this.name = name;
     this.#defaults = defaults;
   }
 
   /** Evaluate `code` in a fresh VM. */
-  run(code: string, options?: VmOptions): Promise<unknown> {
+  run(code: string, options?: IsolateOptions): Promise<unknown> {
     return this.#pool.run(code, this.#options(options));
   }
 
   /** Create a stateful VM. */
-  createVm(options?: VmOptions): LaneVm {
-    return this.#pool.createVm(this.#options(options));
+  createIsolate(options?: IsolateOptions): Isolate {
+    return this.#pool.createIsolate(this.#options(options));
   }
 
-  #options(options: VmOptions | undefined): EvalOptions {
+  #options(options: IsolateOptions | undefined): RunOptions {
     return { ...mergeOptions(this.#defaults, options ?? {}), tenant: this.name };
   }
 }
 
 /** A stateful VM on a tenant's worker. */
-export class LaneVm {
+export class Isolate {
   #worker: TenantWorker;
   #id: number;
   #nextReq: () => number;
@@ -617,9 +618,9 @@ export class LaneVm {
 
   /** Evaluate code in this VM, preserving global state between calls. */
   async eval(code: string): Promise<unknown> {
-    if (this.#disposed) throw new LaneError('ERR_VM_DISPOSED', 'vm has been disposed');
+    if (this.#disposed) throw new IsolaneError('ERR_VM_DISPOSED', 'vm has been disposed');
     await this.#worker.ready.catch((err: Error) => {
-      throw new LaneError('ERR_WORKER_CRASHED', err.message);
+      throw new IsolaneError('ERR_WORKER_CRASHED', err.message);
     });
     return this.#worker.eval(this.#id, this.#nextReq(), code);
   }

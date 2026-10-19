@@ -4,12 +4,12 @@
 //   node soak/stress.mjs [scenario ...]
 import { readFileSync, readdirSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
-import { LanePool } from '../dist/index.js';
+import { Runtime } from '../dist/index.js';
 
 const MB = 1 << 20;
 const strict = process.env.ISOLANE_STRICT === '1';
 const events = [];
-const newPool = (o = {}) => new LanePool({ strict, onSecurityEvent: (e) => events.push(e), ...o });
+const newPool = (o = {}) => new Runtime({ strict, onSecurityEvent: (e) => events.push(e), ...o });
 
 const status = (pid) => {
   try {
@@ -46,7 +46,7 @@ const scenarios = {
     try {
       while (vms.length < 3000) {
         const t0 = now();
-        const batch = Array.from({ length: 100 }, () => pool.createVm({ tenant: 'flood' }));
+        const batch = Array.from({ length: 100 }, () => pool.createIsolate({ tenant: 'flood' }));
         vms.push(...batch);
         await Promise.all(batch.map((vm) => vm.eval('globalThis.x = new Array(1000).fill(1); 1')));
         const st = status(pool._workerPid('flood'));
@@ -125,7 +125,7 @@ const scenarios = {
   // One long-lived VM, many evals that allocate: does its memory plateau?
   async evalLeak() {
     const pool = newPool();
-    const vm = pool.createVm({ tenant: 'leak', memoryLimitBytes: 256 * MB });
+    const vm = pool.createIsolate({ tenant: 'leak', memoryLimitBytes: 256 * MB });
     await vm.eval('1');
     const pid = pool._workerPid('leak');
     const samples = [{ evals: 0, ...status(pid) }];
@@ -142,8 +142,8 @@ const scenarios = {
   // a quiet tenant (separate process) and a quiet VM in the same worker?
   async noisyNeighbor() {
     const pool = newPool();
-    const quietOther = pool.createVm({ tenant: 'quiet' });
-    const quietSame = pool.createVm({ tenant: 'noisy' });
+    const quietOther = pool.createIsolate({ tenant: 'quiet' });
+    const quietSame = pool.createIsolate({ tenant: 'noisy' });
     await Promise.all([quietOther.eval('1'), quietSame.eval('1')]);
     const probe = async (vm, out, until) => {
       while (Date.now() < until) {
@@ -160,7 +160,7 @@ const scenarios = {
     const same = [];
     let timeouts = 0;
     const hogs = Array.from({ length: 8 }, async () => {
-      const vm = pool.createVm({ tenant: 'noisy', timeoutMs: 200 });
+      const vm = pool.createIsolate({ tenant: 'noisy', timeoutMs: 200 });
       while (Date.now() < until) await vm.eval('for (;;) {}').catch(() => timeouts++);
       vm.dispose();
     });

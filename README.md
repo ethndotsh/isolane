@@ -10,9 +10,9 @@ architecture.
 > not met, and there are no published packages yet.
 
 ```js
-import { LanePool } from 'isolane';
+import { Runtime } from 'isolane';
 
-using pool = new LanePool({ strict: true, onLog: (e) => console.log(`[${e.tenant}]`, e.message) });
+using pool = new Runtime({ strict: true, onLog: (e) => console.log(`[${e.tenant}]`, e.message) });
 const acme = pool.tenant('acme', { timeoutMs: 1000, memoryLimitBytes: 64 << 20 });
 
 await acme.run('1 + 2'); // 3
@@ -26,7 +26,7 @@ await acme.run('getUser(42).then((u) => u.plan)', {
 });
 
 // Stateful VMs keep their globals between evals.
-using vm = acme.createVm();
+using vm = acme.createIsolate();
 await vm.eval('globalThis.count = 0');
 await vm.eval('++count'); // 1
 ```

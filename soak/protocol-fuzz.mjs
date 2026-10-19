@@ -1,14 +1,14 @@
 // Fuzz the supervisor's side of the worker protocol: fake workers (standing
 // in for a compromised worker) send ready, then a random mix of valid,
 // malformed, and hostile frames. Invariants: every eval settles (resolves,
-// or rejects with a LaneError); the supervisor never throws outside a
+// or rejects with a IsolaneError); the supervisor never throws outside a
 // promise; a worker that breaks the protocol is killed; the pool keeps
 // serving other tenants.
 //   node soak/protocol-fuzz.mjs [iterations] [seed]
 import { chmodSync, mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { LanePool, LaneError } from '../dist/index.js';
+import { Runtime, IsolaneError } from '../dist/index.js';
 
 const iterations = Number(process.argv[2] ?? 2000);
 let seed = Number(process.argv[3] ?? Date.now() % 1e9);
@@ -109,22 +109,22 @@ for (let i = 0; i < iterations; i++) {
   const p = plan();
   if (process.env.FUZZ_TRACE) process.stderr.write(`case ${i} seed ${caseSeed} ${JSON.stringify(p)}\n`);
   const events = [];
-  const pool = new LanePool({ workerPath: fakeWorker(p, i), onSecurityEvent: (e) => events.push(e), idleTimeoutMs: 1000 });
-  const vm = pool.createVm({ tenant: 't', timeoutMs: 2000, hostFunctions: { echo: (x) => x } });
+  const pool = new Runtime({ workerPath: fakeWorker(p, i), onSecurityEvent: (e) => events.push(e), idleTimeoutMs: 1000 });
+  const vm = pool.createIsolate({ tenant: 't', timeoutMs: 2000, hostFunctions: { echo: (x) => x } });
   let outcome;
   try {
     const v = await withTimeout(vm.eval('1'), 8000);
     outcome = `resolved`;
     void v;
   } catch (e) {
-    if (e instanceof LaneError) outcome = e.code;
+    if (e instanceof IsolaneError) outcome = e.code;
     else if (e?.message === 'HUNG') {
       // The supervisor must give up on a worker that never answers.
       outcome = 'hung';
       failures.push({ kind: 'eval never settled', seed: caseSeed, plan: p });
     } else {
-      outcome = 'non-LaneError';
-      failures.push({ kind: 'non-LaneError rejection', seed: caseSeed, plan: p, error: String(e?.stack ?? e) });
+      outcome = 'non-IsolaneError';
+      failures.push({ kind: 'non-IsolaneError rejection', seed: caseSeed, plan: p, error: String(e?.stack ?? e) });
     }
   }
   if (events.some((e) => e.kind === 'protocol-violation')) {

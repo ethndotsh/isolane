@@ -11,8 +11,9 @@ code, or in the kernel interface) is enough for a tenant to reach another
 tenant, the host application, or the machine.
 
 `npm install isolane` must be the whole setup: no root, no daemons, no
-container runtime. The client API mirrors clockwork's `LanePool` (`run`,
-`createVm`, `hostFunctions`, `LaneError` codes).
+container runtime. The client API (`Runtime`, `Tenant`, `Isolate`,
+`IsolaneError`) descends from clockwork's `LanePool` (`run`, `createVm`,
+`hostFunctions`, `LaneError` codes).
 
 ## Decisions so far
 
@@ -70,7 +71,7 @@ code, the worker is treated as potentially compromised.
  application process (Node)                         worker processes (prebuilt Rust + V8)
 ┌──────────────────────────────────────┐   pipe  ┌───────────────────────────────────────┐
 │ isolane library                      │◀───────▶│ worker: tenant A                      │
-│  - LanePool-shaped API               │         │  isolate per VM, watchdog thread      │
+│  - Runtime-shaped API               │         │  isolate per VM, watchdog thread      │
 │  - supervisor: spawn, lock down,     │   pipe  │  seccomp + Landlock (+ namespaces)    │
 │    route by tenant, quotas, recycle, │◀───────▶├───────────────────────────────────────┤
 │    quarantine                        │         │ worker: tenant B                      │
@@ -88,7 +89,7 @@ code, the worker is treated as potentially compromised.
   locks itself down (Chrome-renderer style) after V8 initializes and before
   it reads any guest code.
 - **Isolation unit:** by default one worker process per tenant, containing
-  one isolate per VM (`pool.createVm`) or per one-shot run. Isolates are
+  one isolate per VM (`pool.createIsolate`) or per one-shot run. Isolates are
   never reused across VMs. A `tenantsPerWorker` option allows grouping
   tenants by plan when process count matters more; that is Cloudflare's
   model.
@@ -105,7 +106,7 @@ code, the worker is treated as potentially compromised.
    application's function and sends the result back. Inside the guest the
    call returns a Promise, driven by a per-isolate event loop.
 5. The completion value returns as JSON; failures use clockwork's
-   `LaneError` codes.
+   `IsolaneError` codes.
 
 ## Defense layers
 
@@ -218,7 +219,7 @@ deploying. Development mode warns instead of refusing.
 |---|---|---|
 | P0 V8 build | V8 from source with the sandbox, for darwin-arm64 (this machine) and linux-x64 (OrbStack) | A test binary asserts the sandbox is active on both |
 | P1 Worker | Isolate per VM, run/eval, limits, `TerminateExecution`, frozen clocks, codegen off, Promise host calls | Port of clockwork's lane tests passes against a bare worker |
-| P2 Library | Supervisor in TS, framed IPC, process per tenant, lifecycle, `LanePool` API | Same tests pass through `npm`-style usage in Node |
+| P2 Library | Supervisor in TS, framed IPC, process per tenant, lifecycle, `Runtime` API | Same tests pass through `npm`-style usage in Node |
 | P3 Lockdown | seccomp, Landlock, opportunistic namespaces, Seatbelt, strict mode, `isolane doctor` | Escape suite: a test-only "compromised worker" mode is refused `open` (EACCES) and killed on `socket`/`execve`/`ptrace`/`fork` every time, on each row of the host table |
 | P4 Packaging | CI matrix building V8 for six targets, per-platform npm packages, staleness checks | `npm install isolane` works on a clean machine per target |
 | P5 Security program | Patch pipeline, Fuzzilli, external review | **Gate: not recommended for untrusted code before P5 is complete** |

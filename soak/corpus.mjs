@@ -9,7 +9,7 @@
 //   node soak/corpus.mjs <v8 checkout> [concurrency] [shard/of]
 import { readdirSync, readFileSync, statSync } from 'node:fs';
 import { join, relative } from 'node:path';
-import { LanePool } from '../dist/index.js';
+import { Runtime } from '../dist/index.js';
 
 const v8dir = process.argv[2] ?? 'build/rusty_v8/v8';
 const concurrency = Number(process.argv[3] ?? 4);
@@ -38,7 +38,7 @@ globalThis.assertThrows = (f) => { try { typeof f === 'function' && f(); } catch
 globalThis.__natives = new Proxy({}, { get: () => () => undefined });
 `;
 
-const pool = new LanePool({ strict: process.env.ISOLANE_STRICT === '1', onSecurityEvent: (e) => events.push(e) });
+const pool = new Runtime({ strict: process.env.ISOLANE_STRICT === '1', onSecurityEvent: (e) => events.push(e) });
 const events = [];
 const outcomes = {};
 const crashes = [];
@@ -57,7 +57,7 @@ async function runFile(path, tenant) {
     await pool.run(prelude + src, { tenant, timeoutMs: 2000, memoryLimitBytes: 128 << 20 });
     outcomes.ok = (outcomes.ok ?? 0) + 1;
   } catch (e) {
-    const c = e?.code ?? 'non-LaneError';
+    const c = e?.code ?? 'non-IsolaneError';
     outcomes[c] = (outcomes[c] ?? 0) + 1;
     if (c === 'ERR_WORKER_CRASHED') {
       const ev = events.slice(before).find((x) => x.tenant === tenant);

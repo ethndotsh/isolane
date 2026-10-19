@@ -5,13 +5,13 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { LanePool } from '../dist/index.js';
+import { Runtime } from '../dist/index.js';
 
 const linux = process.platform === 'linux';
 const escapeWorker = process.env.ISOLANE_ESCAPE_WORKER;
 
 test('the host provides strict-mode isolation', { skip: !linux || !process.env.ISOLANE_WORKER }, async () => {
-  const report = await new LanePool().isolationReport();
+  const report = await new Runtime().isolationReport();
   assert.equal(report.sandboxSecure, true);
   assert.equal(report.lockdown.seccomp, 'full');
   assert.notEqual(report.lockdown.landlock, 'none');
