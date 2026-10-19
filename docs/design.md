@@ -89,7 +89,7 @@ code, the worker is treated as potentially compromised.
   locks itself down (Chrome-renderer style) after V8 initializes and before
   it reads any guest code.
 - **Isolation unit:** by default one worker process per tenant, containing
-  one isolate per VM (`pool.createIsolate`) or per one-shot run. Isolates are
+  one isolate per stateful VM (`tenant.isolate()`) or per one-shot run. Isolates are
   never reused across VMs. A `tenantsPerWorker` option allows grouping
   tenants by plan when process count matters more; that is Cloudflare's
   model.
@@ -99,7 +99,7 @@ code, the worker is treated as potentially compromised.
 
 ### Request flow
 
-1. The app calls `pool.run(code, { tenant, hostFunctions, timeoutMs })`.
+1. The app calls `runtime.tenant(name).run(code, { host, limits: { timeoutMs } })`.
 2. The supervisor finds or spawns the tenant's worker and sends the code.
 3. The worker creates an isolate, compiles, and runs.
 4. A host-function call becomes a frame up to the library, which runs the

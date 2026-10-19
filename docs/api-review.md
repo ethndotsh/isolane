@@ -257,3 +257,45 @@ touch the same host-call paths), in this order: config pipeline, host
 functions + context + namespaces, hooks/events, `Tenant` handle, file
 splits, protocol versioning and grouping. Tests move with each step. The
 README and the serverless example are rewritten against the new surface.
+
+## Status: landed (October 2026)
+
+v2 landed as specified above, in one step (branch `api-v2`), with these
+differences:
+
+- **Deferred:** `onWorker` reports `start` and `exit` (with a `reason`:
+  `idle`, `stopped`, `crashed`, `out of memory`, ...) but not `recycle`,
+  since workers aren't recycled yet. `onLimit` carries `{ tenant, isolate,
+  limit, message }`, not the limit's `value`; `afterEval` gets `durationMs`,
+  not `usage` (`tenant.usage()` has it).
+- **Brokers bypass hooks.** `fetch`, `connect`, and `fs` are host calls
+  underneath, but `beforeHostCall`/`afterHostCall` don't see them; their
+  refusals surface as `onPolicyDenial` instead.
+- **No `true` policies.** `fetch: true` (and `connect`, `fs`) is an
+  `ERR_INVALID_CONFIG`: there's no safe default host list or root, so a
+  policy is always an object (or `false`).
+- **Tenant limits stay out of the call level.** `isolates`,
+  `concurrentEvals`, `workerMemoryBytes`, and `idleMs` are fixed when the
+  tenant's worker starts, so setting them on a call is an
+  `ERR_INVALID_CONFIG`; `limits.tenants` is runtime-only.
+- **The minimal prelude stays** (item 6 of the implementation list), with
+  the v2 names, until the startup snapshot makes `web` cheap enough to be
+  always on.
+- **The `create` frame** groups `limits`, `time`, `random`, and `functions`
+  (`[{ path, sync }]`, called by index), but keeps `eval`, `wasm`, and
+  `web` as top-level fields named as in the config, rather than an `allow`
+  group. `ready` carries `protocol: 2`; a worker without it is refused with
+  `ERR_WORKER_INCOMPATIBLE` (not treated as a security event).
+- **Old names fail loudly.** Every renamed option is an `ERR_INVALID_CONFIG`
+  that names its replacement (`hostFunctions is not a config field; use
+  host`), instead of being accepted.
+
+Two additions beyond the review, decided while it landed:
+
+- **`web: { baseUrl }`**: the isolate's base URL. Relative URLs in `fetch`
+  and `new Request` resolve against it, and a read-only `location` exists
+  (only when it's set). It must be an absolute `http:` or `https:` URL.
+- **`shims`**: the embedder's JS run in the isolate (`setup` once, `before`
+  and `after` each eval), each as its own script, with `ERR_SHIM` for their
+  failures. `setup` and `before` are scripts and aren't awaited; `after` is
+  an async function body that can replace the result. See the README.
