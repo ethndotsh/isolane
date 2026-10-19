@@ -197,7 +197,9 @@ codes (`ENOENT`, `EACCES`, `EROFS`), and they never reveal host paths.
 
 `eval: true` allows `eval` and `new Function`. `wasm: true` keeps
 `WebAssembly` (off by default: its compilers are a large share of V8's
-attack surface).
+attack surface). Shared memories stay off either way: `new
+WebAssembly.Memory({ shared: true })`, and instantiating a module that
+exports one, throw a `TypeError`, as their buffers are SharedArrayBuffers.
 
 ### Brokering
 
@@ -368,7 +370,7 @@ await acme.run(app.code, {
 | `backgroundMs` | 1 s per minute | isolate, work between evals (retires the isolate) |
 | `logBytes` / `logLineBytes` | 1 MiB / 16 KiB | isolate |
 | `codeBytes` / `resultBytes` | 16 MiB each | isolate, per eval |
-| `decompressedBytes` | 128 MiB | isolate, per decompression call |
+| `decompressedBytes` | 128 MiB | isolate, per decompression call (checked as it decodes) |
 | `isolates` | 100 | tenant |
 | `concurrentEvals` | 1,000 | tenant |
 | `workerMemoryBytes` | 2 GiB | tenant (Linux; covers ArrayBuffer and WebAssembly memory a heap limit doesn't) |
@@ -391,7 +393,11 @@ up behind a timer storm, and each isolate has its own thread, so a storm
 doesn't slow the tenant's other isolates beyond sharing the CPU.
 
 Isolate limits can be set at every level; tenant limits at the runtime and
-in `tenants(name)`; `tenants` on the runtime only. Hitting any limit fails
+in `tenants(name)`; `tenants` on the runtime only. Each is an integer of at
+least 1, and durations (`timeoutMs`, `cpuMs`, `idleMs`, and the policies'
+`*Ms` limits) are at most 2^31 - 1 ms, `timers` at most 2^32 - 1, and
+`heapBytes` at most 4 GiB (V8's largest heap); anything else is
+`ERR_INVALID_CONFIG`. Hitting any limit fails
 with `ERR_LIMIT`, with `err.limit` naming it, and emits `onLimit`. `fetch`,
 `connect`, and `fs` policies carry their own limits.
 
@@ -431,12 +437,16 @@ lifts it.
   symlinks inside the root at the same moment could race that check.
 - **A seeded isolate's hash seeds are predictable** to its own code (it can
   slow its own hash tables down, within its time limits).
-- **On macOS**, the per-worker memory cap and CPU-time budgets aren't
-  enforced, and there's no seccomp or Landlock: strict mode refuses it.
+- **macOS is for development only.** The per-worker memory cap and
+  CPU-time budgets aren't enforced, and there's no seccomp or Landlock, so
+  strict mode refuses it by design: run untrusted code on Linux.
 - **Web Crypto runs on the isolate's thread**, as guest CPU time. Long
   derivations stop at the isolate's limits (PBKDF2 checks as it goes), but
   RSA key generation can't be interrupted, so RSA keys are capped at 4,096
-  bits. RSA is the `rsa` crate's, which isn't constant-time
+  bits, generated or imported. Lengths a guest picks are checked before
+  anything is allocated: PBKDF2 derives at most 1 MiB, HKDF at most 255
+  hash lengths (as RFC 5869 has it), and an RSA-PSS salt must fit the key.
+  RSA is the `rsa` crate's, which isn't constant-time
   ([RUSTSEC-2023-0071](https://rustsec.org/advisories/RUSTSEC-2023-0071)):
   a remote observer timing many RSA decryptions or signatures with one key
   could learn it.

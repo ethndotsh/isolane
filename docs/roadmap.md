@@ -84,6 +84,22 @@ Agreed October 2026:
 | External security review; written threat-model sign-off (P5 gate) | planned | the README says "not ready for untrusted code" until then |
 | Known limits documented (README) | done | |
 
+### Security review, October 2026
+
+An internal review found these, each confirmed with a proof of concept.
+The worker-side fixes each have a regression test; the supervisor-side
+ones (host-call flood, log limits, `Isolate.close()`, the connection cap,
+DNS denials, stdin backpressure) are tracked with their own fixes.
+
+| Finding | Severity | Fix | Status |
+|---|---|---|---|
+| A `CryptoKey`'s slots (type, extractable, algorithm, usages, handle) were symbol properties on the key, found with `Object.getOwnPropertySymbols`: a guest could export a non-extractable key, add usages, or copy a handle onto a forged key. `algorithm` and `usages` returned the internal objects | high | Slots in a module-private WeakMap, and only keys made by `constructKey` pass a check; the getters return copies (`patches/deno-security-crypto-key-slots.patch`). Audited: Deno's webidl brand is an own symbol everywhere, so other vendored objects can be forged, but each only holds the guest's own data (URLs, events, streams, bodies, ports within one isolate); sockets use JS private fields, and broker ids are per isolate | done |
+| A 421-byte brotli stream expanded to 256 MiB with `decompressedBytes: 1 MiB` (gzip to 64 MiB per 64 KiB of input): the limit was checked after decoding | high | Every decoder checks the limit as it decodes, in bounded steps (brotli driven directly, 64 KiB at a time; gzip fed 512 bytes at a time); brotli is strict (RFC 7932 windows, no 1 GiB large window, so WPT's tentative large-window test is by-design). The worker grows by under 48 MiB on any bomb (tested). Fetch never decodes (`accept-encoding: identity`) | done |
+| `deriveBits` allocated 256 MiB under a 128 MiB heap; an RSA-PSS `saltLength` of 256 MiB was allocated before failing; imported RSA keys had no size cap | high | PBKDF2 derives at most 1 MiB and HKDF at most 255 hash lengths, checked before allocating; a PSS salt must fit the key (sign fails, verify is false); imported RSA keys are capped at 4,096 bits like generated ones, and exponents at rsa's 2^33 - 1. Audited every op in `crates/worker/src/web/` for guest-sized allocations: the rest are proportional to buffers the guest already holds (encoding, base64, clone, URL, compression input, host-call bytes), and arrays from JS now grow as read instead of reserving their claimed length | done |
+| `wasm: true` gave guests a SharedArrayBuffer through a shared `WebAssembly.Memory` (V8 can't turn shared memories off) | medium | A guard installed before guest code: the Memory constructor and instances refuse shared memories, and `instantiate` instantiates synchronously after compiling, so no promise (whose `then` lookup a guest can hook) holds an unchecked instance | done |
+| `limits.timers: 2**32` passed validation, then the worker exited on the message and the tenant was quarantined | medium | Every limit is checked against what the worker holds (`timers` a u32, durations at most 2^31 - 1 ms, as setTimeout takes, `heapBytes` at most 4 GiB); a create the worker can't parse fails that isolate's evals (`ERR_INTERNAL`) instead of exiting; the worker clamps durations and the heap too | done |
+| macOS can't meet strict mode | — | By design: no seccomp, Landlock, or memory cap there; strict mode refuses it, and the guide's known limits say so | by design |
+
 ## 2. Guest capabilities (per-VM policies)
 
 | Item | Status |
