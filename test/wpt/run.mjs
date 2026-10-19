@@ -36,6 +36,7 @@ export const WPT_COMMIT = 'c47791d69da614474168c0f6c1ad9a1dbd0cf0d3';
 // Directories (or single files) under test. More specific paths first: a
 // file is reported under the first that matches.
 const DIRS = [
+  'urlpattern',
   'url',
   'encoding/streams',
   'encoding',

@@ -322,10 +322,9 @@ class URLPattern {
    * @param {string} [baseURL]
    * @returns {boolean}
    */
-  test(input, baseURL = undefined) {
+  test(input = { __proto__: null }, baseURL = undefined) {
     webidl.assertBranded(this, URLPatternPrototype);
     const prefix = "Failed to execute 'test' on 'URLPattern'";
-    webidl.requiredArguments(arguments.length, 1, prefix);
     input = webidl.converters.URLPatternInput(input, prefix, "Argument 1");
     if (baseURL !== undefined) {
       baseURL = webidl.converters.USVString(baseURL, prefix, "Argument 2");
@@ -359,10 +358,9 @@ class URLPattern {
    * @param {string} [baseURL]
    * @returns {URLPatternResult | null}
    */
-  exec(input, baseURL = undefined) {
+  exec(input = { __proto__: null }, baseURL = undefined) {
     webidl.assertBranded(this, URLPatternPrototype);
     const prefix = "Failed to execute 'exec' on 'URLPattern'";
-    webidl.requiredArguments(arguments.length, 1, prefix);
     input = webidl.converters.URLPatternInput(input, prefix, "Argument 1");
     if (baseURL !== undefined) {
       baseURL = webidl.converters.USVString(baseURL, prefix, "Argument 2");
@@ -390,7 +388,9 @@ class URLPattern {
 
       const res = result[key] ??= {
         input: values[i],
-        groups: component.regexpString === "^(.*)$" ? { "0": values[i] } : {},
+        groups: component.regexpString === "^(.*)$"
+          ? { [component.groupNameList[0]]: values[i] }
+          : {},
       };
 
       switch (component.regexpString) {
@@ -398,7 +398,7 @@ class URLPattern {
           if (values[i] !== "") return null;
           break;
         case "^(.*)$":
-          res.groups["0"] = values[i];
+          res.groups[component.groupNameList[0]] = values[i];
           break;
         default: {
           const match = RegExpPrototypeExec(component.regexp, values[i]);
