@@ -186,3 +186,78 @@ test('queued evals on one isolate are not mistaken for an unresponsive worker', 
   assert.equal(await vm.eval('2'), 2);
   vm.close();
 });
+
+// ---- work between evals (limits.backgroundMs) ----
+
+const until = async (check, ms = 10_000) => {
+  const end = Date.now() + ms;
+  while (!check()) {
+    if (Date.now() > end) throw new Error('timed out waiting');
+    await new Promise((r) => setTimeout(r, 20));
+  }
+};
+
+test('limits.backgroundMs defaults to 1 s per minute', () => {
+  assert.equal(DEFAULT_LIMITS.backgroundMs, 1_000);
+});
+
+test('10,000 setIntervals after an eval are stopped by limits.backgroundMs', async () => {
+  const limits = [];
+  const vm = isolate({ ...T, web: true, limits: { backgroundMs: 200 }, hooks: { onLimit: (e) => limits.push(e) } });
+  await vm.eval('globalThis.n = 0; for (let i = 0; i < 10_000; i++) setInterval(() => { n++ }, 0); "started"');
+  await until(() => limits.length > 0);
+  assert.equal(limits[0].limit, 'backgroundMs');
+  assert.equal(limits[0].isolate, vm.id);
+  assert.match(limits[0].message, /limits\.backgroundMs/);
+  await assert.rejects(vm.eval('n'), limit('backgroundMs'));
+  await assert.rejects(vm.eval('n'), code('ERR_ISOLATE_RETIRED'));
+  vm.close();
+});
+
+test('a host-call loop after an eval is stopped by limits.backgroundMs', async () => {
+  let calls = 0;
+  const limits = [];
+  const vm = isolate({ ...T, limits: { backgroundMs: 50 }, host: { ping: () => ++calls }, hooks: { onLimit: (e) => limits.push(e) } });
+  // The eval returns at once; the loop runs on replies, after it.
+  assert.equal(await vm.eval('(async () => { for (;;) await ping() })(); "started"'), 'started');
+  await until(() => limits.length > 0);
+  assert.equal(limits[0].limit, 'backgroundMs');
+  // Each continuation costs at least 0.25 ms of the 50 ms budget.
+  assert.ok(calls <= 250, `${calls} calls`);
+  const stopped = calls;
+  await new Promise((r) => setTimeout(r, 200));
+  assert.ok(calls <= stopped + 1, 'the loop stopped');
+  await assert.rejects(vm.eval('1'), limit('backgroundMs'));
+  vm.close();
+});
+
+test('a timer storm leaves its own and other isolates responsive, and is charged to the tenant', async () => {
+  const rt = new Runtime({ strict });
+  const stormy = isolateOf(rt, { tenant: 'storm', web: true, limits: { backgroundMs: null } });
+  const calm = isolateOf(rt, { tenant: 'storm' });
+  await stormy.eval('globalThis.n = 0; for (let i = 0; i < 100; i++) setInterval(() => { for (let j = 0; j < 1e5; j++) n++ }, 0); "started"');
+  await new Promise((r) => setTimeout(r, 200));
+  for (const vm of [stormy, calm]) {
+    for (let i = 0; i < 5; i++) {
+      const started = Date.now();
+      await vm.eval('1');
+      assert.ok(Date.now() - started < 250, `an eval waited ${Date.now() - started} ms`);
+    }
+  }
+  assert.ok((await stormy.eval('n')) > 0);
+  stormy.close();
+  calm.close();
+  // CPU time is measured on Linux.
+  if (process.platform === 'linux') {
+    await until(() => rt.tenant('storm').usage().cpuMs > 100, 2000);
+  }
+  rt.close();
+});
+
+test('a modest setInterval keeps running between evals within the default budget', async () => {
+  const vm = isolate({ ...T, web: true });
+  await vm.eval('globalThis.ticks = 0; setInterval(() => ticks++, 10); 0');
+  await new Promise((r) => setTimeout(r, 300));
+  assert.ok((await vm.eval('ticks')) >= 5);
+  vm.close();
+});
