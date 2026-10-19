@@ -97,8 +97,13 @@ test('no WebAssembly, shared memory, Atomics, or Temporal', async () => {
 
 test('no ambient host access', async () => {
   assert.deepEqual(
-    await pool.run('[typeof require, typeof process, typeof fetch, typeof setTimeout]', T),
-    ['undefined', 'undefined', 'undefined', 'undefined'],
+    await pool.run('[typeof require, typeof process, typeof Deno, typeof connect, typeof fs]', T),
+    ['undefined', 'undefined', 'undefined', 'undefined', 'undefined'],
+  );
+  // The web platform's fetch is there, but there's no network without a policy.
+  assert.equal(
+    await pool.run('fetch("https://example.com/").then(() => "fetched", (e) => e.message)', T),
+    'fetch is not available: this isolate has no fetch policy',
   );
 });
 

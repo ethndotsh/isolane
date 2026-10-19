@@ -221,9 +221,9 @@ export class WorkerProcess {
   #stderrTail = '';
 
   /**
-   * `prepareWeb`: the worker will run web VMs, so it builds the web
-   * platform's snapshot in the background as it starts (otherwise, when
-   * the first web VM asks).
+   * `prepareWeb`: the worker will run web VMs, so if its binary has no
+   * embedded web snapshot, it builds one in the background as it starts
+   * (otherwise, when the first web VM asks).
    */
   constructor(workerPath: string, handlers: WorkerHandlers, strict: boolean, memoryLimitBytes?: number, prepareWeb = false) {
     const args = ['--serve'];

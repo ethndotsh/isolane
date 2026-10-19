@@ -12,11 +12,10 @@ after(() => runtime.close());
 const W = { tenant: 'web', web: true };
 const run = (code, opts = {}) => runtime.run(code, { ...W, ...opts });
 
-test('off by default: plain ECMAScript', async () => {
-  assert.deepEqual(
-    await runtime.run('[typeof URL, typeof TextEncoder, typeof crypto, typeof structuredClone, typeof performance]', { tenant: 'web' }),
-    ['undefined', 'undefined', 'undefined', 'undefined', 'undefined'],
-  );
+test('on by default; web: false leaves plain ECMAScript', async () => {
+  const probe = '[typeof URL, typeof TextEncoder, typeof crypto, typeof structuredClone, typeof performance, typeof setTimeout, typeof fetch]';
+  assert.deepEqual(await runtime.run(probe, { tenant: 'web' }), ['function', 'function', 'object', 'function', 'object', 'function', 'function']);
+  assert.deepEqual(await runtime.run(probe, { tenant: 'web', web: false }), Array(7).fill('undefined'));
 });
 
 test('the globals exist and are non-enumerable', async () => {
@@ -958,11 +957,12 @@ test('Request follows the Fetch standard for credentials, duplex, and stream bod
   );
 });
 
-test('without web, a fetch policy still gives the minimal fetch', async () => {
-  assert.deepEqual(
-    await runtime.run(`fetch('${base}/json').then(async (r) => [typeof Request, r.status, await r.json()])`, { tenant: 'web', ...NET }),
-    ['undefined', 200, { hi: 'wörld' }],
-  );
+test('fetch, connect, and fs need the web platform', async () => {
+  for (const [policy, value] of [['fetch', NET.fetch], ['connect', { hosts: ['localhost:1'] }], ['fs', { root: '/' }]]) {
+    const err = await runtime.run('1', { tenant: 'web', web: false, [policy]: value }).catch((e) => e);
+    assert.equal(err.code, 'ERR_INVALID_CONFIG');
+    assert.match(err.message, new RegExp(`${policy} needs the web platform, which web: false turns off`));
+  }
 });
 
 test('web.baseUrl: relative URLs resolve against it, and location exists', async () => {

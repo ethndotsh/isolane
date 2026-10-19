@@ -106,7 +106,7 @@ test('connect is the Sockets API, and only with a policy', async () => {
 });
 
 test('connect needs the web platform', async () => {
-  await assert.rejects(runtime.run('1', { tenant: 'sockets', connect: local(echoPort) }), /needs the web platform/);
+  await assert.rejects(runtime.run('1', { tenant: 'sockets', web: false, connect: local(echoPort) }), /connect needs the web platform/);
 });
 
 test('write and read; the end of the input closes the socket', async () => {

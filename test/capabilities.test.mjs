@@ -1,6 +1,9 @@
 // Network and fs brokers, and the guest-side prelude, without a worker: the
-// prelude runs in a bare node:vm context (plain ECMAScript, like a VM) whose
-// host functions cross a JSON boundary as they would over the protocol.
+// prelude runs in a node:vm context whose host functions cross a JSON
+// boundary as they would over the protocol. The context has a stand-in for
+// the web platform: TextEncoder/TextDecoder, and a minimal fetch over the
+// broker (WEB_FETCH below) where the real one is runtime/fetch.js, tested
+// end to end in web.test.mjs.
 import { test, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdirSync, mkdtempSync, readFileSync, symlinkSync, writeFileSync } from 'node:fs';
@@ -41,11 +44,56 @@ function resultToGuest(value, GuestUint8Array) {
 /** Policy denials the brokers reported (for onPolicyDenial), most recent last. */
 const denials = [];
 
+/**
+ * The web platform's fetch hook, minimally: Headers, Response (whole bodies),
+ * and fetch() over the raw broker function the prelude hands it.
+ */
+const WEB_FETCH = String.raw`(rawFetch) => {
+  const g = globalThis;
+  const encoder = new TextEncoder();
+  const decoder = new TextDecoder();
+  const toBytes = (data) => (ArrayBuffer.isView(data) ? new Uint8Array(data.buffer, data.byteOffset, data.byteLength) : encoder.encode(String(data)));
+  class Headers {
+    #map = new Map();
+    constructor(init) {
+      if (init == null) return;
+      const pairs = init instanceof Headers ? [...init] : Array.isArray(init) ? init : Object.entries(init);
+      for (const [k, v] of pairs) this.append(k, v);
+    }
+    append(k, v) {
+      k = String(k).toLowerCase();
+      this.#map.set(k, this.#map.has(k) ? this.#map.get(k) + ', ' + v : String(v));
+    }
+    get(k) { return this.#map.get(String(k).toLowerCase()) ?? null; }
+    *[Symbol.iterator]() { yield* this.#map; }
+  }
+  class Response {
+    #body;
+    constructor(r, body) {
+      Object.assign(this, { status: r.status, ok: r.status >= 200 && r.status < 300, url: r.url, redirected: r.redirected, headers: new Headers(r.headers) });
+      this.#body = body;
+      this.bodyUsed = false;
+    }
+    text() { this.bodyUsed = true; return Promise.resolve(decoder.decode(this.#body)); }
+    json() { return this.text().then(JSON.parse); }
+  }
+  let next = 1;
+  g.fetch = async (url, init = {}) => {
+    const id = next++;
+    const body = init.body == null ? undefined : toBytes(init.body);
+    const head = await rawFetch('open', id, { url: String(url), method: String(init.method ?? 'GET'), headers: [...new Headers(init.headers)] }, body);
+    const chunks = [];
+    for (let chunk; (chunk = await rawFetch('read', id)) !== null; ) chunks.push(...chunk);
+    return new Response(head, new Uint8Array(chunks));
+  };
+}`;
+
 /** A guest context with the policies installed; returns an async eval. */
 function guest(policies, track) {
   const caps = capabilities({ globals: {}, ...policies }, new Set(), (api, target, reason) => denials.push({ api, target, reason }));
   track?.(caps);
-  const ctx = vm.createContext({});
+  const ctx = vm.createContext({ TextEncoder, TextDecoder });
+  ctx.__isolane_web_fetch = vm.runInContext(WEB_FETCH, ctx);
   const GuestError = vm.runInContext('Error', ctx);
   const GuestTypeError = vm.runInContext('TypeError', ctx);
   const GuestUint8Array = vm.runInContext('Uint8Array', ctx);
@@ -221,11 +269,13 @@ test('connect broker: connection cap, and disposal closes them', async () => {
   await assert.rejects(sock('open', { hostname: 'localhost', port: tcpPort }), /socket is closed/);
 });
 
-test('the prelude needs the web platform for connect', () => {
-  const caps = capabilities({ globals: {}, connect: tcpLocal }, new Set(), () => {});
-  const ctx = vm.createContext({});
-  ctx.__isolane_socket = () => {};
-  assert.throws(() => vm.runInContext(caps.prelude, ctx), /connect needs the web platform/);
+test('the prelude needs the web platform for each policy', () => {
+  for (const [policy, fn] of [['connect', '__isolane_socket'], ['fetch', '__isolane_fetch'], ['fs', '__isolane_fs']]) {
+    const caps = capabilities({ globals: {}, [policy]: policy === 'fs' ? { root: tmpdir() } : tcpLocal }, new Set(), () => {});
+    const ctx = vm.createContext({});
+    ctx[fn] = () => {};
+    assert.throws(() => vm.runInContext(caps.prelude, ctx), new RegExp(`${policy} needs the web platform`));
+  }
 });
 
 // ---- globals ----

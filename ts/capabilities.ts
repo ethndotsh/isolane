@@ -941,9 +941,10 @@ export const FS_HOST_FUNCTION = '__isolane_fs';
 export const SOCKET_HOST_FUNCTION = '__isolane_socket';
 
 /**
- * The hook an isolate's web platform (`web`) leaves for the prelude: the
- * prelude hands it the raw fetch host function, and the spec `fetch` uses
- * it. The worker deletes the hook before guest code runs.
+ * The hooks an isolate's web platform (runtime/globals.js) leaves for the
+ * prelude: the prelude hands each the raw host function, and the web
+ * platform's `fetch` and `connect()` use it. The worker deletes the hooks
+ * before guest code runs.
  */
 export const WEB_FETCH_HOOK = '__isolane_web_fetch';
 /** The same for `connect()`: the Sockets API (runtime/sockets.js) over the socket broker. */
@@ -951,12 +952,12 @@ export const WEB_CONNECT_HOOK = '__isolane_web_connect';
 
 /**
  * Trusted setup the worker runs in a VM's context before any guest code:
- * wraps the raw host functions in `fetch`/`Response`/`Headers` and `fs`,
- * then deletes the raw ones. Plain ECMAScript (no TextEncoder), so it
- * carries its own UTF-8. Bytes cross as Uint8Arrays (host calls carry them
- * raw). With the web platform on, its spec `fetch` takes over from the
- * minimal one here. Guest code can tamper with these wrappers, which only
- * affects itself: the brokers above validate every request on their own.
+ * hands the raw `fetch` and socket host functions to the web platform,
+ * wraps the raw `fs` one in an `fs` object, then deletes the raw ones.
+ * Config resolution only allows these policies with the web platform on.
+ * Bytes cross as Uint8Arrays (host calls carry them raw). Guest code can
+ * tamper with the wrappers, which only affects itself: the brokers above
+ * validate every request on their own.
  */
 export const PRELUDE = String.raw`(() => {
   'use strict';
@@ -967,146 +968,31 @@ export const PRELUDE = String.raw`(() => {
   delete g.${FETCH_HOST_FUNCTION};
   delete g.${FS_HOST_FUNCTION};
   delete g.${SOCKET_HOST_FUNCTION};
-
-  const utf8Encode = (str) => {
-    const out = [];
-    for (let i = 0; i < str.length; i++) {
-      let c = str.charCodeAt(i);
-      if (c >= 0xd800 && c < 0xdc00 && i + 1 < str.length) {
-        const d = str.charCodeAt(i + 1);
-        if (d >= 0xdc00 && d < 0xe000) {
-          c = 0x10000 + ((c - 0xd800) << 10) + (d - 0xdc00);
-          i++;
-        }
-      }
-      if (c >= 0xd800 && c < 0xe000) c = 0xfffd;
-      if (c < 0x80) out.push(c);
-      else if (c < 0x800) out.push(0xc0 | (c >> 6), 0x80 | (c & 63));
-      else if (c < 0x10000) out.push(0xe0 | (c >> 12), 0x80 | ((c >> 6) & 63), 0x80 | (c & 63));
-      else out.push(0xf0 | (c >> 18), 0x80 | ((c >> 12) & 63), 0x80 | ((c >> 6) & 63), 0x80 | (c & 63));
-    }
-    return new Uint8Array(out);
+  const handOver = (hook, raw, api) => {
+    if (typeof g[hook] !== 'function') throw new TypeError(api + ' needs the web platform');
+    g[hook](raw);
   };
-  const utf8Decode = (b) => {
-    let out = '';
-    for (let i = 0; i < b.length; ) {
-      const c = b[i];
-      const need = c < 0x80 ? 0 : c >= 0xc2 && c < 0xe0 ? 1 : c >= 0xe0 && c < 0xf0 ? 2 : c >= 0xf0 && c < 0xf5 ? 3 : -1;
-      let cp = need === 0 ? c : need === 1 ? c & 31 : need === 2 ? c & 15 : c & 7;
-      let ok = need >= 0 && i + need < b.length;
-      for (let k = 1; ok && k <= need; k++) {
-        if ((b[i + k] & 0xc0) !== 0x80) ok = false;
-        else cp = (cp << 6) | (b[i + k] & 63);
-      }
-      if (ok && ((need === 2 && (cp < 0x800 || (cp >= 0xd800 && cp < 0xe000))) || (need === 3 && (cp < 0x10000 || cp > 0x10ffff)))) ok = false;
-      if (!ok) {
-        out += '�';
-        i++;
-        continue;
-      }
-      out += String.fromCodePoint(cp);
-      i += need + 1;
-    }
-    return out;
-  };
-  // A guest's text, bytes, or buffer as a Uint8Array (a copy: the bytes
-  // cross to the host as they are when called).
-  const toBytes = (data) => {
-    if (typeof data === 'string') return utf8Encode(data);
-    if (data instanceof ArrayBuffer) return new Uint8Array(data);
-    if (ArrayBuffer.isView(data)) return new Uint8Array(data.buffer, data.byteOffset, data.byteLength);
-    return utf8Encode(String(data));
-  };
-
-  if (rawFetch && typeof g.${WEB_FETCH_HOOK} === 'function') {
-    g.${WEB_FETCH_HOOK}(rawFetch);
-  } else if (rawFetch) {
-    class Headers {
-      #map = new Map();
-      constructor(init) {
-        if (init == null) return;
-        const pairs = init instanceof Headers ? [...init] : Array.isArray(init) ? init : Object.entries(init);
-        for (const [k, v] of pairs) this.append(k, v);
-      }
-      append(k, v) {
-        k = String(k).toLowerCase();
-        v = String(v);
-        this.#map.set(k, this.#map.has(k) ? this.#map.get(k) + ', ' + v : v);
-      }
-      set(k, v) { this.#map.set(String(k).toLowerCase(), String(v)); }
-      get(k) { return this.#map.get(String(k).toLowerCase()) ?? null; }
-      has(k) { return this.#map.has(String(k).toLowerCase()); }
-      delete(k) { this.#map.delete(String(k).toLowerCase()); }
-      forEach(fn, self) { for (const [k, v] of this) fn.call(self, v, k, this); }
-      *entries() { yield* [...this.#map].sort((a, b) => (a[0] < b[0] ? -1 : 1)); }
-      *keys() { for (const [k] of this.entries()) yield k; }
-      *values() { for (const [, v] of this.entries()) yield v; }
-      [Symbol.iterator]() { return this.entries(); }
-    }
-    class Response {
-      #body;
-      #used = false;
-      constructor(r, body) {
-        this.status = r.status;
-        this.statusText = r.statusText;
-        this.ok = r.status >= 200 && r.status < 300;
-        this.url = r.url;
-        this.redirected = r.redirected;
-        this.headers = new Headers(r.headers);
-        this.#body = body;
-      }
-      get bodyUsed() { return this.#used; }
-      #take() {
-        if (this.#used) return Promise.reject(new TypeError('body already used'));
-        this.#used = true;
-        return Promise.resolve(this.#body);
-      }
-      bytes() { return this.#take(); }
-      arrayBuffer() { return this.#take().then((b) => b.buffer); }
-      text() { return this.#take().then(utf8Decode); }
-      json() { return this.text().then(JSON.parse); }
-    }
-    let nextFetch = 1;
-    g.Headers = Headers;
-    g.Response = Response;
-    g.fetch = async function fetch(input, init = {}) {
-      const url = typeof input === 'string' ? input : input && typeof input.url === 'string' ? input.url : String(input);
-      const headers = [...new Headers(init.headers)];
-      const body = init.body == null ? undefined : toBytes(init.body);
-      const id = nextFetch++;
-      const head = await rawFetch('open', id, { url, method: String(init.method ?? 'GET'), headers }, body);
-      // This minimal fetch reads the whole body before resolving.
-      const chunks = [];
-      let size = 0;
-      for (let chunk; (chunk = await rawFetch('read', id)) !== null; ) {
-        chunks.push(chunk);
-        size += chunk.length;
-      }
-      const all = new Uint8Array(size);
-      let at = 0;
-      for (const chunk of chunks) {
-        all.set(chunk, at);
-        at += chunk.length;
-      }
-      return new Response(head, all);
-    };
-  }
-
-  if (rawSocket) {
-    // The Sockets API is streams: it comes with the web platform, which
-    // config resolution requires alongside connect.
-    if (typeof g.${WEB_CONNECT_HOOK} !== 'function') throw new TypeError('connect needs the web platform (web: true)');
-    g.${WEB_CONNECT_HOOK}(rawSocket);
-  }
+  if (rawFetch) handOver('${WEB_FETCH_HOOK}', rawFetch, 'fetch');
+  if (rawSocket) handOver('${WEB_CONNECT_HOOK}', rawSocket, 'connect');
 
   if (rawFs) {
+    if (typeof g.TextEncoder !== 'function') throw new TypeError('fs needs the web platform');
+    const encoder = new g.TextEncoder();
+    const decoder = new g.TextDecoder();
+    // A guest's text, bytes, or buffer as a Uint8Array (the bytes cross to
+    // the host as they are when called).
+    const toBytes = (data) => {
+      if (data instanceof ArrayBuffer) return new Uint8Array(data);
+      if (ArrayBuffer.isView(data)) return new Uint8Array(data.buffer, data.byteOffset, data.byteLength);
+      return encoder.encode(String(data));
+    };
     const encodingOf = (options) => (typeof options === 'string' ? options : options?.encoding);
     g.fs = Object.freeze({
       async readFile(path, options) {
         const bytes = await rawFs('readFile', path);
         const enc = encodingOf(options);
         if (enc == null) return bytes;
-        if (enc === 'utf8' || enc === 'utf-8') return utf8Decode(bytes);
+        if (enc === 'utf8' || enc === 'utf-8') return decoder.decode(bytes);
         throw new TypeError('fs.readFile: unsupported encoding ' + enc);
       },
       writeFile: (path, data) => rawFs('writeFile', path, toBytes(data)),

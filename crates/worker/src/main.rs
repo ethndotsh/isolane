@@ -206,11 +206,12 @@ fn serve(lock_down: bool, memory_limit: Option<u64>, web_background: bool) -> Ex
         }
     };
     init_v8();
-    // The web platform's snapshot is built when the first web VM wants it,
-    // or, with --prepare-web (the supervisor expects web VMs),
-    // right away in the background: the worker reports ready without
-    // waiting, and a web VM that comes sooner waits for the rest. Either
-    // way it's memory operations only, the same under the lockdown below.
+    // The web platform's snapshot is embedded in release builds. Without
+    // one (or with another build's), it's built when the first web VM wants
+    // it, or, with --prepare-web (the supervisor expects web VMs), right
+    // away in the background: the worker reports ready without waiting,
+    // and a web VM that comes sooner waits for the rest. Either way it's
+    // memory operations only, the same under the lockdown below.
     if web_background {
         let _ = std::thread::Builder::new().name("web-snapshot".into()).spawn(|| {
             web::snapshot();

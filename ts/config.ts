@@ -220,7 +220,8 @@ export interface IsolateConfig {
   wasm?: boolean;
   /**
    * The WinterTC web platform globals (URL, TextEncoder, streams, Blob,
-   * timers, fetch's classes, ...). Default false (plain ECMAScript). With
+   * timers, fetch's classes, crypto, ...). Default true; `false` leaves
+   * plain ECMAScript (and rules out `fetch`, `connect`, and `fs`). With
    * `{ baseUrl }`, relative URLs resolve against it and `location` exists.
    */
   web?: WebConfig;
@@ -426,7 +427,7 @@ export function resolve(layers: readonly (IsolateConfig | undefined)[], runtimeL
     fs?: FsPolicy | false;
     time?: TimeConfig;
     seed?: number;
-  } = { eval: false, wasm: false, web: false };
+  } = { eval: false, wasm: false, web: true };
   for (const [i, layer] of layers.entries()) {
     if (!layer) continue;
     if (layer.host) for (const entry of flattenHost(layer.host, 'host')) host.set(entry.name, entry);
@@ -451,9 +452,14 @@ export function resolve(layers: readonly (IsolateConfig | undefined)[], runtimeL
     const clash = names.find((n) => n.startsWith(prefix));
     if (clash) throw invalidConfig('host', `has ${name} as both a function and a namespace (${clash})`);
   }
-  const web = out.web === false || out.web === undefined ? false : out.web === true ? {} : { ...out.web };
-  // connect() is the Sockets API, whose sockets are streams.
-  if (out.connect && !web) throw invalidConfig('connect', 'needs the web platform: set web: true as well');
+  const web = out.web === false ? false : out.web === true || out.web === undefined ? {} : { ...out.web };
+  // The policies' guest APIs are the web platform's: fetch() and its
+  // classes, connect()'s streams, fs's text encoding.
+  if (!web) {
+    for (const key of ['fetch', 'connect', 'fs'] as const) {
+      if (out[key]) throw invalidConfig(key, 'needs the web platform, which web: false turns off');
+    }
+  }
   return Object.freeze({
     host: Object.freeze([...host.values()]),
     globals: Object.freeze(globals),
