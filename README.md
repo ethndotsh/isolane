@@ -33,9 +33,10 @@ await acme.run('db.getUser(42).then((u) => u.plan)', {
   each worker locks itself down before running guest code: seccomp and
   Landlock on Linux. It can't open files or sockets, start processes, or see
   the environment.
-- **Nothing ambient.** Guest code starts with plain ECMAScript and a clock
-  that doesn't move while it runs. Everything else is opt-in, per isolate,
-  and network and file access go through policies checked in your process.
+- **Nothing ambient.** Guest code starts with ECMAScript, the web
+  platform's APIs (no network until you allow some), and a clock that
+  doesn't move while it runs. Everything else is opt-in, per isolate, and
+  network and file access go through policies checked in your process.
 
 See [docs/design.md](docs/design.md) for the threat model.
 
@@ -45,9 +46,9 @@ See [docs/design.md](docs/design.md) for the threat model.
 |---|---|---|
 | `host` | none | Your functions, optionally in namespaces (`db.getUser`) |
 | `globals` | none | JSON data as globals |
-| `web` | off | The web platform: `URL`, `fetch`, streams, timers, `crypto.subtle`, ... ([WinterTC](https://wintertc.org) Minimum Common API) |
+| `web` | on | The web platform: `URL`, `fetch`, streams, timers, `crypto.subtle`, ... ([WinterTC](https://wintertc.org) Minimum Common API). `false` leaves plain ECMAScript |
 | `fetch` | off | HTTP(S) to the hosts you list |
-| `connect` | off | TCP/TLS sockets (Workers' `connect()`, with `web`) to the `host:port`s you list |
+| `connect` | off | TCP/TLS sockets (Workers' `connect()`) to the `host:port`s you list |
 | `fs` | off | Files under one directory, read-only unless you allow writes |
 | `eval` | off | `eval` and `new Function` |
 | `wasm` | off | WebAssembly |
@@ -61,7 +62,6 @@ await acme.run(
   `const r = await fetch('https://api.example.com/plans');
    await fs.writeFile('/plans.json', await r.text());`,
   {
-    web: true,
     fetch: { hosts: ['api.example.com'], limits: { requests: 10 } },
     fs: { root: '/srv/tenants/acme', write: true },
   },
@@ -103,7 +103,7 @@ win, field by field.
 
 ```js
 const runtime = new Runtime({
-  defaults: { web: true, limits: { timeoutMs: 10_000 } },
+  defaults: { limits: { timeoutMs: 10_000 } },
   tenants: (name) => (isPro(name) ? { limits: { isolates: 200 } } : undefined),
 });
 await runtime.tenant('acme').run(code, { limits: { timeoutMs: 500 } });

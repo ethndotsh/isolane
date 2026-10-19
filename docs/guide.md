@@ -58,14 +58,17 @@ must be ...`).
 
 ## Guest capabilities
 
-By default guest code gets only ECMAScript: no network, no files, no `eval`,
-no WebAssembly, no shared memory, and a frozen clock.
+By default guest code gets ECMAScript and the web platform, but no
+network, no files, no `eval`, no WebAssembly, no shared memory, and a
+frozen clock.
 
 ### `web`
 
-`web: true` installs the web platform ([WinterTC](https://wintertc.org)'s
-Minimum Common API), built on Deno's web-platform JavaScript (vendored, MIT)
-over isolane's own native code:
+The web platform ([WinterTC](https://wintertc.org)'s Minimum Common API),
+on by default, built on Deno's web-platform JavaScript (vendored, MIT) over
+isolane's own native code. `web: false` leaves plain ECMAScript, and rules
+out the `fetch`, `connect`, and `fs` policies (their guest APIs are the web
+platform's):
 
 - `fetch`, `Request`, `Response`, `Headers`, `FormData` (needs a `fetch`
   policy; response bodies stream, and so do `ReadableStream` request bodies,
@@ -103,11 +106,12 @@ timers still pending when it returns; a stateful isolate keeps them, and
 runs them between evals within `limits.backgroundMs` (see
 [Limits](#limits)).
 
-Cost: web isolates are created from a startup snapshot that each worker
-builds the first time it needs one (about 30 ms, once), so every API is
-ready at no first-use cost, and a web isolate takes about 0.5 ms more to
-create than a plain one. With `defaults.web` on, spare workers build the
-snapshot before a tenant claims them.
+Cost: web isolates are created from a startup snapshot with every API
+loaded, embedded in the worker binary at build time, so every API is ready
+at no first-use cost, and a web isolate takes about 0.9 ms more to create
+than a plain one (`web: false`). A worker built without the embedded
+snapshot (a plain `cargo build`) makes its own the first time it needs one,
+about 30 ms, once.
 
 ### `time` and `random`
 
@@ -130,7 +134,6 @@ fetch: {
 }
 ```
 
-Without `web`, the guest gets a minimal `fetch`/`Response`/`Headers`.
 Private, loopback, and link-local addresses (including cloud metadata at
 169.254.169.254) are refused unless `privateNetworks: true`, checked on the
 address actually connected to, and every redirect hop is re-checked.
@@ -143,7 +146,7 @@ connect: { hosts: ['db.example.com:5432', '*.cache.example:*'], privateNetworks:
 
 `connect()` is the
 [Sockets API](https://developers.cloudflare.com/workers/runtime-apis/tcp-sockets/)
-of Cloudflare Workers, so it needs `web: true` (its sockets are streams):
+of Cloudflare Workers:
 
 ```js
 const socket = connect('db.example.com:5432', { secureTransport: 'starttls' });

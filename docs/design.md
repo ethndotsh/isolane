@@ -39,8 +39,8 @@ container runtime. The client API (`Runtime`, `Tenant`, `Isolate`,
   out, plus host functions.
 - **Live snapshots.** V8 can only snapshot at startup and the snapshot is
   tied to the exact V8 build.
-- **Node or Web APIs** beyond what the application exposes as host
-  functions.
+- **Node APIs** beyond what the application exposes as host functions (a
+  later milestone). The web platform guests get is WinterTC's.
 - **Windows hosts for untrusted code,** at least initially. Chrome-grade
   Windows sandboxing (restricted tokens, job objects, AppContainer) is a
   separate project. Windows can run in development mode only.
@@ -112,7 +112,11 @@ code, the worker is treated as potentially compromised.
 
 ### L0: Guest API surface
 
-- ECMAScript plus the application's host functions only.
+- ECMAScript, the application's host functions, and (unless `web: false`)
+  the web platform: WinterTC's Minimum Common API, Deno's JS over isolane's
+  native code, created from a startup snapshot embedded in the worker. It
+  does no I/O of its own: `fetch`, `connect`, and `fs` reach the network
+  and files only through the policies' brokers.
 - No code generation from strings: `eval` and `new Function` throw.
 - No WebAssembly (the global is deleted and code generation is denied).
 - No `SharedArrayBuffer`, `Atomics.wait`, or guest threads.
@@ -120,7 +124,7 @@ code, the worker is treated as potentially compromised.
   `Temporal.Now`) advances only when an eval starts and when a host-function
   reply arrives, never while guest code runs. It is the platform's
   `CurrentClockTimeMillis` (a small rusty_v8 patch, `patches/`) reading a
-  per-VM-thread frozen time. There is no `performance` global.
+  per-VM-thread frozen time. `performance.now()` follows the same clock.
 
 ### L1: V8 configuration
 

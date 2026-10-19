@@ -11,7 +11,8 @@ safety posture, installable with `npm install`:
 
 - **Safe by default.** V8 sandbox, a process per tenant, seccomp and
   Landlock, frozen clocks, and no ambient capabilities. Everything beyond
-  plain ECMAScript is an explicit, per-VM policy.
+  ECMAScript and the web platform's in-isolate APIs (no network, no files)
+  is an explicit, per-VM policy.
 - **Standard.** Guest code sees the WinterTC Minimum Common Web Platform API
   (`fetch`, `URL`, streams, `crypto`, ...), so code written for Workers,
   Deno, or Bun runs unchanged.
@@ -30,10 +31,10 @@ Agreed October 2026:
    - `crypto.subtle` (done; draft algorithms remain, section 3);
    - `URLPattern` (done: Deno's `01_urlpattern.js` on the `urlpattern` crate, with the Minimum Common API now complete);
    - ~~`connect()` as the Sockets API~~ done: see section 2, and the Postgres test authenticates with SCRAM-SHA-256 (postgres.js on `crypto.subtle`);
-   - the web snapshot built into the binary and a pool of pre-created web isolates, so `web` can default to on;
+   - the web snapshot built into the binary (done), so `web` defaults to on (done); the pool of pre-created web isolates stays an idea (section 3);
    - fair CPU accounting for timers (done: `limits.backgroundMs`);
    - test262 (done: a CI gate, section 3);
-   - delete the old prelude.
+   - delete the old prelude (done: `fetch`, `connect`, and `fs` need the web platform).
 3. **Errors and stack traces** (section 4).
 4. **Research deployments before building them.** The pieces are wanted:
    - warm isolates;
@@ -132,8 +133,8 @@ older, unsupported V8 and brings tokio and its op layer into the worker.
 | — | RSA through aws-lc-rs: the `rsa` crate isn't constant-time (RUSTSEC-2023-0071, the Marvin attack), so timing many decryptions or signatures with one key can reveal it; aws-lc-rs's RSA is constant-time. Costs: a C library parsing guest-supplied DER outside the V8 sandbox, its own OS randomness (seeded runs wouldn't reproduce RSA keys or OAEP/PSS randomness), and a C toolchain in the worker build. Alternatively wait for the `rsa` crate's constant-time rewrite (on crypto-bigint) | decide |
 | — | A Web Crypto op runs on the VM thread: move long ones (RSA key generation, big PBKDF2/digests) to a worker thread the watchdog can account for, so they can run without blocking the isolate's event loop and the 4,096-bit RSA cap can lift | idea |
 | — | V8 startup snapshot of the web platform: each worker builds one (every vendored script loaded and compiled, globals as plain values) and creates web VMs from it, then configures each (base URL, timers, time origin). Built when the first web VM wants it, or in the background from start when the supervisor expects web VMs (`--prepare-web`: the first isolate is web, or the defaults turn web on for spares). Fixed WPT bug `lazy-globals`. Measured (macOS dev build, release): fresh web isolate +1.30 → +0.55 ms over web off; first use of Response 4.9 → 0.13 ms, of streams 3.4 → 0.21 ms, all common APIs together 4.9 → 0.32 ms; memory per live web isolate 4.59 → 2.46 MB; the serverless example's warm request 9.6 → 3.4 ms. Costs: ~30 ms to build once per worker that runs web VMs (a new web tenant's first result waits for it unless a spare built it), and ~13 MB more idle RSS in such a worker | done |
-| — | Web snapshot, next: embed it in the binary at build time (zero build time per worker, and pages shared by every worker through the page cache); needs a two-pass build, and a native or emulated run for the arm64 cross-compile | planned |
-| — | Web snapshot, next: a small pool of pre-created web isolates per worker, to hide the remaining ~0.55 ms of deserialization (isolates take their heap limit at creation, so the pool is per limit) | idea |
+| — | Web snapshot embedded in the binary at build time (`scripts/build-worker.sh`: build, `isolane-worker --make-web-snapshot=FILE`, build again with `ISOLANE_WEB_SNAPSHOT=FILE`; `build-v8.sh` and so CI and releases use it). A header records what the snapshot was made from (V8 version and build, V8 flags, a hash of runtime/, the native callbacks' names); a worker that finds another build's snapshot ignores it and builds its own at startup, as does one built without it, and `--self-check` reports `webSnapshot: embedded \| mismatch \| none`. `--prepare-web` remains for workers without one. Measured (macOS dev build): a new tenant's first web result 48.7 → 15.6 ms (web off: 14–19 ms); idle worker RSS after its first web isolate 27 → 15 MB; binary +2.0 MB (the snapshot); a fresh web isolate is unchanged, about +0.9 ms over web off. Arm64 cross-compile: the first pass's binary can't run on the x64 host, so build arm64 on a native runner (GitHub's free `ubuntu-24.04-arm` for public repos), or run the first pass under qemu-user; failing both, ship without the snapshot (runtime fallback, ~30 ms once per worker) | done |
+| — | A small pool of pre-created web isolates per worker, to hide the remaining deserialization: measured after embedding, a fresh web isolate is ~1.5 ms to first result vs ~0.6 ms with web off (the ~0.9 ms is V8 deserializing the context). Not done yet: a pool only fits isolates whose creation-time settings match (heap limit, `random.seed`, which seeds V8's hash and Math.random at creation), costs ~3 MB per idle isolate, and means starting VM threads ahead of their isolates' configs; worth it once deployments create isolates on the request path | idea |
 | — | ES modules for guest code (`export default { fetch }` handlers) | planned |
 | — | **TypeScript guest code** (`lang: 'ts'`, `.ts` deployments): type stripping, not checking, done in the worker with `oxc` (pure Rust), so untrusted source is parsed only inside the locked-down worker. Erasable syntax only (like TypeScript's `erasableSyntaxOnly`: no enum/namespace/parameter properties, which get a clear error; a `transform` mode later). Types are blanked to whitespace, so line:column in guest stack traces match the TypeScript source with no source maps. Pairs with generated `.d.ts` for host APIs so developers can type-check against the exact host API at deploy time | planned (after API v2 and WPT) |
 | — | **Multi-file programs**: deployments upload an in-memory file tree (`files: { path: source }`, `entry`); the worker resolves imports with `oxc_resolver` over a virtual filesystem (package.json exports/imports and conditions — `workerd`/`worker`/`browser`/`import`/`default` — tsconfig paths, extension probing), compiles each module with V8's native ES module API (resolve → strip/transform with oxc → compile → link), with dynamic `import()`, `import.meta.url` as the virtual path, and JSON modules. All parsing, resolving, and transforming of untrusted input stays in the locked-down worker, and resolution can't leave the uploaded tree. New limits: `modules`, `moduleBytes`. Packages work if uploaded; `node:*` only with the Node compat layer | planned |
@@ -375,7 +376,7 @@ differences.
 | Protocol: version field checked at `ready`; `create` grouped like the public config; host calls name functions by index | done |
 | `web: { baseUrl }`: relative URLs in `fetch` and `new Request` resolve against it, and a read-only `location` exists (Deno's `getLocationHref`). WPT runs with each test's URL as the base (96.4%, from 95.9%) | done |
 | `shims`: the embedder's JS in the isolate, `setup` once and `before`/`after` each eval, each its own script (exact guest line numbers), compiled by isolane (works with `eval` off), layered like the config, `ERR_SHIM` for their failures; the serverless example invokes `handle()` with one | done |
-| Delete the minimal fetch/base64/UTF-8 prelude once the web platform is always on | planned |
+| Delete the minimal fetch/base64/UTF-8 prelude once the web platform is always on | done: `web` defaults to on, and `fetch`, `connect`, and `fs` need it (`ERR_INVALID_CONFIG` with `web: false`); the prelude only hands the raw broker functions to the web platform and builds `fs` on its `TextEncoder`/`TextDecoder` |
 | Split the end-to-end tests by area | done |
 
 ## 5. Performance
