@@ -374,6 +374,42 @@ test('crypto.subtle: a non-extractable key\'s material stays out of reach', asyn
   assert.notEqual(result.forged, true);
 });
 
+test('crypto.subtle: a key\'s slots can\'t be read, changed, or forged', async () => {
+  const result = await run(`(async () => {
+    const key = await crypto.subtle.generateKey({ name: 'AES-GCM', length: 256 }, false, ['encrypt']);
+    const out = {};
+    // No own symbols to reach (a brand or slot symbol would let code copy them).
+    out.symbols = Object.getOwnPropertySymbols(key).length;
+    // Setting every symbol on the key, and changing the getters' results,
+    // doesn't make it extractable or add usages.
+    for (const s of Object.getOwnPropertySymbols(key)) {
+      const v = key[s];
+      try { key[s] = typeof v === 'boolean' ? true : Array.isArray(v) ? ['encrypt', 'decrypt', 'sign', 'wrapKey'] : v; } catch {}
+    }
+    try { key.usages.push('decrypt'); } catch {}
+    try { key.algorithm.name = 'HMAC'; } catch {}
+    out.encrypt = await crypto.subtle.encrypt({ name: 'AES-GCM', iv: new Uint8Array(12) }, key, new Uint8Array(4)).then((b) => b.byteLength, (e) => e.name);
+    out.sameObject = key.usages === key.usages && key.algorithm === key.algorithm;
+    out.exportKey = await crypto.subtle.exportKey('raw', key).then((b) => 'exported ' + b.byteLength, (e) => e.name);
+    out.decrypt = await crypto.subtle.decrypt({ name: 'AES-GCM', iv: new Uint8Array(12) }, key, new Uint8Array(32)).then(() => 'decrypted', (e) => e.name);
+    // A copy of the key's own properties onto a CryptoKey-shaped object isn't a key.
+    const forged = Object.create(CryptoKey.prototype);
+    for (const k of Reflect.ownKeys(key)) forged[k] = key[k];
+    out.forgedExport = await crypto.subtle.exportKey('raw', forged).then(() => 'exported', (e) => e.name);
+    out.forgedGetter = (() => { try { return forged.extractable; } catch (e) { return e.name; } })();
+    return out;
+  })()`);
+  assert.deepEqual(result, {
+    symbols: 0,
+    encrypt: 20,
+    sameObject: true,
+    exportKey: 'InvalidAccessError',
+    decrypt: 'InvalidAccessError',
+    forgedExport: 'TypeError',
+    forgedGetter: 'TypeError',
+  });
+});
+
 test('crypto.subtle: long native work stops at the isolate\'s limits', async () => {
   // PBKDF2 with 2^32 - 1 iterations would run for hours; it stops with the eval.
   const started = Date.now();
