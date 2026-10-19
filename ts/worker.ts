@@ -66,7 +66,7 @@ export interface WorkerExit {
   code: number | null;
   signal: NodeJS.Signals | null;
   /** Why the supervisor considers the worker gone. */
-  reason: 'exited' | 'protocol-violation' | 'insufficient-isolation' | 'ready-timeout' | 'killed';
+  reason: 'exited' | 'protocol-violation' | 'insufficient-isolation' | 'ready-timeout' | 'unresponsive' | 'killed';
   detail?: string;
 }
 
@@ -184,7 +184,7 @@ export class WorkerProcess {
     this.#child.stdin.write(Buffer.concat([header, body]));
   }
 
-  kill(): void {
-    this.#fail('killed', 'killed by supervisor');
+  kill(reason: 'killed' | 'unresponsive' = 'killed', detail = 'killed by supervisor'): void {
+    this.#fail(reason, detail);
   }
 }

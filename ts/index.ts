@@ -74,7 +74,7 @@ export interface EvalOptions {
 }
 
 export interface SecurityEvent {
-  kind: 'worker-crash' | 'protocol-violation';
+  kind: 'worker-crash' | 'protocol-violation' | 'worker-unresponsive';
   tenant: string;
   exitCode: number | null;
   signal: string | null;
@@ -103,7 +103,16 @@ export interface LanePoolOptions {
 interface Pending {
   resolve(value: unknown): void;
   reject(err: LaneError): void;
+  timer?: NodeJS.Timeout;
 }
+
+/**
+ * The worker enforces `timeoutMs` itself; the supervisor doesn't trust it
+ * to. An eval with a timeout that gets no reply by this long after its
+ * worker-side deadline means a wedged or compromised worker, which is
+ * killed. Generous, so a merely overloaded host isn't mistaken for one.
+ */
+const unresponsiveAfterMs = (timeoutMs: number) => timeoutMs + Math.max(1000, timeoutMs);
 
 /** A tenant's worker process and the VMs and requests in flight on it. */
 class TenantWorker {
@@ -111,6 +120,10 @@ class TenantWorker {
   #proc: WorkerProcess;
   #requests = new Map<number, Pending>();
   #hostFunctions = new Map<number, Record<string, HostFunction>>();
+  #timeouts = new Map<number, number | undefined>();
+  // When each VM's queued evals will have run out their timeouts: a VM runs
+  // its evals one at a time, so a queued eval's clock starts after these.
+  #busyUntil = new Map<number, number>();
   #vmCount = 0;
   #idleTimer: NodeJS.Timeout | undefined;
   #onGone: (exit: WorkerExit) => void;
@@ -146,6 +159,7 @@ class TenantWorker {
 
   createVm(vm: number, opts: EvalOptions): void {
     this.#hostFunctions.set(vm, { ...(opts.hostFunctions ?? {}) });
+    this.#timeouts.set(vm, opts.timeoutMs);
     this.#vmCount++;
     this.#touch();
     this.#proc.send({
@@ -163,7 +177,18 @@ class TenantWorker {
         reject(new LaneError('ERR_WORKER_CRASHED', `worker for tenant ${this.tenant} is gone`));
         return;
       }
-      this.#requests.set(req, { resolve, reject });
+      const pending: Pending = { resolve, reject };
+      const timeoutMs = this.#timeouts.get(vm);
+      if (timeoutMs !== undefined) {
+        const start = Math.max(Date.now(), this.#busyUntil.get(vm) ?? 0);
+        this.#busyUntil.set(vm, start + timeoutMs);
+        const limit = start - Date.now() + unresponsiveAfterMs(timeoutMs);
+        pending.timer = setTimeout(
+          () => this.#proc.kill('unresponsive', `no reply to an eval ${limit}ms after it was sent (timeoutMs ${timeoutMs})`),
+          limit,
+        );
+      }
+      this.#requests.set(req, pending);
       this.#touch();
       this.#proc.send({ t: 'eval', vm, req, code });
     });
@@ -171,6 +196,8 @@ class TenantWorker {
 
   disposeVm(vm: number): void {
     if (!this.#hostFunctions.delete(vm)) return;
+    this.#timeouts.delete(vm);
+    this.#busyUntil.delete(vm);
     this.#vmCount--;
     this.#proc.send({ t: 'dispose', vm });
     this.#touch();
@@ -194,6 +221,7 @@ class TenantWorker {
       const pending = this.#requests.get(msg.req);
       if (!pending) return;
       this.#requests.delete(msg.req);
+      clearTimeout(pending.timer);
       if (msg.ok) pending.resolve(msg.value);
       else {
         const code = KNOWN_CODES.has(msg.code) ? (msg.code as LaneErrorCode) : 'ERR_INTERNAL';
@@ -244,7 +272,10 @@ class TenantWorker {
   #onExit(exit: WorkerExit): void {
     clearTimeout(this.#idleTimer);
     const err = new LaneError('ERR_WORKER_CRASHED', `worker for tenant ${this.tenant} ${describeExit(exit)}`);
-    for (const p of this.#requests.values()) p.reject(err);
+    for (const p of this.#requests.values()) {
+      clearTimeout(p.timer);
+      p.reject(err);
+    }
     this.#requests.clear();
     this.#onGone(exit);
   }
@@ -253,6 +284,7 @@ class TenantWorker {
 function describeExit(exit: WorkerExit): string {
   if (exit.reason === 'protocol-violation') return `broke the protocol (${exit.detail})`;
   if (exit.reason === 'insufficient-isolation') return `was refused (${exit.detail})`;
+  if (exit.reason === 'unresponsive') return `stopped responding and was killed (${exit.detail})`;
   if (exit.signal) return `was killed by ${exit.signal}`;
   return `exited with code ${exit.code}${exit.detail ? `: ${exit.detail}` : ''}`;
 }
@@ -342,9 +374,14 @@ export class LanePool {
         if (exit.reason === 'killed' || exit.reason === 'insufficient-isolation') return;
         // A clean exit only happens when stdin closes; anything else from a
         // worker that ran guest code is treated as a possible exploit.
-        if (exit.reason === 'protocol-violation' || exit.signal || exit.code !== 0) {
+        if (exit.reason === 'protocol-violation' || exit.reason === 'unresponsive' || exit.signal || exit.code !== 0) {
           this.#onSecurityEvent?.({
-            kind: exit.reason === 'protocol-violation' ? 'protocol-violation' : 'worker-crash',
+            kind:
+              exit.reason === 'protocol-violation'
+                ? 'protocol-violation'
+                : exit.reason === 'unresponsive'
+                  ? 'worker-unresponsive'
+                  : 'worker-crash',
             tenant,
             exitCode: exit.code,
             signal: exit.signal,

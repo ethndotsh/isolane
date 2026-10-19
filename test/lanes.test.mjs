@@ -314,6 +314,27 @@ test('a worker claiming an insecure sandbox never runs code', async () => {
   insecure.close();
 });
 
+test('a worker that stops answering is killed after its timeout', async () => {
+  const events = [];
+  const silent = new LanePool({
+    workerPath: fakeWorker(`send({ t: 'ready', v8: 'fake', sandboxSecure: true, lockdown: { landlock: 'full', seccomp: 'full' } }); setInterval(() => {}, 1000);`),
+    onSecurityEvent: (e) => events.push(e),
+  });
+  const started = Date.now();
+  await assert.rejects(silent.run('1', { tenant: 't', timeoutMs: 100 }), code('ERR_WORKER_CRASHED'));
+  assert.ok(Date.now() - started < 3000);
+  assert.equal(events[0]?.kind, 'worker-unresponsive');
+  silent.close();
+});
+
+test('queued evals on one vm are not mistaken for an unresponsive worker', async () => {
+  const vm = pool.createVm({ ...T, timeoutMs: 400 });
+  const loops = Array.from({ length: 4 }, () => vm.eval('for (;;) {}'));
+  for (const r of await Promise.allSettled(loops)) assert.equal(r.reason?.code, 'ERR_TIMEOUT');
+  assert.equal(await vm.eval('2'), 2);
+  vm.dispose();
+});
+
 test('an oversized frame is a protocol violation', async () => {
   const big = new LanePool({
     workerPath: fakeWorker(`send({ t: 'ready', v8: 'fake', sandboxSecure: true, lockdown: { landlock: 'full', seccomp: 'full' } }); process.stdin.once('data', () => { const h = Buffer.alloc(4); h.writeUInt32LE(0xffffffff); process.stdout.write(h); }); setInterval(() => {}, 1000);`),
