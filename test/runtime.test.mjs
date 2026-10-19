@@ -293,7 +293,7 @@ test('the worker memory limit bounds memory outside the heap', { skip: process.p
   const err = await capped.run(bomb, { ...T, timeoutMs: 20000 }).catch((e) => e);
   assert.ok(
     err.code === 'ERR_MEMORY_LIMIT' || (err.code === 'ERR_GUEST_EXCEPTION' && /allocation failed/i.test(err.message)),
-    `${err.code}: ${err.message}`,
+    `${err.code}: ${err.message} | worker stderr: ${events.map((e) => e.detail).join(' / ')}`,
   );
   assert.equal(await capped.run('1 + 1', T), 2); // the tenant keeps working
   assert.deepEqual(events, []); // running out of memory isn't a security event
