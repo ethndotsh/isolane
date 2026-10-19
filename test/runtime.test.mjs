@@ -288,7 +288,7 @@ test('allowWebAssembly opts in to WebAssembly', async () => {
 
 test('the worker memory limit bounds memory outside the heap', { skip: process.platform !== 'linux' }, async () => {
   const events = [];
-  const capped = new Runtime({ strict: process.env.ISOLANE_STRICT === '1', workerMemoryLimitBytes: 256 << 20, onSecurityEvent: (e) => events.push(e) });
+  const capped = new Runtime({ strict: process.env.ISOLANE_STRICT === '1', workerMemoryLimitBytes: 512 << 20, onSecurityEvent: (e) => events.push(e) });
   const bomb = 'const keep = []; for (;;) keep.push(new Uint8Array(16 << 20).fill(1));';
   const err = await capped.run(bomb, { ...T, timeoutMs: 20000 }).catch((e) => e);
   assert.ok(

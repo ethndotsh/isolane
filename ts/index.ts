@@ -249,7 +249,8 @@ export interface RuntimeOptions {
   onLog?: (entry: LogEntry) => void;
   /**
    * Cap on each tenant worker's memory (Linux; RLIMIT_DATA): every VM's
-   * heap, ArrayBuffers, and WebAssembly memory together. A worker past it
+   * heap, ArrayBuffers, and WebAssembly memory together, plus V8's own
+   * reservations (its JIT code range, ~128 MiB). At least 512 MiB. A worker past it
    * exits, its in-flight evals reject with `ERR_MEMORY_LIMIT`, and the next
    * call starts a fresh one. Default 2 GiB; `null` for no cap.
    */
@@ -275,6 +276,9 @@ export interface RuntimeOptions {
 const MAX_SPARE_FAILURES = 3;
 
 const DEFAULT_WORKER_MEMORY_LIMIT = 2 * 1024 ** 3;
+/** V8 itself reserves writable memory (its JIT code range, ~128 MiB on x64)
+ * that counts against the limit; below this a worker can't start. */
+const MIN_WORKER_MEMORY_LIMIT = 512 * 1024 ** 2;
 
 interface Pending {
   resolve(value: unknown): void;
@@ -606,8 +610,8 @@ export class Runtime {
     this.#prewarm = options.prewarm ?? 0;
     if (!(Number.isSafeInteger(this.#prewarm) && this.#prewarm >= 0)) throw invalidOption('prewarm must be a non-negative integer');
     const limit = options.workerMemoryLimitBytes === undefined ? DEFAULT_WORKER_MEMORY_LIMIT : options.workerMemoryLimitBytes;
-    if (limit !== null && !(Number.isSafeInteger(limit) && limit >= 64 * 1024 * 1024)) {
-      throw invalidOption('workerMemoryLimitBytes must be at least 64 MiB, or null');
+    if (limit !== null && !(Number.isSafeInteger(limit) && limit >= MIN_WORKER_MEMORY_LIMIT)) {
+      throw invalidOption('workerMemoryLimitBytes must be at least 512 MiB, or null');
     }
     this.#memoryLimit = limit ?? undefined;
     this.#refill();
