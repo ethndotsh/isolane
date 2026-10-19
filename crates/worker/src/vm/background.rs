@@ -7,7 +7,9 @@
 //! than the watchdog's reaction time. An empty bucket retires the isolate.
 //!
 //! Time is CPU time on the VM thread where there's a CPU clock (Linux), and
-//! wall time elsewhere, so the budget holds on every platform. A host-call
+//! wall time elsewhere, so the budget holds on every platform. Time blocked
+//! in a sync host call counts too (it holds the VM thread without using
+//! CPU), so a timer that waits on a slow host function drains the budget. A host-call
 //! continuation is charged at least `REPLY_COST`: the round trip costs the
 //! supervisor more than the guest's few microseconds of CPU, so a guest
 //! looping on host calls after its eval returned (`for (;;) await f()`)
@@ -81,10 +83,12 @@ impl Background {
         Batch { wall_start: Instant::now(), cpu_start: self.clock.map(|c| c.now()).unwrap_or_default(), floor }
     }
 
-    /// Charge a finished batch; returns whether the budget ran out.
-    fn finish(&mut self, batch: Batch) -> bool {
+    /// Charge a finished batch, plus the time it spent `blocked` in sync
+    /// host calls where time is CPU time (wall time already includes it);
+    /// returns whether the budget ran out.
+    fn finish(&mut self, batch: Batch, blocked: Duration) -> bool {
         let spent = match self.clock {
-            Some(c) => c.now().saturating_sub(batch.cpu_start),
+            Some(c) => c.now().saturating_sub(batch.cpu_start) + blocked,
             None => batch.wall_start.elapsed(),
         }
         .max(batch.floor);
@@ -133,8 +137,8 @@ impl Background {
     /// After a batch: charge it, report its usage, and say whether the
     /// isolate is retired (`heap_hit`: it hit its heap limit; or this
     /// budget ran out, which the next eval fails with).
-    pub(super) fn settle(&mut self, batch: Batch, spent: Usage, heap_hit: bool, out: &Output, vm: u64, what: &str) -> Option<(Failure, Option<Failure>)> {
-        let exhausted = self.finish(batch);
+    pub(super) fn settle(&mut self, batch: Batch, blocked: Duration, spent: Usage, heap_hit: bool, out: &Output, vm: u64, what: &str) -> Option<(Failure, Option<Failure>)> {
+        let exhausted = self.finish(batch, blocked);
         self.record(spent);
         let retire = |cause: String| fail(ErrorCode::IsolateRetired, cause);
         if heap_hit {

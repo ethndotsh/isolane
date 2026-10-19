@@ -281,6 +281,7 @@ fn vm_main(id: u64, config: VmConfig, rx: Receiver<VmMsg>, out: Output, stopper:
         deadline: Cell::new(None),
         timed_out: Cell::new(false),
         in_eval: Cell::new(false),
+        blocked: Cell::new(std::time::Duration::ZERO),
         host_calls: Cell::new(0),
         limit_hit: RefCell::new(None),
         // The supervisor names its brokers __isolane_* and refuses those
@@ -344,6 +345,7 @@ fn vm_main(id: u64, config: VmConfig, rx: Receiver<VmMsg>, out: Output, stopper:
             Err(RecvTimeoutError::Timeout) => {
                 let cpu_start = cpu_clock.map(|c| c.now()).unwrap_or_default();
                 let (wall, cpu_budget) = background.budgets(timeout, cpu);
+                bridge.blocked.set(std::time::Duration::ZERO);
                 let batch = background.start(std::time::Duration::ZERO);
                 bridge.deadline.set(watchdog.arm(wall, cpu_budget));
                 bridge.timed_out.set(false);
@@ -358,7 +360,7 @@ fn vm_main(id: u64, config: VmConfig, rx: Receiver<VmMsg>, out: Output, stopper:
                 }
                 let spent = usage(&mut isolate, cpu_clock, cpu_start);
                 let heap_hit = oom.hit.load(Ordering::SeqCst);
-                if let Some((r, hit)) = background.settle(batch, spent, heap_hit, &out, id, "timer callback") {
+                if let Some((r, hit)) = background.settle(batch, bridge.blocked.take(), spent, heap_hit, &out, id, "timer callback") {
                     retired = Some(r);
                     background_hit = hit;
                 }
@@ -440,6 +442,7 @@ fn vm_main(id: u64, config: VmConfig, rx: Receiver<VmMsg>, out: Output, stopper:
                 }
                 let cpu_start = cpu_clock.map(|c| c.now()).unwrap_or_default();
                 let (wall, cpu_budget) = background.budgets(timeout, cpu);
+                bridge.blocked.set(std::time::Duration::ZERO);
                 let batch = background.start(background::REPLY_COST);
                 bridge.deadline.set(watchdog.arm(wall, cpu_budget));
                 bridge.timed_out.set(false);
@@ -459,7 +462,7 @@ fn vm_main(id: u64, config: VmConfig, rx: Receiver<VmMsg>, out: Output, stopper:
                 }
                 let spent = usage(&mut isolate, cpu_clock, cpu_start);
                 let heap_hit = oom.hit.load(Ordering::SeqCst);
-                if let Some((r, hit)) = background.settle(batch, spent, heap_hit, &out, id, "continuation") {
+                if let Some((r, hit)) = background.settle(batch, bridge.blocked.take(), spent, heap_hit, &out, id, "continuation") {
                     retired = Some(r);
                     background_hit = hit;
                 }

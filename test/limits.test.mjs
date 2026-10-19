@@ -2,7 +2,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { join } from 'node:path';
-import { Runtime, DEFAULT_LIMITS } from '../dist/index.js';
+import { Runtime, DEFAULT_LIMITS, hostFunction } from '../dist/index.js';
 import { z } from 'zod';
 import { pool, T, code, limit, isolate, isolateOf, strict } from './helpers.mjs';
 
@@ -228,6 +228,20 @@ test('a host-call loop after an eval is stopped by limits.backgroundMs', async (
   await new Promise((r) => setTimeout(r, 200));
   assert.ok(calls <= stopped + 1, 'the loop stopped');
   await assert.rejects(vm.eval('1'), limit('backgroundMs'));
+  vm.close();
+});
+
+test('time blocked in sync host calls between evals counts against limits.backgroundMs', async () => {
+  let calls = 0;
+  const limits = [];
+  // 20 ms of waiting per call, almost no CPU: on Linux, where the budget is
+  // CPU time, the wait is charged too.
+  const slow = hostFunction({ sync: true, handler: () => new Promise((r) => setTimeout(() => r(++calls), 20)) });
+  const vm = isolate({ ...T, web: true, limits: { backgroundMs: 100 }, host: { slow }, hooks: { onLimit: (e) => limits.push(e) } });
+  await vm.eval('setInterval(() => slow(), 0); "started"');
+  await until(() => limits.length > 0, 5_000);
+  assert.equal(limits[0].limit, 'backgroundMs');
+  assert.ok(calls <= 10, `${calls} calls`);
   vm.close();
 });
 

@@ -36,6 +36,10 @@ pub(super) struct Bridge {
     pub(super) timed_out: Cell<bool>,
     /// An eval is running (not a timer or continuation between evals).
     pub(super) in_eval: Cell<bool>,
+    /// Time spent blocked in sync host calls since it was last taken: the
+    /// background budget charges it (it's wall time the VM thread is held,
+    /// with little CPU to show for it).
+    pub(super) blocked: Cell<Duration>,
     /// Host calls the running eval has made (`limits.hostCalls`).
     pub(super) host_calls: Cell<u64>,
     /// A count limit the running eval hit: it fails with this even if the
@@ -230,12 +234,14 @@ pub(super) fn host_function(scope: &mut v8::PinScope, args: v8::FunctionCallback
     rv.set(resolver.get_promise(scope).into());
 }
 
-/// Takes a sync call's bytes back off `pending_bytes` however its wait ends.
-struct Uncount<'a>(&'a Bridge, usize);
+/// Takes a sync call's bytes back off `pending_bytes`, and adds its wait to
+/// `blocked`, however its wait ends.
+struct Uncount<'a>(&'a Bridge, usize, Instant);
 
 impl Drop for Uncount<'_> {
     fn drop(&mut self) {
         self.0.pending_bytes.set(self.0.pending_bytes.get() - self.1);
+        self.0.blocked.set(self.0.blocked.get() + self.2.elapsed());
     }
 }
 
@@ -248,7 +254,7 @@ pub(super) fn sync_host_function(scope: &mut v8::PinScope, args: v8::FunctionCal
     let Some((call, size)) = send_host_call(scope, &args, &bridge) else { return };
     // Counted while it waits, like an async call (the supervisor holds it).
     bridge.pending_bytes.set(bridge.pending_bytes.get() + size);
-    let _counted = Uncount(&bridge, size);
+    let _counted = Uncount(&bridge, size, Instant::now());
     loop {
         let left = bridge.deadline.get().map(|d| d.saturating_duration_since(Instant::now()));
         if left == Some(Duration::ZERO) {
