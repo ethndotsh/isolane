@@ -127,6 +127,8 @@ const MAXIMUM: Record<string, number> = {
   backgroundMs: 2 ** 31 - 1,
   idleMs: 2 ** 31 - 1,
   heapBytes: 4 * 1024 ** 3,
+  pendingHostCalls: 2 ** 32 - 1,
+  hostCalls: 2 ** 32 - 1,
 };
 
 /** Old names, for errors that say what to write instead. */
