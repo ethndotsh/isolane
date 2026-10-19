@@ -86,10 +86,8 @@ Agreed October 2026:
 
 ### Security review, October 2026
 
-An internal review found these, each confirmed with a proof of concept.
-The worker-side fixes each have a regression test; the supervisor-side
-ones (host-call flood, log limits, `Isolate.close()`, the connection cap,
-DNS denials, stdin backpressure) are tracked with their own fixes.
+An internal review found these, each confirmed with a proof of concept,
+and each fix has a regression test.
 
 | Finding | Severity | Fix | Status |
 |---|---|---|---|
@@ -98,6 +96,13 @@ DNS denials, stdin backpressure) are tracked with their own fixes.
 | `deriveBits` allocated 256 MiB under a 128 MiB heap; an RSA-PSS `saltLength` of 256 MiB was allocated before failing; imported RSA keys had no size cap | high | PBKDF2 derives at most 1 MiB and HKDF at most 255 hash lengths, checked before allocating; a PSS salt must fit the key (sign fails, verify is false); imported RSA keys are capped at 4,096 bits like generated ones, and exponents at rsa's 2^33 - 1. Audited every op in `crates/worker/src/web/` for guest-sized allocations: the rest are proportional to buffers the guest already holds (encoding, base64, clone, URL, compression input, host-call bytes), and arrays from JS now grow as read instead of reserving their claimed length | done |
 | `wasm: true` gave guests a SharedArrayBuffer through a shared `WebAssembly.Memory` (V8 can't turn shared memories off) | medium | A guard installed before guest code: the Memory constructor and instances refuse shared memories, and `instantiate` instantiates synchronously after compiling, so no promise (whose `then` lookup a guest can hook) holds an unchecked instance | done |
 | `limits.timers: 2**32` passed validation, then the worker exited on the message and the tenant was quarantined | medium | Every limit is checked against what the worker holds (`timers` a u32, durations at most 2^31 - 1 ms, as setTimeout takes, `heapBytes` at most 4 GiB); a create the worker can't parse fails that isolate's evals (`ERR_INTERNAL`) instead of exiting; the worker clamps durations and the heap too | done |
+| No limit on host calls: 100,000 calls that never settle in one eval added ~44 MiB to the supervisor and ran every host function | high | `limits.pendingHostCalls` (1,000 waiting at once), `limits.hostCalls` (10,000 per eval; isolane's brokers aside), and `limits.hostCallBytes` (64 MiB waiting at once): the worker refuses the call with a `RangeError` (`ERR_LIMIT`) before sending it, and the eval fails with `ERR_LIMIT` even if the guest catches it; the supervisor kills a worker that sends more than the limits allow | done |
+| Console output ignored `logBytes`/`logLineBytes` on the web platform's paths (`reportError`, unhandled errors, Deno's console printing): a 20 MiB line went through with 1 KiB limits; an 80 MiB error made a frame over 64 MiB, which the supervisor took as a protocol violation and quarantined the tenant | high | One path for every console line, held to both limits; strings are copied out of V8 only as far as a limit allows (`write_utf8` into a bounded buffer), for console lines, guest exceptions (64 KiB each part), and `ERR_NOT_SERIALIZABLE` messages; results are measured before copying and never exceed a frame; the supervisor cuts any line a worker sends past the limit | done |
+| `Isolate.close()` left in-flight evals hanging, and their supervisor deadlines later killed the worker as unresponsive, quarantining the tenant | medium | Closing rejects the isolate's running and queued evals at once with `ERR_ISOLATE_CLOSED`, clears their deadlines, and stops what the VM is running (through its watchdog, only while it runs guest code, so an idle isolate is never left with a termination pending) | done |
+| Concurrent `connect()` opens passed `connect.limits.connections` (a slot was counted only once connected) | medium | A socket counts from when it starts opening, released if it fails | done |
+| A hostname resolving only to private addresses was refused without `onPolicyDenial` | medium | The DNS-pinning lookup reports it (`fetch` and `connect`, every redirect hop); refusing to replace the `fs` root is reported too. Audited the brokers' other refusals: the rest are limits (`ERR_LIMIT`-style messages), not policy | done |
+| The supervisor ignored backpressure on the worker's stdin: a worker that stops reading made it buffer without bound | medium | Past 64 MiB queued, a worker has 5 s to drain it, and past 1 GiB it's killed at once, as unresponsive | done |
+| Audit: other ways guest behaviour alone could look like an attack (and quarantine the tenant) | — | Found and fixed: a host function's error echoing guest input past 64 MiB (cut to 64 KiB), `codeBytes`/`resultBytes` set past a frame (capped at the frame), an eval waiting behind its isolate's own background work past its deadline (the deadline moves while the worker reports progress, up to 10×), and a V8 crash when one isolate started from the web snapshot while another was being disposed (V8's shared heaps were torn down and rebuilt in between: the worker now keeps its first isolate for its whole life) | done |
 | macOS can't meet strict mode | — | By design: no seccomp, Landlock, or memory cap there; strict mode refuses it, and the guide's known limits say so | by design |
 
 ## 2. Guest capabilities (per-VM policies)

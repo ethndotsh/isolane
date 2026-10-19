@@ -325,7 +325,7 @@ hooks run.
 | `beforeEval` / `afterEval` | interceptor | can `deny()` or replace the code / result |
 | `onLog` | event | guest `console` output (up to `limits.logBytes` per eval) |
 | `onLimit` | event | any limit hit |
-| `onPolicyDenial` | event | a `fetch`, `connect`, or `fs` refusal |
+| `onPolicyDenial` | event | a `fetch`, `connect`, or `fs` refusal (including a name that resolves only to private addresses) |
 | `onSecurityEvent` | event | a worker crash, protocol violation, or unresponsive worker |
 | `onWorker` | event | a tenant's worker started or exited |
 
@@ -368,8 +368,11 @@ await acme.run(app.code, {
 | `heapBytes` | 128 MiB | isolate |
 | `timers` | 10,000 | isolate (a `RangeError` in the guest) |
 | `backgroundMs` | 1 s per minute | isolate, work between evals (retires the isolate) |
-| `logBytes` / `logLineBytes` | 1 MiB / 16 KiB | isolate |
-| `codeBytes` / `resultBytes` | 16 MiB each | isolate, per eval |
+| `logBytes` / `logLineBytes` | 1 MiB / 16 KiB | isolate, per eval / per line (cut before it leaves V8) |
+| `codeBytes` / `resultBytes` | 16 MiB each | isolate, per eval (at most a frame, 64 MiB) |
+| `pendingHostCalls` | 1,000 | isolate: async host calls waiting for replies at once |
+| `hostCalls` | 10,000 | isolate, per eval (isolane's own `fetch`, `connect`, and `fs` calls aside) |
+| `hostCallBytes` | 64 MiB | isolate: bytes of host calls waiting for replies at once |
 | `decompressedBytes` | 128 MiB | isolate, per decompression call (checked as it decodes) |
 | `isolates` | 100 | tenant |
 | `concurrentEvals` | 1,000 | tenant |
@@ -392,6 +395,22 @@ slices of 10 ms, so an isolate's own evals and host replies aren't held
 up behind a timer storm, and each isolate has its own thread, so a storm
 doesn't slow the tenant's other isolates beyond sharing the CPU.
 
+**Host calls.** A call past `pendingHostCalls`, `hostCalls`, or
+`hostCallBytes` throws a `RangeError` in the guest (`code: 'ERR_LIMIT'`,
+`limit` naming it) before it reaches your process, and the eval it was
+made in fails with `ERR_LIMIT` even if the guest catches it. The worker
+enforces them; the supervisor checks it did, and a worker sending more
+calls (or bytes) in flight than the limits allow is killed as a protocol
+violation. A call stays pending until its function settles, so a function
+that never does keeps its slot until the isolate closes.
+
+**Console output and errors** are cut to size inside the worker, before a
+string is copied out of V8: each console line to `logLineBytes` (with
+`…`), each eval's output to `logBytes` (then one notice, and nothing
+more), and a guest exception's message and stack to 64 KiB each. A
+host function's error message is cut to 64 KiB too, as it may echo guest
+input.
+
 Isolate limits can be set at every level; tenant limits at the runtime and
 in `tenants(name)`; `tenants` on the runtime only. Each is an integer of at
 least 1, and durations (`timeoutMs`, `cpuMs`, `backgroundMs`, `idleMs`, and the policies'
@@ -399,7 +418,9 @@ least 1, and durations (`timeoutMs`, `cpuMs`, `backgroundMs`, `idleMs`, and the 
 `heapBytes` at most 4 GiB (V8's largest heap); anything else is
 `ERR_INVALID_CONFIG`. Hitting any limit fails
 with `ERR_LIMIT`, with `err.limit` naming it, and emits `onLimit`. `fetch`,
-`connect`, and `fs` policies carry their own limits.
+`connect`, and `fs` policies carry their own limits. `connect`'s
+`connections` counts a socket from when it starts opening, so opens racing
+each other can't pass it.
 
 ## Errors
 
@@ -455,6 +476,14 @@ lifts it.
   many regexp groups in a long component (their count times its length
   over 2^18) throw a `RangeError`; real patterns are far below these.
   Matching runs in V8 and stops at the isolate's limits.
+- **A guest can delay its own evals** with work it leaves running between
+  them (timers, continuations), within `backgroundMs`. The supervisor
+  extends an eval's deadline (`timeoutMs` plus as much again, at least
+  1 s) while the worker reports that work finishing, up to ten times the
+  deadline; past that the worker is treated as unresponsive.
+- **Closing an isolate** rejects its evals at once (`ERR_ISOLATE_CLOSED`)
+  and stops what it's running; host functions it called still run to
+  completion (their `signal` aborts).
 - **Everything is UTC.** Guests can't see the host's time zone, and can't
   choose another one as the default (they can still format for any zone
   with `Intl`).
