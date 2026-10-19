@@ -33,6 +33,9 @@
     MapPrototypeSet,
     String,
     StringFromCharCode,
+    RegExpPrototypeExec,
+    StringPrototypeIndexOf,
+    StringPrototypeSlice,
     StringPrototypeStartsWith,
     SymbolFor,
     SymbolSpecies,
@@ -286,7 +289,8 @@
       return { uuid: addPart(part), size: part.len };
     },
     op_blob_create_object_url(mediaType, ids) {
-      const url = `blob:null/${native.randomUUID()}`;
+      // The origin is the isolate's base URL's (web.baseUrl), else opaque.
+      const url = `blob:${blobOrigin}/${native.randomUUID()}`;
       MapPrototypeSet(objectUrls, url, { mediaType, parts: ArrayPrototypeMap(ids, getPart) });
       return url;
     },
@@ -295,6 +299,9 @@
     },
     op_blob_from_object_url(url) {
       if (!StringPrototypeStartsWith(url, "blob:")) return null;
+      // Blob URL resolution ignores the fragment (FileAPI: "blob URL entry").
+      const hash = StringPrototypeIndexOf(url, "#");
+      if (hash !== -1) url = StringPrototypeSlice(url, 0, hash);
       const entry = MapPrototypeGet(objectUrls, url);
       if (entry === undefined) return null;
       return {
@@ -388,6 +395,11 @@
   const cloneableDeserializers = { __proto__: null };
   const hostObjectBrand = SymbolFor("Deno.core.hostObject");
 
+  const BadResourcePrototype = ObjectFreeze({ __proto__: null });
+  // An http(s) base URL's origin is its scheme, host, and port: the part
+  // before the path. (core.js runs before URL exists.)
+  const blobOrigin = (native.baseUrl && RegExpPrototypeExec(/^https?:\/\/[^/?#]+/i, native.baseUrl)?.[0]) || "null";
+
   function destructureError(error) {
     const message = ObjectPrototypeIsPrototypeOf(ErrorPrototype, error)
       ? `${error.name}: ${error.message}`
@@ -420,6 +432,10 @@
     // supported: there is nothing to transfer to.
     registerTransferableResource() {},
     destructureError,
+    // deno_core's error for a closed resource. isolane has no resources, so
+    // nothing is ever one, but the vendored body and stream code checks for
+    // it when a read fails (and must not throw while checking).
+    BadResourcePrototype: BadResourcePrototype,
     reportUnhandledException: native.reportUnhandledException,
     print(message, isError) {
       native.log(isError ? "error" : "log", String(message));
