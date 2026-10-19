@@ -90,7 +90,9 @@ older, unsupported V8 and brings tokio and its op layer into the worker.
 | — | Browser-only Fetch rules are not applied (forbidden request/response headers like `Set-Cookie`, method overrides, `only-if-cached`): server runtimes (Deno, workerd) don't either | by design |
 | — | WPT fetch tests needing WPT's Python handlers (`.py`): WPT's server (wptserve) serves the WPT gate (see "WPT gate" below) | done |
 | 4 | `crypto.subtle` (Deno's ext/crypto Rust, MIT) | planned |
-| — | V8 startup snapshot of the runtime JS (avoid compiling ~15k lines per VM). Also makes eager globals free: WPT bug `lazy-globals` (1 subtest) | planned |
+| — | V8 startup snapshot of the web platform: each worker builds one (every vendored script loaded and compiled, globals as plain values) and creates web VMs from it, then configures each (base URL, timers, time origin). Built when the first web VM wants it, or in the background from start when the supervisor expects web VMs (`--web-snapshot=background`: the first isolate is web, or the defaults turn web on for spares). Fixed WPT bug `lazy-globals`. Measured (macOS dev build, release): fresh web isolate +1.30 → +0.55 ms over web off; first use of Response 4.9 → 0.13 ms, of streams 3.4 → 0.21 ms, all common APIs together 4.9 → 0.32 ms; memory per live web isolate 4.59 → 2.46 MB; the serverless example's warm request 9.6 → 3.4 ms. Costs: ~30 ms to build once per worker that runs web VMs (a new web tenant's first result waits for it unless a spare built it), and ~13 MB more idle RSS in such a worker | done |
+| — | Web snapshot, next: embed it in the binary at build time (zero build time per worker, and pages shared by every worker through the page cache); needs a two-pass build, and a native or emulated run for the arm64 cross-compile | planned |
+| — | Web snapshot, next: a small pool of pre-created web isolates per worker, to hide the remaining ~0.55 ms of deserialization (isolates take their heap limit at creation, so the pool is per limit) | idea |
 | — | ES modules for guest code (`export default { fetch }` handlers) | planned |
 | — | **TypeScript guest code** (`lang: 'ts'`, `.ts` deployments): type stripping, not checking, done in the worker with `oxc` (pure Rust), so untrusted source is parsed only inside the locked-down worker. Erasable syntax only (like TypeScript's `erasableSyntaxOnly`: no enum/namespace/parameter properties, which get a clear error; a `transform` mode later). Types are blanked to whitespace, so line:column in guest stack traces match the TypeScript source with no source maps. Pairs with generated `.d.ts` for host APIs so developers can type-check against the exact host API at deploy time | planned (after API v2 and WPT) |
 | — | **Multi-file programs**: deployments upload an in-memory file tree (`files: { path: source }`, `entry`); the worker resolves imports with `oxc_resolver` over a virtual filesystem (package.json exports/imports and conditions — `workerd`/`worker`/`browser`/`import`/`default` — tsconfig paths, extension probing), compiles each module with V8's native ES module API (resolve → strip/transform with oxc → compile → link), with dynamic `import()`, `import.meta.url` as the virtual path, and JSON modules. All parsing, resolving, and transforming of untrusted input stays in the locked-down worker, and resolution can't leave the uploaded tree. New limits: `modules`, `moduleBytes`. Packages work if uploaded; `node:*` only with the Node compat layer | planned |
@@ -99,7 +101,7 @@ older, unsupported V8 and brings tokio and its op layer into the worker.
 | — | TypeScript **transform mode** (`ts: { mode: 'transform' }`) via `oxc_transformer`: enums and const enums (inlined within a file), namespaces (partial: no cross-block merging, no exported `var`/`let`), legacy decorators + metadata, JSX/TSX; per-file (`isolatedModules`) semantics. Positions shift, so the worker maps guest stack traces back through the source map before reporting `err.guest.stack`. Strip mode stays the default. Verify parameter properties and standard decorators before documenting them | planned |
 | — | **Type checking** at deploy time (`deploy(code, { check: true })`, cached by content hash), never per run: TypeScript's checker running *inside an isolane isolate* (tsc is plain JS; a large heap budget, nothing else enabled), so a checker bug or DoS on hostile input stays sandboxed. Checked against generated `.d.ts` for exactly the host functions (from their schemas) plus the WinterTC globals; failures are `ERR_TYPE_CHECK` with file:line:col diagnostics. Evaluate the native TypeScript 7 compiler (tsgo) as a separate sandboxed process once its embedding API settles | planned |
 | — | WPT subset with tracked pass rates: now the WPT gate (`test/wpt/run.mjs`, see "WPT gate" below), which replaced `soak/wpt.mjs` and its 95% floor | done |
-| — | Turn `webPlatform` on by default once the startup snapshot lands (today: +0.8 ms per isolate, +1–1.6 ms on first use of an API) | planned |
+| — | Turn `web` on by default: **not yet**. With the snapshot, a web isolate costs ~0.55 ms more than a plain one (isolate 0.29 → 0.59 ms, context 0.12 → 0.37 ms; all V8 deserialization, `configure` is 0.01 ms), over the 0.3 ms bar set for flipping the default; first use costs nothing. Revisit with an embedded snapshot or an isolate pool | deferred |
 | — | Fair CPU for idle timers: a stateful isolate's `setInterval` runs between evals (each batch budgeted like an eval, but unbounded in count); per-tenant CPU accounting should cover it | planned |
 | — | `structuredClone` `transfer`, transferable streams, `MessageChannel`/`MessagePort`. WPT bug `message-channel` (11 subtests) | planned |
 | — | Error a `DecompressionStream`'s readable immediately on trailing data (needs the transform controller in the op). WPT bug `decompression-trailing` (1 file) | planned |
@@ -178,8 +180,6 @@ randomUUID 100%. Remaining failures, by cause:
   variants).
 - The `url` crate lags the newest URL spec edge cases (file URL hosts,
   opaque-path trailing spaces, `xn--` labels): track url crate releases.
-- Lazy globals show as accessors until first use (idlharness wants data
-  properties); fixed by eager install from a snapshot.
 - The global object isn't a `WorkerGlobalScope` (idlharness "unexpected
   global object"); decide which global interface to model.
 - `Event.timeStamp` is always 0 (Deno's behaviour too); `structuredClone`'s
@@ -339,7 +339,7 @@ Measured against isolated-vm (Linux x64 under Rosetta; re-measure natively):
 | Lower per-call latency: coalesce frame writes per event-loop turn on the supervisor; spin briefly before blocking in the worker | planned |
 | Frame batching (fewer syscalls), fewer copies | planned |
 | Prewarmed worker pool (`prewarm: n`; spares never run guest code before a tenant claims one): new-tenant p50 36 → 4.9 ms (`bench/cold-start.mjs`, native macOS dev build) | done |
-| Startup snapshot (also cuts per-VM setup once the WinterTC runtime is in) | planned |
+| Startup snapshot of the web platform (see WinterTC above for the numbers) | done |
 | Native benchmarks (not Rosetta) in CI, tracked over time | planned |
 | Shared-memory transport | idea (needs a native addon; conflicts with plain `npm install`) |
 

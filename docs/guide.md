@@ -86,6 +86,12 @@ over isolane's own native code:
 Timers advance a frozen clock when they fire. A one-shot `run()` drops
 timers still pending when it returns; a stateful isolate keeps them.
 
+Cost: web isolates are created from a startup snapshot that each worker
+builds the first time it needs one (about 30 ms, once), so every API is
+ready at no first-use cost, and a web isolate takes about 0.5 ms more to
+create than a plain one. With `defaults.web` on, spare workers build the
+snapshot before a tenant claims them.
+
 ### `time` and `random`
 
 - `time: 'frozen'` (default): `Date`, `Intl`'s default "now", and
