@@ -262,7 +262,8 @@ function program(run) {
   return parts.join('\n');
 }
 
-const options = { eval: true, limits: { timeoutMs: 20_000 } };
+// Plain ECMAScript, as test262 expects: the web platform's globals off.
+const options = { eval: true, web: false, limits: { timeoutMs: 20_000 } };
 
 /** Run one test in one mode; returns { status: PASS|FAIL|TIMEOUT|CRASH, message }. */
 async function runOne(run, lane) {
