@@ -20,7 +20,7 @@ use brotli::DecompressorWriter as BrotliDecoder;
 use flate2::write::{DeflateDecoder, DeflateEncoder, GzDecoder, GzEncoder, ZlibDecoder, ZlibEncoder};
 use flate2::Compression;
 
-use super::{bytes, new_u8array, string_arg, throw_type, Args, Rv};
+use super::{copy_bytes, new_u8array, string_arg, throw_type, Args, Rv};
 
 /// Most bytes one write (or the finish) may produce.
 /// Most output one call may produce (limits.decompressedBytes).
@@ -172,11 +172,10 @@ impl std::error::Error for PartialOutput {}
 /// native.compressionWrite(id, chunk) → Uint8Array
 pub fn compression_write(scope: &mut v8::PinScope, args: Args, mut rv: Rv) {
     let id = args.get(0).uint32_value(scope).unwrap_or(0);
-    let Some(input) = bytes(scope, args.get(1)) else {
+    let Some(input) = copy_bytes(scope, args.get(1)) else {
         throw_type(scope, "expected a buffer");
         return;
     };
-    let input = input.to_vec();
     let result = STREAMS.with(|s| {
         let mut s = s.borrow_mut();
         let inner = match s.get_mut(&id) {

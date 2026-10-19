@@ -81,6 +81,9 @@ fn arg_bytes(value: v8::Local<v8::Value>) -> Option<Vec<u8>> {
     let buffer = v8::Local::<v8::ArrayBuffer>::try_from(value).ok()?;
     let len = buffer.byte_length();
     Some(match buffer.data() {
+        // SAFETY: data() and byte_length() describe the buffer's current
+        // memory (guests have no SharedArrayBuffer), and it's copied out
+        // before anything else runs.
         Some(p) if len > 0 => unsafe { std::slice::from_raw_parts(p.as_ptr() as *const u8, len) }.to_vec(),
         _ => Vec::new(),
     })
@@ -90,6 +93,8 @@ fn arg_bytes(value: v8::Local<v8::Value>) -> Option<Vec<u8>> {
 fn new_u8array<'s>(scope: &mut v8::PinScope<'s, '_>, data: &[u8]) -> v8::Local<'s, v8::Value> {
     let buffer = v8::ArrayBuffer::new(scope, data.len());
     if let Some(p) = buffer.data() {
+        // SAFETY: a fresh buffer of exactly data.len() bytes that no one
+        // else references yet.
         unsafe { std::ptr::copy_nonoverlapping(data.as_ptr(), p.as_ptr() as *mut u8, data.len()) };
     }
     v8::Uint8Array::new(scope, buffer, 0, data.len()).unwrap().into()

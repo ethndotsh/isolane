@@ -75,35 +75,75 @@ fn throw_range(scope: &mut v8::PinScope, msg: &str) {
     scope.throw_exception(e);
 }
 
-/// The bytes behind an ArrayBuffer or a view of one (guests have no
-/// SharedArrayBuffer). The slice aliases V8 memory: use it before running
-/// any JS.
-fn bytes<'a>(scope: &mut v8::PinScope, value: v8::Local<v8::Value>) -> Option<&'a mut [u8]> {
-    let (ptr, len) = if let Ok(view) = v8::Local::<v8::ArrayBufferView>::try_from(value) {
-        let buffer = view.buffer(scope)?;
-        let base = buffer.data().map(|p| p.as_ptr() as *mut u8);
-        (base.map(|b| unsafe { b.add(view.byte_offset()) }), view.byte_length())
+/// Where the bytes of an ArrayBuffer or a view of one are, right now: the
+/// buffer's backing store (held, so the memory can't be freed under us)
+/// and the byte range within it, checked against the store's current
+/// length. None for anything else, and for SharedArrayBuffers (guests have
+/// none; their memory could change under a Rust slice).
+fn locate(scope: &mut v8::PinScope, value: v8::Local<v8::Value>) -> Option<(v8::SharedRef<v8::BackingStore>, usize, usize)> {
+    let (buffer, offset, len) = if let Ok(view) = v8::Local::<v8::ArrayBufferView>::try_from(value) {
+        (view.buffer(scope)?, view.byte_offset(), view.byte_length())
     } else if let Ok(buffer) = v8::Local::<v8::ArrayBuffer>::try_from(value) {
-        (buffer.data().map(|p| p.as_ptr() as *mut u8), buffer.byte_length())
+        let len = buffer.byte_length();
+        (buffer, 0, len)
     } else {
         return None;
     };
-    match ptr {
-        Some(p) if len > 0 => Some(unsafe { std::slice::from_raw_parts_mut(p, len) }),
-        _ => Some(&mut []),
+    let store = buffer.get_backing_store();
+    if store.is_shared() || offset.checked_add(len)? > store.byte_length() {
+        return None;
+    }
+    Some((store, offset, len))
+}
+
+/// Run `f` over the bytes of an ArrayBuffer or a view of one (an empty
+/// slice for a detached or zero-length one). `f` gets no scope, so no
+/// JavaScript can run while the slice exists: guest code can't resize,
+/// transfer, or detach the buffer underneath it. Callers that also need
+/// the scope copy what they need out first.
+fn with_bytes<R>(scope: &mut v8::PinScope, value: v8::Local<v8::Value>, f: impl FnOnce(&[u8]) -> R) -> Option<R> {
+    let (store, offset, len) = locate(scope, value)?;
+    match store.data() {
+        // SAFETY: [offset, offset + len) is within the store's current
+        // length (checked in `locate`); `store` keeps the memory alive; it
+        // isn't shared, and no JS runs during `f`, so nothing else touches
+        // it while the slice exists.
+        Some(base) if len > 0 => Some(f(unsafe { std::slice::from_raw_parts((base.as_ptr() as *const u8).add(offset), len) })),
+        _ => Some(f(&[])),
     }
 }
 
-/// A Uint32Array argument's elements (Deno's `#[buffer] &mut [u32]`).
-fn u32s<'a>(scope: &mut v8::PinScope, value: v8::Local<v8::Value>) -> Option<&'a mut [u32]> {
-    let b = bytes(scope, value)?;
-    if b.is_empty() {
-        return Some(&mut []);
+/// `with_bytes`, writable.
+fn with_bytes_mut<R>(scope: &mut v8::PinScope, value: v8::Local<v8::Value>, f: impl FnOnce(&mut [u8]) -> R) -> Option<R> {
+    let (store, offset, len) = locate(scope, value)?;
+    match store.data() {
+        // SAFETY: as in `with_bytes`; and this is the only reference to
+        // the range while `f` runs.
+        Some(base) if len > 0 => Some(f(unsafe { std::slice::from_raw_parts_mut((base.as_ptr() as *mut u8).add(offset), len) })),
+        _ => Some(f(&mut [])),
     }
-    if (b.as_ptr() as usize) % 4 != 0 {
-        return None;
-    }
-    Some(unsafe { std::slice::from_raw_parts_mut(b.as_mut_ptr() as *mut u32, b.len() / 4) })
+}
+
+/// `with_bytes_mut` over a Uint32Array's elements (Deno's
+/// `#[buffer] &mut [u32]`). None if the bytes aren't 4-byte aligned.
+fn with_u32s_mut<R>(scope: &mut v8::PinScope, value: v8::Local<v8::Value>, f: impl FnOnce(&mut [u32]) -> R) -> Option<R> {
+    with_bytes_mut(scope, value, |b| {
+        if b.is_empty() {
+            return Some(f(&mut []));
+        }
+        if !(b.as_ptr() as usize).is_multiple_of(std::mem::align_of::<u32>()) {
+            return None;
+        }
+        // SAFETY: aligned (checked), within `b`, and u32 has no invalid bit
+        // patterns; the borrow of `b` covers it.
+        Some(f(unsafe { std::slice::from_raw_parts_mut(b.as_mut_ptr() as *mut u32, b.len() / 4) }))
+    })
+    .flatten()
+}
+
+/// A copy of the bytes of an ArrayBuffer or a view of one.
+fn copy_bytes(scope: &mut v8::PinScope, value: v8::Local<v8::Value>) -> Option<Vec<u8>> {
+    with_bytes(scope, value, <[u8]>::to_vec)
 }
 
 /// A new Uint8Array with a copy of `data`, allocated by V8 (inside the V8
@@ -111,6 +151,8 @@ fn u32s<'a>(scope: &mut v8::PinScope, value: v8::Local<v8::Value>) -> Option<&'a
 fn new_u8array<'s>(scope: &mut v8::PinScope<'s, '_>, data: &[u8]) -> v8::Local<'s, v8::Uint8Array> {
     let buffer = v8::ArrayBuffer::new(scope, data.len());
     if let Some(p) = buffer.data() {
+        // SAFETY: a fresh buffer of exactly data.len() bytes that no one
+        // else references yet.
         unsafe { std::ptr::copy_nonoverlapping(data.as_ptr(), p.as_ptr() as *mut u8, data.len()) };
     }
     v8::Uint8Array::new(scope, buffer, 0, data.len()).unwrap()
@@ -216,12 +258,12 @@ fn encode(scope: &mut v8::PinScope, args: Args, mut rv: Rv) {
 /// dropping one leading byte order mark, as deno_core's does (Blob.text()
 /// relies on it: the Encoding Standard's UTF-8 decode strips the BOM).
 fn decode(scope: &mut v8::PinScope, args: Args, mut rv: Rv) {
-    let Some(b) = bytes(scope, args.get(0)) else {
+    let Some(text) = with_bytes(scope, args.get(0), |b| {
+        String::from_utf8_lossy(b.strip_prefix(&[0xEF, 0xBB, 0xBF]).unwrap_or(b)).into_owned()
+    }) else {
         throw_type(scope, "expected a buffer");
         return;
     };
-    let b = b.strip_prefix(&[0xEF, 0xBB, 0xBF]).unwrap_or(b);
-    let text = String::from_utf8_lossy(b).into_owned();
     if let Some(s) = v8::String::new(scope, &text) {
         rv.set(s.into());
     }
@@ -234,12 +276,10 @@ pub(crate) fn fill_random(buf: &mut [u8]) -> bool {
 }
 
 fn get_random_values(scope: &mut v8::PinScope, args: Args, _rv: Rv) {
-    let Some(b) = bytes(scope, args.get(0)) else {
-        throw_type(scope, "expected an integer TypedArray");
-        return;
-    };
-    if !fill_random(b) {
-        throw_type(scope, "no randomness available");
+    match with_bytes_mut(scope, args.get(0), fill_random) {
+        None => throw_type(scope, "expected an integer TypedArray"),
+        Some(false) => throw_type(scope, "no randomness available"),
+        Some(true) => {}
     }
 }
 
@@ -300,12 +340,12 @@ fn op_time_origin(scope: &mut v8::PinScope, args: Args, _rv: Rv) {
 
 /// Write [seconds, subsecond nanoseconds] as two native-endian u32s.
 fn expose_time(scope: &mut v8::PinScope, buf: v8::Local<v8::Value>, d: std::time::Duration) {
-    if let Some(out) = bytes(scope, buf) {
+    with_bytes_mut(scope, buf, |out| {
         if out.len() >= 8 {
             out[0..4].copy_from_slice(&(d.as_secs() as u32).to_ne_bytes());
             out[4..8].copy_from_slice(&d.subsec_nanos().to_ne_bytes());
         }
-    }
+    });
 }
 
 macro_rules! set_fns {

@@ -89,6 +89,9 @@ jobs:
             ~/.cargo/git/db
           key: v8-linux-x64-${{ hashFiles('scripts/fetch-rusty-v8.sh', 'scripts/v8.gn', 'patches/**', 'Cargo.lock', 'Cargo.toml') }}
 
+      - name: Lint (every unsafe block documented)
+        run: cargo clippy --release -p isolane-worker --features escape-tests -- -D clippy::undocumented_unsafe_blocks -D unsafe_op_in_unsafe_fn
+
       - name: V8 sandbox self-check
         run: '"$RUNNER_TEMP/isolane-worker" --self-check'
 

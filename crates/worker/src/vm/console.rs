@@ -23,9 +23,8 @@ fn console_method(scope: &mut v8::PinScope, args: v8::FunctionCallbackArguments,
             message.push(' ');
         }
         let v = args.get(i);
-        let part = if v.is_string() {
-            v.to_rust_string_lossy(scope)
-        } else if v.is_function() || v.is_symbol() || v.is_undefined() || v.is_big_int() {
+        // Strings as-is, and values JSON can't represent by their string form.
+        let part = if v.is_string() || v.is_function() || v.is_symbol() || v.is_undefined() || v.is_big_int() {
             v.to_rust_string_lossy(scope)
         } else {
             v8::tc_scope!(let tc, scope);

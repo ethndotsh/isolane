@@ -9,7 +9,7 @@ use std::collections::HashMap;
 
 use encoding_rs::{CoderResult, Decoder, DecoderResult, Encoding};
 
-use super::{bytes, string_arg, throw_range, throw_type, Args, Rv};
+use super::{copy_bytes, string_arg, throw_range, throw_type, with_bytes, with_bytes_mut, with_u32s_mut, Args, Rv};
 
 struct StreamDecoder {
     decoder: Decoder,
@@ -73,12 +73,12 @@ pub fn op_encoding_normalize_label(scope: &mut v8::PinScope, args: Args, mut rv:
 }
 
 pub fn op_encoding_decode_utf8_ascii_only(scope: &mut v8::PinScope, args: Args, mut rv: Rv) {
-    let Some(b) = bytes(scope, args.get(0)) else {
+    let Some(b) = copy_bytes(scope, args.get(0)) else {
         throw_type(scope, "expected a buffer");
         return;
     };
     if b.is_ascii() {
-        if let Some(s) = v8::String::new_from_one_byte(scope, b, v8::NewStringType::Normal) {
+        if let Some(s) = v8::String::new_from_one_byte(scope, &b, v8::NewStringType::Normal) {
             rv.set(s.into());
         }
     } else {
@@ -88,11 +88,11 @@ pub fn op_encoding_decode_utf8_ascii_only(scope: &mut v8::PinScope, args: Args, 
 
 pub fn op_encoding_decode_utf8(scope: &mut v8::PinScope, args: Args, mut rv: Rv) {
     let ignore_bom = args.get(1).boolean_value(scope);
-    let Some(b) = bytes(scope, args.get(0)) else {
+    let Some(b) = copy_bytes(scope, args.get(0)) else {
         throw_type(scope, "expected a buffer");
         return;
     };
-    let b: &[u8] = if !ignore_bom && b.starts_with(&[0xef, 0xbb, 0xbf]) { &b[3..] } else { b };
+    let b: &[u8] = if !ignore_bom && b.starts_with(&[0xef, 0xbb, 0xbf]) { &b[3..] } else { &b };
     match v8::String::new_from_utf8(scope, b, v8::NewStringType::Normal) {
         Some(s) => rv.set(s.into()),
         None => throw_type(scope, "buffer exceeds maximum length"),
@@ -107,11 +107,11 @@ pub fn op_encoding_decode_single(scope: &mut v8::PinScope, args: Args, mut rv: R
         invalid_label(scope, &label);
         return;
     };
-    let Some(b) = bytes(scope, args.get(0)) else {
+    let Some(decoded) = with_bytes(scope, args.get(0), |b| run_decoder(&mut decoder, fatal, b, true)) else {
         throw_type(scope, "expected a buffer");
         return;
     };
-    match run_decoder(&mut decoder, fatal, b, true) {
+    match decoded {
         Ok(units) => {
             if let Some(s) = utf16_string(scope, &units) {
                 rv.set(s.into());
@@ -144,18 +144,20 @@ pub fn new_decoder(scope: &mut v8::PinScope, args: Args, mut rv: Rv) {
 pub fn decoder_decode(scope: &mut v8::PinScope, args: Args, mut rv: Rv) {
     let id = args.get(1).uint32_value(scope).unwrap_or(0);
     let stream = args.get(2).boolean_value(scope);
-    let Some(b) = bytes(scope, args.get(0)) else {
+    let decoded = with_bytes(scope, args.get(0), |b| {
+        DECODERS.with(|d| {
+            let mut d = d.borrow_mut();
+            let r = d.get_mut(&id).map(|sd| run_decoder(&mut sd.decoder, sd.fatal, b, !stream));
+            if !stream {
+                d.remove(&id);
+            }
+            r
+        })
+    });
+    let Some(result) = decoded else {
         throw_type(scope, "expected a buffer");
         return;
     };
-    let result = DECODERS.with(|d| {
-        let mut d = d.borrow_mut();
-        let r = d.get_mut(&id).map(|sd| run_decoder(&mut sd.decoder, sd.fatal, b, !stream));
-        if !stream {
-            d.remove(&id);
-        }
-        r
-    });
     match result {
         Some(Ok(units)) => {
             if let Some(s) = utf16_string(scope, &units) {
@@ -182,12 +184,19 @@ fn encode_into(scope: &mut v8::PinScope, args: &Args) -> Option<(usize, usize)> 
         throw_type(scope, "expected a string");
         return None;
     };
-    let Some(buffer) = bytes(scope, args.get(1)) else {
+    // V8 writes the UTF-8 into our own buffer (it needs the scope, so it
+    // can't write into the guest's directly); then it's copied over.
+    let Some(dest_len) = with_bytes(scope, args.get(1), <[u8]>::len) else {
         throw_type(scope, "expected a Uint8Array");
         return None;
     };
+    let mut utf8 = vec![0u8; dest_len];
     let mut nchars = 0;
-    let written = s.write_utf8_v2(scope, buffer, v8::WriteFlags::kReplaceInvalidUtf8, Some(&mut nchars));
+    let written = s.write_utf8_v2(scope, &mut utf8, v8::WriteFlags::kReplaceInvalidUtf8, Some(&mut nchars));
+    with_bytes_mut(scope, args.get(1), |dest| {
+        let n = written.min(dest.len());
+        dest[..n].copy_from_slice(&utf8[..n]);
+    });
     Some((nchars, written))
 }
 
@@ -195,7 +204,7 @@ fn encode_into(scope: &mut v8::PinScope, args: &Args) -> Option<(usize, usize)> 
 /// what packs exactly into a double.
 pub fn op_encoding_encode_into(scope: &mut v8::PinScope, args: Args, mut rv: Rv) {
     if let Ok(s) = v8::Local::<v8::String>::try_from(args.get(0)) {
-        let dest_len = bytes(scope, args.get(1)).map(|b| b.len()).unwrap_or(0);
+        let dest_len = with_bytes(scope, args.get(1), <[u8]>::len).unwrap_or(0);
         if s.length() > ENCODE_INTO_MAX_PACKED_READ && dest_len > ENCODE_INTO_MAX_PACKED_READ {
             rv.set_double(ENCODE_INTO_PACKED_SENTINEL);
             return;
@@ -209,10 +218,15 @@ pub fn op_encoding_encode_into(scope: &mut v8::PinScope, args: Args, mut rv: Rv)
 /// The unpacked form: [read, written] into a Uint32Array.
 pub fn op_encoding_encode_into_fallback(scope: &mut v8::PinScope, args: Args, _rv: Rv) {
     let Some((read, written)) = encode_into(scope, &args) else { return };
-    let Some(out) = super::u32s(scope, args.get(2)).filter(|o| o.len() >= 2) else {
+    let stored = with_u32s_mut(scope, args.get(2), |out| {
+        if out.len() < 2 {
+            return false;
+        }
+        out[0] = read as u32;
+        out[1] = written as u32;
+        true
+    });
+    if stored != Some(true) {
         throw_type(scope, "Provided buffer too small");
-        return;
-    };
-    out[0] = read as u32;
-    out[1] = written as u32;
+    }
 }

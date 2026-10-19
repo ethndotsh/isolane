@@ -8,7 +8,7 @@ use url::form_urlencoded;
 use url::quirks;
 use url::Url;
 
-use super::{bytes, string_arg, throw_type, u32s, Args, Rv};
+use super::{string_arg, throw_type, with_bytes, with_u32s_mut, Args, Rv};
 
 #[repr(u32)]
 enum ParseStatus {
@@ -55,30 +55,46 @@ fn parse_url(href: &str, base: Option<&Url>, buf: &mut [u32]) -> u32 {
     }
 }
 
-fn component_buf<'a>(scope: &mut v8::PinScope, v: v8::Local<v8::Value>) -> Option<&'a mut [u32]> {
-    let buf = u32s(scope, v).filter(|b| b.len() >= 8);
-    if buf.is_none() {
+/// Copy parsed components into the Uint32Array(8) the JS side reads them
+/// from. Parsing fills a local array first, so no guest buffer is borrowed
+/// while strings are converted or the URL is parsed.
+fn store_components(scope: &mut v8::PinScope, v: v8::Local<v8::Value>, components: &[u32; 8]) -> bool {
+    let stored = with_u32s_mut(scope, v, |out| match out.get_mut(..8) {
+        Some(out) => {
+            out.copy_from_slice(components);
+            true
+        }
+        None => false,
+    });
+    if stored != Some(true) {
         throw_type(scope, "expected a Uint32Array(8)");
+        return false;
     }
-    buf
+    true
 }
 
 pub fn op_url_parse(scope: &mut v8::PinScope, args: Args, mut rv: Rv) {
     let href = string_arg(scope, &args, 0);
-    let Some(buf) = component_buf(scope, args.get(1)) else { return };
+    let mut components = [0u32; 8];
+    let buf = &mut components;
     let status = if parse_simple_special_url(&href, buf) { ParseStatus::Ok as u32 } else { parse_url(&href, None, buf) };
-    rv.set_uint32(status);
+    if store_components(scope, args.get(1), &components) {
+        rv.set_uint32(status);
+    }
 }
 
 pub fn op_url_parse_with_base(scope: &mut v8::PinScope, args: Args, mut rv: Rv) {
     let href = string_arg(scope, &args, 0);
     let base = string_arg(scope, &args, 1);
-    let Some(buf) = component_buf(scope, args.get(2)) else { return };
+    let mut components = [0u32; 8];
+    let buf = &mut components;
     let status = match Url::parse(&base) {
         Ok(base) => parse_url(&href, Some(&base), buf),
         Err(_) => ParseStatus::Err as u32,
     };
-    rv.set_uint32(status);
+    if store_components(scope, args.get(2), &components) {
+        rv.set_uint32(status);
+    }
 }
 
 pub fn op_url_get_serialization(scope: &mut v8::PinScope, _args: Args, mut rv: Rv) {
@@ -90,7 +106,8 @@ pub fn op_url_reparse(scope: &mut v8::PinScope, args: Args, mut rv: Rv) {
     let href = string_arg(scope, &args, 0);
     let setter = args.get(1).uint32_value(scope).unwrap_or(u32::MAX);
     let value = string_arg(scope, &args, 2);
-    let Some(buf) = component_buf(scope, args.get(3)) else { return };
+    let mut components = [0u32; 8];
+    let buf = &mut components;
     let Ok(mut url) = Url::options().parse(&href) else {
         rv.set_uint32(ParseStatus::Err as u32);
         return;
@@ -121,15 +138,19 @@ pub fn op_url_reparse(scope: &mut v8::PinScope, args: Args, mut rv: Rv) {
         Ok(()) => finish(url, &href, buf, NO_PORT),
         Err(()) => ParseStatus::Err as u32,
     };
-    rv.set_uint32(status);
+    if store_components(scope, args.get(3), &components) {
+        rv.set_uint32(status);
+    }
 }
 
 pub fn op_url_parse_search_params(scope: &mut v8::PinScope, args: Args, mut rv: Rv) {
     let pairs: Vec<(String, String)> = if args.get(0).is_string() {
         let s = string_arg(scope, &args, 0);
         form_urlencoded::parse(s.as_bytes()).map(|(k, v)| (k.into_owned(), v.into_owned())).collect()
-    } else if let Some(b) = bytes(scope, args.get(1)) {
-        form_urlencoded::parse(b).map(|(k, v)| (k.into_owned(), v.into_owned())).collect()
+    } else if let Some(pairs) =
+        with_bytes(scope, args.get(1), |b| form_urlencoded::parse(b).map(|(k, v)| (k.into_owned(), v.into_owned())).collect())
+    {
+        pairs
     } else {
         throw_type(scope, "invalid parameters");
         return;

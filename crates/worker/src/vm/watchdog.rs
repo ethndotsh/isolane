@@ -20,6 +20,8 @@ impl CpuClock {
     /// The calling thread's clock.
     pub(super) fn current() -> Option<CpuClock> {
         #[cfg(target_os = "linux")]
+        // SAFETY: pthread_self() is always valid for the calling thread, and
+        // `id` is a valid out-pointer.
         unsafe {
             let mut id: libc::clockid_t = 0;
             (libc::pthread_getcpuclockid(libc::pthread_self(), &mut id) == 0).then_some(CpuClock(id))
@@ -30,6 +32,8 @@ impl CpuClock {
 
     pub(super) fn now(self) -> Duration {
         #[cfg(target_os = "linux")]
+        // SAFETY: `ts` is a valid out-pointer; the clock id came from
+        // pthread_getcpuclockid for a thread that outlives this watchdog.
         unsafe {
             let mut ts = libc::timespec { tv_sec: 0, tv_nsec: 0 };
             libc::clock_gettime(self.0, &mut ts);

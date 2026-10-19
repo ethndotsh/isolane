@@ -187,6 +187,7 @@ pub fn memory_limit(bytes: u64) -> Result<(), String> {
     #[cfg(target_os = "linux")]
     {
         let lim = libc::rlimit { rlim_cur: bytes, rlim_max: bytes };
+        // SAFETY: setrlimit reads a valid, initialized rlimit.
         if unsafe { libc::setrlimit(libc::RLIMIT_DATA, &lim) } != 0 {
             return Err(format!("setrlimit(RLIMIT_DATA): {}", std::io::Error::last_os_error()));
         }
@@ -204,6 +205,7 @@ fn resource_limits() -> Result<(), String> {
     #[cfg(target_os = "linux")]
     for (resource, name) in [(libc::RLIMIT_CORE, "RLIMIT_CORE"), (libc::RLIMIT_FSIZE, "RLIMIT_FSIZE")] {
         let zero = libc::rlimit { rlim_cur: 0, rlim_max: 0 };
+        // SAFETY: as above.
         if unsafe { libc::setrlimit(resource, &zero) } != 0 {
             return Err(format!("setrlimit({name}): {}", std::io::Error::last_os_error()));
         }

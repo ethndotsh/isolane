@@ -6,6 +6,11 @@
 //! process lockdown, for syscall tracing only; the worker then reports no
 //! lockdown and a strict supervisor refuses it.
 
+// Every unsafe block says why it's sound (`// SAFETY:`), and unsafe
+// functions don't make their bodies implicitly unsafe.
+#![deny(unsafe_op_in_unsafe_fn)]
+#![warn(clippy::undocumented_unsafe_blocks)]
+
 mod clock;
 mod frame;
 mod limits;
@@ -68,6 +73,7 @@ fn entropy(buf: &mut [u8]) -> bool {
     let mut filled = 0;
     while filled < buf.len() {
         let rest = &mut buf[filled..];
+        // SAFETY: getrandom writes at most rest.len() bytes into rest.
         let n = unsafe { libc::getrandom(rest.as_mut_ptr().cast(), rest.len(), 0) };
         if n < 0 {
             if std::io::Error::last_os_error().raw_os_error() == Some(libc::EINTR) {
@@ -100,6 +106,8 @@ fn init_v8() {
     vm::set_platform(platform.clone());
     v8::V8::initialize_platform(platform);
     v8::V8::initialize();
+    // SAFETY: V8 is initialized, and the callback has the signature V8
+    // declares (rusty_v8's OomDetails mirrors v8::OOMDetails).
     unsafe { v8_set_fatal_memory_error_callback(vm::out_of_memory) };
     // V8 reserves process-wide memory (the JIT's code range) when the first
     // isolate is created, before that isolate's OOM handler can be set. Do it
@@ -110,6 +118,7 @@ fn init_v8() {
 
 #[cfg(not(feature = "dev-prebuilt"))]
 fn sandbox_secure() -> bool {
+    // SAFETY: both are argument-less queries, valid once V8 is initialized.
     unsafe { v8__V8__IsSandboxEnabled() && v8_is_sandbox_configured_securely() }
 }
 #[cfg(feature = "dev-prebuilt")]
@@ -141,6 +150,7 @@ fn self_check() -> ExitCode {
     let before = vm_data_kib();
     init_v8();
     let after_init = vm_data_kib();
+    // SAFETY: an argument-less query, after init_v8().
     let enabled = unsafe { v8__V8__IsSandboxEnabled() };
     let secure = sandbox_secure();
     let isolate = v8::Isolate::new(Default::default());
@@ -354,6 +364,8 @@ fn escape_test(probe: &str) -> ExitCode {
     }
     locked("LOCKED");
     let path = CString::new("/etc/hostname").unwrap();
+    // SAFETY: test-only probes; each passes valid, NUL-terminated strings
+    // and null-terminated argv. They are expected to be refused or killed.
     let r = unsafe {
         match probe {
             "open" => {

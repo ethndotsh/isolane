@@ -145,6 +145,8 @@ struct OomState {
 /// Near the heap limit: terminate instead of letting V8 abort the process,
 /// and grant headroom so the termination can unwind. The VM is retired after.
 unsafe extern "C" fn near_heap_limit(data: *mut c_void, current: usize, _initial: usize) -> usize {
+    // SAFETY: `data` is the OomState registered with this callback; it's
+    // boxed and dropped only after the isolate (see vm_main's drop order).
     let st = unsafe { &*(data as *const OomState) };
     st.hit.store(true, Ordering::SeqCst);
     st.handle.terminate_execution();
@@ -157,6 +159,8 @@ unsafe extern "C" fn near_heap_limit(data: *mut c_void, current: usize, _initial
 pub unsafe extern "C" fn out_of_memory(_location: *const std::ffi::c_char, _details: &v8::OomDetails) {
     const MSG: &[u8] = b"isolane-worker: out of memory (worker memory limit)\n";
     #[cfg(target_os = "linux")]
+    // SAFETY: write and _exit are async-signal-safe and take a valid buffer;
+    // nothing else is safe to do in a process V8 has declared out of memory.
     unsafe {
         libc::write(2, MSG.as_ptr().cast(), MSG.len());
         libc::_exit(OOM_EXIT_CODE);

@@ -3,7 +3,7 @@
 //! build doesn't expose; the semantics are the same. Errors are TypeErrors,
 //! which the JS side turns into DOMExceptions.
 
-use super::{byte_string, bytes, new_u8array, throw_type, Args, Rv};
+use super::{byte_string, new_u8array, throw_type, with_bytes, Args, Rv};
 
 const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
 
@@ -20,7 +20,7 @@ fn value(c: u8) -> Option<u32> {
 
 pub fn forgiving_decode(input: &[u8]) -> Option<Vec<u8>> {
     let mut data: Vec<u8> = input.iter().copied().filter(|c| !matches!(c, b'\t' | b'\n' | b'\x0c' | b'\r' | b' ')).collect();
-    if data.len() % 4 == 0 {
+    if data.len().is_multiple_of(4) {
         if data.ends_with(b"==") {
             data.truncate(data.len() - 2);
         } else if data.ends_with(b"=") {
@@ -76,15 +76,14 @@ pub fn op_base64_decode(scope: &mut v8::PinScope, args: Args, mut rv: Rv) {
 pub fn op_base64_encode_from_buffer(scope: &mut v8::PinScope, args: Args, mut rv: Rv) {
     let offset = args.get(1).uint32_value(scope).unwrap_or(0) as usize;
     let length = args.get(2).uint32_value(scope).unwrap_or(0) as usize;
-    let Some(b) = bytes(scope, args.get(0)) else {
+    let Some(encoded) = with_bytes(scope, args.get(0), |b| offset.checked_add(length).and_then(|end| b.get(offset..end)).map(encode)) else {
         throw_type(scope, "expected a buffer");
         return;
     };
-    let Some(slice) = offset.checked_add(length).and_then(|end| b.get(offset..end)) else {
+    let Some(s) = encoded else {
         throw_type(scope, "Provided buffer too small");
         return;
     };
-    let s = encode(slice);
     if let Some(s) = latin1(scope, s.as_bytes()) {
         rv.set(s.into());
     }
