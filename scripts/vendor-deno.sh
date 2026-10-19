@@ -36,6 +36,14 @@ FILES=(
   ext/fetch/23_request.js
   ext/fetch/23_response.js
 )
+# WebCrypto comes from an older commit: in June 2026 Deno moved SubtleCrypto
+# into Rust objects on deno_core's cppgc and op2 (denoland/deno#34966),
+# which isolane can't host. This is the last JS implementation before that
+# work began, paired with its Rust ops, ported to crates/worker/src/web/crypto/.
+CRYPTO_COMMIT=eb4061f6f36700374e55fdaec0b0ebf98df0c8d4
+CRYPTO_FILES=(
+  ext/crypto/00_crypto.js
+)
 tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT
 git clone -q --filter=blob:none --no-checkout https://github.com/denoland/deno.git "$tmp/deno"
@@ -46,8 +54,13 @@ for f in LICENSE.md "${FILES[@]}"; do
   mkdir -p "runtime/deno/$(dirname "$f")"
   cp "$tmp/deno/$f" "runtime/deno/$f"
 done
+for f in "${CRYPTO_FILES[@]}"; do
+  mkdir -p "runtime/deno/$(dirname "$f")"
+  git -C "$tmp/deno" show "$CRYPTO_COMMIT:$f" >"runtime/deno/$f"
+done
 for patch in patches/deno-*.patch; do
   [ -e "$patch" ] && git apply "$patch"
 done
 echo "$DENO_COMMIT" >runtime/deno/COMMIT
-echo "vendored ${#FILES[@]} files from denoland/deno@${DENO_COMMIT:0:12}"
+echo "$CRYPTO_COMMIT" >runtime/deno/ext/crypto/COMMIT
+echo "vendored ${#FILES[@]} files from denoland/deno@${DENO_COMMIT:0:12}, ${#CRYPTO_FILES[@]} from @${CRYPTO_COMMIT:0:12}"
