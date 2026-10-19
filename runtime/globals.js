@@ -192,6 +192,23 @@
     return fetchModule.fetch;
   });
 
+  // connect(): the Sockets API over the isolate's connect policy, which the
+  // prelude hands over like fetch's (the worker deletes the hook before
+  // guest code runs). Without a policy there is no `connect` global.
+  const SOCKETS_JS = "ext:isolane/sockets.js";
+  ObjectDefineProperty(g, "__isolane_web_connect", {
+    __proto__: null,
+    configurable: true,
+    enumerable: false,
+    writable: false,
+    value(transport) {
+      if (ObjectHasOwn(g, "connect")) return;
+      const sockets = load(SOCKETS_JS);
+      sockets.setTransport(transport);
+      define("connect", sockets.connect);
+    },
+  });
+
   // structuredClone and MessageChannel: Deno's 13_message_port.js, within
   // the isolate (see runtime/core.js).
   const MESSAGE_PORT_JS = "ext:deno_web/13_message_port.js";
@@ -311,6 +328,7 @@
   function materialize() {
     for (const name of LAZY) void g[name];
     eventModule();
+    load(SOCKETS_JS);
     void g.URL.createObjectURL;
   }
 

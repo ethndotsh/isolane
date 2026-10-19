@@ -33,6 +33,8 @@ macro_rules! runtime_js {
 /// A global the web platform defines for the VM's prelude (the network
 /// broker's handover, see runtime/globals.js); deleted after the prelude.
 pub const FETCH_HOOK: &str = "__isolane_web_fetch";
+/// The same for the socket broker (`connect()`, runtime/sockets.js).
+pub const CONNECT_HOOK: &str = "__isolane_web_connect";
 
 const PRIMORDIALS: &str = runtime_js!("deno/libs/core/00_primordials.js");
 const CORE: &str = runtime_js!("core.js");
@@ -65,6 +67,8 @@ const EXT: &[(&str, &str)] = &[
     ("ext:deno_fetch/23_response.js", runtime_js!("deno/ext/fetch/23_response.js")),
     // isolane's fetch() over the network broker (in place of 26_fetch.js).
     ("ext:isolane/fetch.js", runtime_js!("fetch.js")),
+    // connect(), the Sockets API over the socket broker.
+    ("ext:isolane/sockets.js", runtime_js!("sockets.js")),
 ];
 
 // ---- helpers shared by the ops ----

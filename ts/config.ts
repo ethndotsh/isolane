@@ -301,6 +301,9 @@ function checkPolicy(path: string, value: unknown, keys: string[], limitKeys: st
     }
   }
   const p = value as Record<string, unknown>;
+  if (p.ca !== undefined && typeof p.ca !== 'string' && !(Array.isArray(p.ca) && p.ca.every((c) => typeof c === 'string'))) {
+    throw invalidConfig(`${path}.ca`, 'must be PEM text or a list of them');
+  }
   if (p.privateNetworks !== undefined && typeof p.privateNetworks !== 'boolean') {
     throw invalidConfig(`${path}.privateNetworks`, 'must be a boolean');
   }
@@ -349,7 +352,7 @@ export function validateConfig(layer: unknown, where: string, level: Level): Iso
     const m = (c.fetch as FetchPolicy).methods;
     if (!Array.isArray(m) || !m.every((x) => typeof x === 'string')) throw invalidConfig(at('fetch.methods'), 'must be a list of method names');
   }
-  checkPolicy(at('connect'), c.connect, ['hosts', 'privateNetworks', 'limits'], ['connections', 'connectMs', 'idleMs']);
+  checkPolicy(at('connect'), c.connect, ['hosts', 'privateNetworks', 'ca', 'limits'], ['connections', 'connectMs', 'idleMs']);
   checkPolicy(at('fs'), c.fs, ['root', 'write', 'limits'], ['fileBytes']);
   if (c.fs) {
     const fs = c.fs as FsPolicy;
@@ -441,6 +444,8 @@ export function resolve(layers: readonly (IsolateConfig | undefined)[], runtimeL
     if (clash) throw invalidConfig('host', `has ${name} as both a function and a namespace (${clash})`);
   }
   const web = out.web === false || out.web === undefined ? false : out.web === true ? {} : { ...out.web };
+  // connect() is the Sockets API, whose sockets are streams.
+  if (out.connect && !web) throw invalidConfig('connect', 'needs the web platform: set web: true as well');
   return Object.freeze({
     host: Object.freeze([...host.values()]),
     globals: Object.freeze(globals),

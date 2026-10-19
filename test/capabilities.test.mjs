@@ -10,7 +10,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import vm from 'node:vm';
 import { splitBytes } from '../dist/binary.js';
-import { capabilities, isPublicAddress } from '../dist/capabilities.js';
+import { capabilities, connectBroker, isPublicAddress } from '../dist/capabilities.js';
 import { parseWorkerMessage } from '../dist/worker.js';
 
 /**
@@ -163,6 +163,8 @@ test('fetch: a policy function decides each hop', async () => {
 });
 
 // ---- sockets ----
+// The broker behind connect(). The guest's Sockets API over it is
+// runtime/sockets.js, tested end to end in sockets.test.mjs.
 
 const tcp = createTcpServer((sock) => {
   sock.on('data', (d) => {
@@ -174,35 +176,56 @@ await new Promise((r) => tcp.listen(0, '127.0.0.1', r));
 after(() => tcp.close());
 const tcpPort = tcp.address().port;
 
-test('connect: connect, write, read, end of stream', async () => {
-  const run = guest({ connect: { hosts: [`localhost:${tcpPort}`], privateNetworks: true } });
-  const out = await run(`
-    const s = await connect('localhost:${tcpPort}');
-    await s.write('hi ✓');
-    const first = await s.read();
-    await s.write('bye');
-    let rest = '', chunk;
-    while ((chunk = await s.read()) !== null) rest += String.fromCharCode(...chunk);
-    return [first.length, rest];`);
-  assert.deepEqual(out, [Buffer.byteLength('echo:hi ✓'), 'ok bye']);
+const tcpLocal = { hosts: [`localhost:${tcpPort}`], privateNetworks: true };
+
+test('connect broker: open, write, read, end of stream', async () => {
+  const { fn: sock } = connectBroker(tcpLocal);
+  const { id, remoteAddress } = await sock('open', { hostname: 'localhost', port: tcpPort });
+  assert.match(remoteAddress, /^(127\.0\.0\.1|\[::1\]):\d+$/);
+  await sock('write', id, Buffer.from('hi ✓'));
+  assert.equal(String(await sock('read', id)), 'echo:hi ✓');
+  await sock('write', id, Buffer.from('bye'));
+  let rest = '';
+  for (let chunk; (chunk = await sock('read', id)) !== null; ) rest += chunk;
+  assert.equal(rest, 'ok bye');
+  await sock('close', id);
+  await assert.rejects(sock('read', id), /socket is closed/);
 });
 
-test('connect: the allowlist and private-address rules apply', async () => {
-  const run = guest({ connect: { hosts: ['localhost:1', '*.example.com:443', 'db.example.com:*'] } });
-  await assert.rejects(run(`await connect('localhost:${tcpPort}')`), /not allowed by the connect policy/);
-  await assert.rejects(run(`await connect('localhost:1')`), /no public address/);
-  await assert.rejects(run(`await connect({ hostname: '10.0.0.1', port: 5432 })`), /not a public address/);
-  await assert.rejects(run(`await connect('example.com:443')`), /not allowed/); // apex isn't a subdomain
-  await assert.rejects(run(`await connect('localhost:99999')`), /port from 1 to 65535/);
+test('connect broker: the allowlist and private-address rules apply', async () => {
+  const { fn: sock } = connectBroker({ hosts: ['localhost:1', '*.example.com:443', 'db.example.com:*'] });
+  const open = (hostname, port) => sock('open', { hostname, port });
+  await assert.rejects(open('localhost', tcpPort), /not allowed by the connect policy/);
+  await assert.rejects(open('localhost', 1), /no public address/);
+  await assert.rejects(open('10.0.0.1', 5432), /not a public address/);
+  await assert.rejects(open('example.com', 443), /not allowed/); // apex isn't a subdomain
+  await assert.rejects(open('localhost', 99999), /port from 1 to 65535/);
 });
 
-test('connect: connection cap, and disposal closes them', async () => {
-  let caps;
-  const run = guest({ connect: { hosts: [`localhost:${tcpPort}`], privateNetworks: true, limits: { connections: 1 } } }, (c) => (caps = c));
-  await run(`globalThis.s = await connect('localhost:${tcpPort}')`);
-  await assert.rejects(run(`await connect('localhost:${tcpPort}')`), /already has 1 sockets open/);
-  caps.dispose();
-  await assert.rejects(run(`await s.write('x')`), /socket is closed/);
+test('connect broker: startTls refuses unread bytes, and a malformed server name', async () => {
+  const { fn: sock } = connectBroker(tcpLocal);
+  const { id } = await sock('open', { hostname: 'localhost', port: tcpPort });
+  await assert.rejects(sock('startTls', id, { servername: '' }), /expected a server hostname/);
+  await sock('write', id, Buffer.from('x'));
+  await new Promise((r) => setTimeout(r, 50)); // the echo arrives, unread
+  await assert.rejects(sock('startTls', id, { servername: 'localhost' }), /sent data before the TLS handshake/);
+  await sock('close', id);
+});
+
+test('connect broker: connection cap, and disposal closes them', async () => {
+  const { fn: sock, dispose } = connectBroker({ ...tcpLocal, limits: { connections: 1 } });
+  const { id } = await sock('open', { hostname: 'localhost', port: tcpPort });
+  await assert.rejects(sock('open', { hostname: 'localhost', port: tcpPort }), /already has 1 sockets open/);
+  dispose();
+  await assert.rejects(sock('write', id, Buffer.from('x')), /socket is closed/);
+  await assert.rejects(sock('open', { hostname: 'localhost', port: tcpPort }), /socket is closed/);
+});
+
+test('the prelude needs the web platform for connect', () => {
+  const caps = capabilities({ globals: {}, connect: tcpLocal }, new Set(), () => {});
+  const ctx = vm.createContext({});
+  ctx.__isolane_socket = () => {};
+  assert.throws(() => vm.runInContext(caps.prelude, ctx), /connect needs the web platform/);
 });
 
 // ---- globals ----
@@ -280,7 +303,8 @@ test('policy names are reserved', () => {
 test('refusals are reported as policy denials', async () => {
   denials.length = 0;
   await assert.rejects(guest({ fetch: { hosts: ['api.example.com'] } })(`await fetch('https://nope.example/x')`), /not allowed/);
-  await assert.rejects(guest({ connect: { hosts: ['db.example.com:5432'] } })(`await connect('10.0.0.1:5432')`), /not a public address/);
+  const sockets = capabilities({ globals: {}, connect: { hosts: ['db.example.com:5432'] } }, new Set(), (api, target, reason) => denials.push({ api, target, reason }));
+  await assert.rejects(Promise.resolve(sockets.entries[0].run({}, ['open', { hostname: '10.0.0.1', port: 5432 }])), /not a public address/);
   await assert.rejects(guest({ fs: { root } })(`await fs.writeFile('/x', 'y')`), /read-only/);
   assert.deepEqual(denials.map((d) => [d.api, d.target]), [
     ['fetch', 'https://nope.example/x'],

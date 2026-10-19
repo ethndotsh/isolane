@@ -70,10 +70,12 @@ pub(super) fn new_context(
         }
     }
     if config.web {
-        // The web platform's hook for the prelude to hand over the network
-        // broker: gone before guest code runs, whether or not it was used.
-        let key = v8::String::new(scope, crate::web::FETCH_HOOK).unwrap();
-        global.delete(scope, key.into());
+        // The web platform's hooks for the prelude to hand over the network
+        // brokers: gone before guest code runs, whether or not they were used.
+        for hook in [crate::web::FETCH_HOOK, crate::web::CONNECT_HOOK] {
+            let key = v8::String::new(scope, hook).unwrap();
+            global.delete(scope, key.into());
+        }
     }
     let shims = compile_shims(scope, &config.shims)?;
     Ok((v8::Global::new(scope, context), shims))
