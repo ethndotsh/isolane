@@ -1,0 +1,7 @@
+# Extra GN args for building V8 (passed as GN_ARGS by scripts/build-v8.sh;
+# part of the CI cache key, so changing them rebuilds V8 rather than reusing
+# objects built with other args).
+#
+# No debug info: much faster compiles and links. Worker crash traces show
+# offsets (as they already do in stripped release binaries), not lines.
+symbol_level=0

@@ -9,6 +9,20 @@ version = "0.0.0"
 edition = "2021"
 license = "MIT"
 
+# What ships: whole-program optimization, abort on panic (a panicking VM
+# thread kills the worker, which the supervisor sees as a crash, rather than
+# leaving a VM silently stuck), no debug info.
 [profile.release]
-lto = true
+lto = "fat"
 codegen-units = 1
+panic = "abort"
+strip = "debuginfo"
+
+# Local iteration: release-speed code, built fast
+# (`cargo build --profile fast -p isolane-worker ...`).
+[profile.fast]
+inherits = "release"
+lto = false
+codegen-units = 16
+incremental = true
+strip = false

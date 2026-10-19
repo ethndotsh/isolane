@@ -23,15 +23,19 @@ jobs:
       # The runner image also has clang 16-18; without this, bindgen takes
       # /usr/bin/clang's builtin headers, which don't match libclang 21.
       CLANG_PATH: /usr/lib/llvm-21/bin/clang
+      # Link with lld (several times faster than GNU ld on the V8 archive).
+      CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER: /usr/lib/llvm-21/bin/clang
+      CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUSTFLAGS: -C link-arg=-fuse-ld=lld
+      CARGO_INCREMENTAL: '0'
     steps:
       - uses: actions/checkout@v4
         with:
           ref: ${{ inputs.ref || github.ref }}
 
-      - name: Free disk space for the V8 build
-        run: |
-          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
-          df -h /
+      # Deleting these takes ~1.5 min; do it in the background while the
+      # toolchain installs and the sources download, and wait before building.
+      - name: Free disk space (in the background)
+        run: nohup sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL >/dev/null 2>&1 &
 
       - name: Install libclang 21, strace
         run: |
@@ -54,8 +58,16 @@ jobs:
           path: |
             target
             build/rusty_v8/third_party/rust-toolchain
-          key: v8-linux-x64-${{ hashFiles('scripts/fetch-rusty-v8.sh', 'patches/**', 'Cargo.lock') }}
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+          key: v8-linux-x64-${{ hashFiles('scripts/fetch-rusty-v8.sh', 'scripts/v8.gn', 'patches/**', 'Cargo.lock', 'Cargo.toml') }}
           restore-keys: v8-linux-x64-
+
+      - name: Wait for the disk space
+        run: |
+          while pgrep -f 'rm -rf /usr/share/dotnet' >/dev/null; do sleep 2; done
+          df -h /
 
       - name: Build worker (V8 from source, sandbox enabled)
         run: |
@@ -72,7 +84,10 @@ jobs:
           path: |
             target
             build/rusty_v8/third_party/rust-toolchain
-          key: v8-linux-x64-${{ hashFiles('scripts/fetch-rusty-v8.sh', 'patches/**', 'Cargo.lock') }}
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+          key: v8-linux-x64-${{ hashFiles('scripts/fetch-rusty-v8.sh', 'scripts/v8.gn', 'patches/**', 'Cargo.lock', 'Cargo.toml') }}
 
       - name: V8 sandbox self-check
         run: '"$RUNNER_TEMP/isolane-worker" --self-check'

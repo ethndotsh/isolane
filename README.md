@@ -167,6 +167,12 @@ npm install && npx tsc
 ISOLANE_WORKER=$PWD/target/release/isolane-worker npm test
 ```
 
+For local iteration without building V8 (macOS too): `cargo build --profile
+fast -p isolane-worker --no-default-features --features dev-prebuilt` links
+rusty_v8's prebuilt V8 (no V8 sandbox, no clock patch; run with
+`ISOLANE_DEV_INSECURE=1` and `strict: false`). An edit rebuilds in about a
+second; `--release` (fat LTO) takes ~12 s.
+
 Requirements: Linux x64 with libclang 21 (apt.llvm.org), or macOS with full
 Xcode. Linux arm64 must be cross-compiled from x64. The lockdown tests need a
 native Linux kernel; they don't work under emulation such as Rosetta. CI

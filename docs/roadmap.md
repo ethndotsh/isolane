@@ -274,7 +274,12 @@ Measured against isolated-vm (Linux x64 under Rosetta; re-measure natively):
 | Per-platform npm packages as optional dependencies; stripped binaries | planned |
 | Staleness warning when the installed worker's V8 is behind the patch pipeline | planned |
 | Dev build against prebuilt V8 (`--features dev-prebuilt`, `ISOLANE_DEV_INSECURE=1`) for local iteration | done |
-| Speed up V8 builds with sccache (as rusty_v8's CI does) | idea |
+| Build speed, round 1: `fast` Cargo profile for local work (an edit rebuilds in 1.3 s vs 12.3 s with fat-LTO `release`); `release` gets `panic = "abort"` and stripped debug info; CI links with lld, caches the Cargo registry, sets `CARGO_INCREMENTAL=0`, frees disk in the background; V8 built with `symbol_level=0` (GN args in `scripts/v8.gn`, part of the cache key) | done |
+| Measured: a V8 patch bump (15.2.124.1 → .45) is close to a full rebuild on a 2-core runner — patch releases touch widely included headers, so most objects really are stale | done |
+| Bigger lever for V8 builds: more cores. GitHub prices runners per core, so an 8- or 16-core runner costs about the same per build and finishes 4–8× sooner (needs an org on the Team plan for larger runners), or make the repo public for free 4-core runners and unlimited minutes | decide |
+| A prebuilt CI image (toolchain, libclang 21, strace) to drop the ~1 min of apt and setup per run | idea |
+| sccache for Rust dependencies once oxc and friends land (not for V8: patch bumps change shared headers, so per-object caching mostly misses) | planned |
+| Nightly-only Rust build speedups (parallel frontend `-Zthreads`, Cranelift for dev builds) if we ever move off stable | idea |
 
 ### CI cost (GitHub-hosted runners, private repo, 2026 prices)
 

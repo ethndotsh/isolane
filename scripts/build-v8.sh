@@ -40,6 +40,10 @@ if [ "$os" = linux ] && [ -z "${LIBCLANG_PATH:-}" ]; then
   fi
 fi
 
+# Extra GN args, one per line (comments allowed).
+GN_ARGS="${GN_ARGS:-} $(grep -v '^\s*#' scripts/v8.gn | tr '\n' ' ')"
+export GN_ARGS
+
 start=$(date +%s)
 if V8_FROM_SOURCE=1 cargo build --release -p isolane-worker -vv >"$log" 2>&1; then
   echo "built in $(( $(date +%s) - start ))s; log: $log"
