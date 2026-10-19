@@ -325,6 +325,13 @@ fails the call (or, for `run`/`eval` with `returns`, the run) with
 Bytes cross as bytes: `Uint8Array` arguments arrive as `Buffer`s, and
 `Buffer`s (or any typed array) in a result arrive as `Uint8Array`s.
 
+**Errors reach the guest.** When a handler throws, the guest's promise
+rejects with the error's `name`, `message`, and `code` (never its stack).
+A driver's error can carry a connection string, a host path, or part of a
+query, so catch errors inside handlers that wrap such libraries and throw
+what the tenant may see. `onPolicyDenial` reports URLs without their
+`user:password@`.
+
 ## Hooks
 
 Settable at the runtime, in `tenants(name)`, and per call; every level's

@@ -379,6 +379,12 @@ test('refusals are reported as policy denials', async () => {
     ['connect', '10.0.0.1:5432'],
     ['fs', '/x'],
   ]);
+  // A denied URL is reported without the credentials in it.
+  denials.length = 0;
+  const fetches = capabilities({ globals: {}, fetch: { hosts: ['api.example.com'] } }, new Set(), (api, target, reason) => denials.push({ api, target, reason }));
+  const meta = { url: 'https://user:secret@nope.example/x', method: 'GET', headers: [] };
+  await assert.rejects(Promise.resolve(fetches.entries[0].run({}, ['open', 1, meta])), /not allowed/);
+  assert.deepEqual(denials.map((d) => d.target), ['https://nope.example/x']);
 });
 
 // ---- binary frames ----

@@ -204,6 +204,19 @@ interface InFlight {
   sent: number;
 }
 
+/** A URL for `onPolicyDenial`, without any `user:password@` in it (the guest's credentials). */
+function redacted(url: unknown): string {
+  let u: URL;
+  try {
+    u = url instanceof URL ? new URL(url.href) : new URL(String(url ?? ''));
+  } catch {
+    return String(url ?? '').slice(0, 200).replace(/\/\/[^/@]*@/, '//');
+  }
+  u.username = '';
+  u.password = '';
+  return u.href;
+}
+
 /**
  * The guest's fetch, as three host-function operations on a fetch id the
  * guest picks:
@@ -238,13 +251,13 @@ export function fetchBroker(policy: FetchPolicy, denied: DenialReporter = () => 
     }
     const host = url.hostname.replace(/^\[|\]$/g, '');
     if (!allowPrivate && isIP(host) && !isPublicAddress(host)) {
-      denied('fetch', url.href, 'not a public address');
+      denied('fetch', redacted(url), 'not a public address');
       throw new Error(`fetch to ${url.origin} is not allowed: not a public address`);
     }
     const allowed =
       typeof policy.hosts === 'function' ? await policy.hosts(new URL(url), method) : hostAllowed(policy.hosts, host);
     if (allowed !== true) {
-      denied('fetch', url.href, 'not allowed by the fetch policy');
+      denied('fetch', redacted(url), 'not allowed by the fetch policy');
       throw new Error(`fetch to ${url.origin} is not allowed by the fetch policy`);
     }
   };
@@ -260,7 +273,7 @@ export function fetchBroker(policy: FetchPolicy, denied: DenialReporter = () => 
   ) =>
     new Promise<http.IncomingMessage>((resolve, reject) => {
       const mod = url.protocol === 'https:' ? https : http;
-      const lookup = pinnedLookup(allowPrivate, () => denied('fetch', url.href, 'not a public address'));
+      const lookup = pinnedLookup(allowPrivate, () => denied('fetch', redacted(url), 'not a public address'));
       const req = mod.request(url, { method, headers, lookup: lookup as never, agent: false, signal });
       req.on('response', resolve);
       req.on('error', reject);
@@ -304,7 +317,7 @@ export function fetchBroker(policy: FetchPolicy, denied: DenialReporter = () => 
     if (given && given.length > maxRequest) throw new TypeError(`fetch: request body larger than ${maxRequest} bytes`);
     if (inFlight.size >= MAX_OPEN_FETCHES) throw new TypeError(`fetch: more than ${MAX_OPEN_FETCHES} fetches in flight`);
     if (maxRequests !== undefined && requests >= maxRequests) {
-      denied('fetch', String((rawMeta as { url?: unknown } | null)?.url ?? ''), `used its ${maxRequests} requests`);
+      denied('fetch', redacted((rawMeta as { url?: unknown } | null)?.url), `used its ${maxRequests} requests`);
       throw new TypeError(`fetch: this isolate has used its ${maxRequests} requests (fetch.limits.requests)`);
     }
     requests++;
@@ -319,7 +332,7 @@ export function fetchBroker(policy: FetchPolicy, denied: DenialReporter = () => 
     // Request already did, so a custom "TacO" is sent as "TacO").
     let method = meta.method;
     if (!methods.has(method.toUpperCase())) {
-      denied('fetch', url.href, `method ${method} is not allowed`);
+      denied('fetch', redacted(url), `method ${method} is not allowed`);
       throw new TypeError(`fetch: method ${method} is not allowed`);
     }
     // Keyed by lowercase name (for the checks below); sent with the
