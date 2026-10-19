@@ -1,7 +1,8 @@
 // The web platform (webPlatform: true): WinterTC Minimum Common API phases 1
-// and 2, end to end through a real worker. Needs ISOLANE_WORKER.
+// to 3, end to end through a real worker. Needs ISOLANE_WORKER.
 import { test, after } from 'node:test';
 import assert from 'node:assert/strict';
+import { createServer } from 'node:http';
 import { Runtime } from '../dist/index.js';
 
 const logs = [];
@@ -26,7 +27,7 @@ test('the globals exist and are non-enumerable', async () => {
     'setTimeout', 'setInterval', 'clearTimeout', 'clearInterval', 'ReadableStream', 'WritableStream',
     'TransformStream', 'ByteLengthQueuingStrategy', 'CountQueuingStrategy', 'ReadableStreamBYOBReader',
     'Blob', 'File', 'FileReader', 'TextEncoderStream', 'TextDecoderStream', 'CompressionStream',
-    'DecompressionStream',
+    'DecompressionStream', 'Headers', 'Request', 'Response', 'FormData', 'fetch',
   ];
   const types = await run(`${JSON.stringify(names)}.map((n) => typeof globalThis[n])`);
   assert.ok(types.every((t) => t !== 'undefined'), JSON.stringify(Object.fromEntries(names.map((n, i) => [n, types[i]]))));
@@ -35,7 +36,7 @@ test('the globals exist and are non-enumerable', async () => {
 
 test('the runtime internals are unreachable', async () => {
   assert.deepEqual(
-    await run(`[typeof __bootstrap, typeof Deno, typeof core, Object.getOwnPropertyNames(globalThis).filter((n) => /bootstrap|^op_/.test(n))]`),
+    await run(`[typeof __bootstrap, typeof Deno, typeof core, Object.getOwnPropertyNames(globalThis).filter((n) => /bootstrap|^op_|__isolane/.test(n))]`),
     ['undefined', 'undefined', 'undefined', []],
   );
   // A setter planted before a lazy load can't catch the bootstrap object.
@@ -422,4 +423,205 @@ test('decompression keeps the output before trailing garbage, then errors', asyn
 
 test('Blob.text() strips one UTF-8 byte order mark', async () => {
   assert.deepEqual(await run(`Promise.all([new Blob(['\ufeffA']).text(), new Blob(['\ufeff\ufeffB']).text()])`), ['A', '\ufeffB']);
+});
+
+// ---- fetch (phase 3) ----
+
+const opened = [];
+let closedEarly = 0;
+const server = createServer((req, res) => {
+  const chunks = [];
+  req.on('data', (c) => chunks.push(c));
+  req.on('end', () => {
+    const body = Buffer.concat(chunks);
+    if (req.url === '/json') return res.writeHead(200, { 'content-type': 'application/json', 'x-a': '1' }).end('{"hi":"wörld"}');
+    if (req.url === '/echo') {
+      return res.writeHead(200, { 'content-type': 'application/json' }).end(
+        JSON.stringify({ method: req.method, headers: req.headers, body: body.toString('base64') }),
+      );
+    }
+    if (req.url === '/redir') return res.writeHead(302, { location: '/json' }).end();
+    if (req.url === '/no-content') return res.writeHead(204).end();
+    if (req.url === '/bytes') return res.end(Buffer.from([0, 1, 2, 254, 255]));
+    if (req.url === '/stream') {
+      res.write('one ');
+      setTimeout(() => res.write('two '), 30);
+      setTimeout(() => res.end('three'), 60);
+      return;
+    }
+    if (req.url === '/hang') {
+      opened.push(req.url);
+      res.write('start');
+      res.on('close', () => closedEarly++);
+      return; // never ends
+    }
+    res.writeHead(404).end('nope');
+  });
+});
+await new Promise((r) => server.listen(0, '127.0.0.1', r));
+after(() => server.close());
+const base = `http://localhost:${server.address().port}`;
+const NET = { network: { allow: ['localhost'], allowPrivateNetworks: true }, timeoutMs: 5000 };
+const fetchRun = (body, opts = {}) => run(`(async () => { ${body} })()`, { ...NET, ...opts });
+
+test('Headers, Request, Response, and FormData follow the spec', async () => {
+  assert.deepEqual(
+    await run(`(async () => {
+      const h = new Headers([['B', '2'], ['a', '1']]);
+      h.append('a', '3');
+      const req = new Request('https://example.com/x?y', { method: 'post', body: 'q', headers: h });
+      const res = new Response('{"k":1}', { status: 201, statusText: 'Made', headers: { 'content-type': 'application/json' } });
+      const fd = new FormData();
+      fd.append('f', new Blob(['data'], { type: 'text/plain' }), 'f.txt');
+      fd.append('s', 'v');
+      const json = await res.clone().json();
+      return [[...h], h.get('A'), req.method, req.url, await req.text(), res.status, res.statusText, res.ok, json,
+        await res.text(), res.bodyUsed, fd.get('s'), fd.get('f').name, [...fd.keys()],
+        Response.json({ a: 1 }).headers.get('content-type'), Response.error().type, Response.redirect('https://a.example/', 301).status];
+    })()`),
+    [
+      [['a', '1, 3'], ['b', '2']], '1, 3', 'POST', 'https://example.com/x?y', 'q', 201, 'Made', true, { k: 1 },
+      '{"k":1}', true, 'v', 'f.txt', ['f', 's'], 'application/json', 'error', 301,
+    ],
+  );
+  await assert.rejects(run(`new Response('x', { status: 99 })`), /RangeError/);
+  await assert.rejects(run(`new Request('/relative')`), /TypeError/);
+});
+
+test('fetch: text, json, bytes, headers, status', async () => {
+  assert.deepEqual(
+    await fetchRun(`
+      const r = await fetch('${base}/json');
+      const b = await (await fetch('${base}/bytes')).bytes();
+      const missing = await fetch('${base}/missing');
+      return [r.status, r.ok, r.headers.get('x-a'), r.url, (await r.json()).hi, [...b], missing.status, await missing.text()];`),
+    [200, true, '1', `${base}/json`, 'wörld', [0, 1, 2, 254, 255], 404, 'nope'],
+  );
+});
+
+test('fetch: request bodies of every kind', async () => {
+  const out = await fetchRun(`
+    const post = async (body, init = {}) => (await (await fetch('${base}/echo', { method: 'POST', body, ...init })).json());
+    const fd = new FormData(); fd.append('a', '1');
+    const stream = new ReadableStream({ start(c) { c.enqueue(new TextEncoder().encode('str')); c.enqueue(new TextEncoder().encode('eam')); c.close(); } });
+    return [
+      await post('text'),
+      await post(new Uint8Array([0, 255])),
+      await post(new Blob(['blob'], { type: 'x/y' })),
+      await post(new URLSearchParams({ q: 'v w' })),
+      await post(fd),
+      await post(stream, { duplex: 'half' }),
+    ].map((j) => [j.headers['content-type'] ?? null, atob(j.body)]);`);
+  assert.deepEqual(out[0], ['text/plain;charset=UTF-8', 'text']);
+  assert.deepEqual(out[1], [null, '\u0000\u00ff']);
+  assert.deepEqual(out[2], ['x/y', 'blob']);
+  assert.deepEqual(out[3], ['application/x-www-form-urlencoded;charset=UTF-8', 'q=v+w']);
+  assert.match(out[4][0], /^multipart\/form-data; boundary=/);
+  assert.match(out[4][1], /name="a"\r\n\r\n1/);
+  assert.deepEqual(out[5], [null, 'stream']);
+});
+
+test('fetch: the response body streams', async () => {
+  assert.deepEqual(
+    await fetchRun(`
+      const r = await fetch('${base}/stream');
+      const reader = r.body.getReader();
+      const parts = [];
+      for (;;) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        parts.push(new TextDecoder().decode(value));
+      }
+      return [parts.join(''), parts.length > 1, r.bodyUsed];`),
+    ['one two three', true, true],
+  );
+  // Byte stream: BYOB reads work.
+  assert.deepEqual(
+    await fetchRun(`
+      const r = await fetch('${base}/bytes');
+      const reader = r.body.getReader({ mode: 'byob' });
+      const { value } = await reader.read(new Uint8Array(16));
+      return [...value];`),
+    [0, 1, 2, 254, 255],
+  );
+  assert.deepEqual(await fetchRun(`const r = await fetch('${base}/no-content'); return [r.status, r.body];`), [204, null]);
+});
+
+test('fetch: redirect modes', async () => {
+  assert.deepEqual(
+    await fetchRun(`
+      const follow = await fetch('${base}/redir');
+      const manual = await fetch('${base}/redir', { redirect: 'manual' });
+      const error = await fetch('${base}/redir', { redirect: 'error' }).catch((e) => e);
+      return [follow.status, follow.redirected, follow.url.endsWith('/json'), manual.status, manual.headers.get('location'),
+        error instanceof TypeError];`),
+    [200, true, true, 302, '/json', true],
+  );
+});
+
+test('fetch: aborting cancels the request at the broker', async () => {
+  const before = closedEarly;
+  assert.deepEqual(
+    await fetchRun(`
+      const early = new AbortController();
+      early.abort();
+      const pre = await fetch('${base}/json', { signal: early.signal }).catch((e) => e.name);
+      const c = new AbortController();
+      const r = await fetch('${base}/hang', { signal: c.signal });
+      const reader = r.body.getReader();
+      await reader.read();
+      c.abort();
+      const mid = await reader.read().catch((e) => e.name);
+      return [pre, mid];`),
+    ['AbortError', 'AbortError'],
+  );
+  // The broker's connection to the server is gone.
+  for (let i = 0; i < 50 && closedEarly === before; i++) await new Promise((r) => setTimeout(r, 20));
+  assert.equal(closedEarly, before + 1);
+});
+
+test('fetch: the network policy still decides, and failures are TypeErrors', async () => {
+  assert.deepEqual(
+    await fetchRun(`
+      const denied = await fetch('https://not-allowed.example/').catch((e) => [e instanceof TypeError, e.message]);
+      const scheme = await fetch('ftp://x.example/').catch((e) => e instanceof TypeError);
+      const port = await fetch('http://localhost:22/').catch((e) => [e instanceof TypeError, e.message]);
+      return [denied, scheme, port];`),
+    [
+      [true, 'fetch to https://not-allowed.example is not allowed by the network policy'],
+      true,
+      [true, 'Fetch failed: Requests to port 22 are blocked'],
+    ],
+  );
+  // No network policy: fetch exists, and rejects.
+  assert.deepEqual(
+    await run(`fetch('${base}/json').catch((e) => [e instanceof TypeError, e.message])`),
+    [true, 'fetch is not available: this isolate has no network policy'],
+  );
+  // A private address without allowPrivateNetworks.
+  await assert.rejects(
+    run(`fetch('${base}/json')`, { network: { allow: ['localhost'] } }),
+    /no public address/,
+  );
+});
+
+test('fetch: data: and blob: URLs', async () => {
+  assert.deepEqual(
+    await run(`(async () => {
+      const data = await fetch('data:text/plain;base64,aGk=');
+      const pct = await fetch('data:,a%20b');
+      const url = URL.createObjectURL(new Blob(['from a blob'], { type: 'x/y' }));
+      const blob = await fetch(url);
+      return [await data.text(), data.headers.get('content-type'), await pct.text(), pct.headers.get('content-type'),
+        await blob.text(), blob.headers.get('content-type')];
+    })()`),
+    ['hi', 'text/plain', 'a b', 'text/plain;charset=US-ASCII', 'from a blob', 'x/y'],
+  );
+});
+
+test('without webPlatform, a network policy still gives the minimal fetch', async () => {
+  assert.deepEqual(
+    await runtime.run(`fetch('${base}/json').then(async (r) => [typeof Request, r.status, await r.json()])`, { tenant: 'web', ...NET }),
+    ['undefined', 200, { hi: 'wörld' }],
+  );
 });

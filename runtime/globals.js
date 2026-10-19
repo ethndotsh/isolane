@@ -1,4 +1,4 @@
-// The web platform globals (WinterTC Minimum Common API, phases 1–2), defined
+// The web platform globals (WinterTC Minimum Common API, phases 1–3), defined
 // non-enumerable like Deno's 98_global_scope_shared.js. Most are lazy: the
 // first access loads the vendored script behind them, so a VM pays only
 // for what its code uses. Called once per context by the worker:
@@ -61,6 +61,11 @@
   const FILE_JS = "ext:deno_web/09_file.js";
   const FILE_READER_JS = "ext:deno_web/10_filereader.js";
   const COMPRESSION_JS = "ext:deno_web/14_compression.js";
+  const HEADERS_JS = "ext:deno_fetch/20_headers.js";
+  const FORMDATA_JS = "ext:deno_fetch/21_formdata.js";
+  const REQUEST_JS = "ext:deno_fetch/23_request.js";
+  const RESPONSE_JS = "ext:deno_fetch/23_response.js";
+  const FETCH_JS = "ext:isolane/fetch.js";
 
   // The global object is an EventTarget (reportError dispatches "error" on
   // it). Set up the first time anything event-related is used.
@@ -157,6 +162,30 @@
   lazy("ProgressEvent", () => eventModule().ProgressEvent);
   lazy("CompressionStream", from(COMPRESSION_JS, "CompressionStream"));
   lazy("DecompressionStream", from(COMPRESSION_JS, "DecompressionStream"));
+  // Fetch. The network itself is the VM's network policy: the prelude
+  // (ts/capabilities.ts) hands its broker's host function to this hook,
+  // which the worker deletes before guest code runs. Without a policy,
+  // fetch() rejects with a TypeError.
+  let fetchTransport = null;
+  ObjectDefineProperty(g, "__isolane_web_fetch", {
+    __proto__: null,
+    configurable: true,
+    enumerable: false,
+    writable: false,
+    value(transport) {
+      if (fetchTransport === null) fetchTransport = transport;
+    },
+  });
+  lazy("Headers", from(HEADERS_JS, "Headers"));
+  lazy("FormData", from(FORMDATA_JS, "FormData"));
+  lazy("Request", from(REQUEST_JS, "Request"));
+  lazy("Response", from(RESPONSE_JS, "Response"));
+  lazy("fetch", () => {
+    const module = load(FETCH_JS);
+    if (fetchTransport !== null) module.setTransport(fetchTransport);
+    return module.fetch;
+  });
+
   lazy("structuredClone", from("ext:deno_web/02_structured_clone.js", "structuredClone"));
   let perf;
   const performanceModule = () => {

@@ -682,6 +682,12 @@ fn new_context(isolate: &mut v8::Isolate, config: &VmConfig) -> Result<v8::Globa
             return Err(format!("vm setup failed: {msg}"));
         }
     }
+    if config.web_platform {
+        // The web platform's hook for the prelude to hand over the network
+        // broker: gone before guest code runs, whether or not it was used.
+        let key = v8::String::new(scope, crate::web::FETCH_HOOK).unwrap();
+        global.delete(scope, key.into());
+    }
     Ok(v8::Global::new(scope, context))
 }
 

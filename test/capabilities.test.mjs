@@ -11,6 +11,7 @@ import { join } from 'node:path';
 import vm from 'node:vm';
 import { splitBytes } from '../dist/binary.js';
 import { capabilities, isPublicAddress } from '../dist/capabilities.js';
+import { parseWorkerMessage } from '../dist/worker.js';
 
 /**
  * How a value crosses the protocol: bytes as bytes (top-level byte
@@ -270,4 +271,39 @@ test('policy names are reserved', () => {
   assert.throws(() => capabilities({ network: { allow: [] } }, { fetch: () => 1 }), /reserved/);
   assert.throws(() => capabilities({ fs: { root } }, { fs: () => 1 }), /reserved/);
   assert.throws(() => capabilities({ network: {} }, {}), /network.allow/);
+});
+
+// ---- binary frames ----
+
+test('splitBytes finds bytes wherever JSON goes, with their paths', () => {
+  const buf = Buffer.from([1, 2]);
+  const { json, parts } = splitBytes({ a: buf, b: [1, new Uint8Array([3]), { c: new ArrayBuffer(2) }], d: 'x', e: new Date(0) });
+  assert.deepEqual(JSON.parse(json), { a: null, b: [1, null, { c: null }], d: 'x', e: '1970-01-01T00:00:00.000Z' });
+  assert.deepEqual(parts.map((p) => [p.path, [...p.bytes]]), [[['a'], [1, 2]], [['b', 1], [3]], [['b', 2, 'c'], [0, 0]]]);
+  assert.deepEqual(splitBytes(buf).parts[0].path, []);
+  assert.equal(splitBytes(undefined).json, undefined);
+  const view = new Uint16Array([1, 2]).subarray(1);
+  assert.deepEqual([...splitBytes(view).parts[0].bytes], [2, 0]);
+});
+
+test('byte attachments from a worker are parsed strictly', () => {
+  const call = (args, bin) => ({ t: 'hostCall', vm: 1, call: 1, name: 'f', args, bin });
+  const ok = parseWorkerMessage(call([null, 'x', null], [[0, 2], [2, 1]]), Buffer.from([9, 8, 7]));
+  assert.deepEqual(ok.args.map((a) => (Buffer.isBuffer(a) ? [...a] : a)), [[9, 8], 'x', [7]]);
+  const bad = [
+    [call([null], [[0, 2]]), Buffer.from([1])], // fewer bytes than claimed
+    [call([null], [[0, 1]]), Buffer.from([1, 2])], // unclaimed bytes
+    [call([null], [[1, 1]]), Buffer.from([1])], // index past the arguments
+    [call([null, null], [[0, 1], [0, 1]]), Buffer.from([1, 2])], // an index twice
+    [call(['x'], [[0, 1]]), Buffer.from([1])], // placeholder isn't null
+    [call([null], [[-1, 1]]), Buffer.from([1])],
+    [call([null], [['0', 1]]), Buffer.from([1])],
+    [call([null], [[0, 1.5]]), Buffer.from([1])],
+    [call([null], 'nope'), Buffer.from([1])],
+    [call([null], []), Buffer.alloc(0)],
+    [{ t: 'result', req: 1, ok: true, value: 1 }, Buffer.from([1])], // bytes on a message that takes none
+    [{ t: 'result', req: 1, ok: true, value: 1, bin: [[0, 1]] }, undefined], // bin in a plain JSON frame
+    [call([null], [[0, 1]]), undefined],
+  ];
+  for (const [msg, bytes] of bad) assert.equal(parseWorkerMessage(msg, bytes), null, JSON.stringify(msg));
 });

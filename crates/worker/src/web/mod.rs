@@ -1,5 +1,5 @@
 //! The web platform (WinterTC's Minimum Common Web Platform API, phases 1
-//! and 2) for VMs created with `webPlatform`. The APIs themselves are Deno's
+//! to 3) for VMs created with `webPlatform`. The APIs themselves are Deno's
 //! web-platform JS, vendored in runtime/deno/ (MIT). In place of deno_core,
 //! this module provides the native layer that JS calls: Deno's ops (same
 //! names and calling conventions) and a few helpers for runtime/core.js.
@@ -21,6 +21,10 @@ macro_rules! runtime_js {
         include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../runtime/", $path))
     };
 }
+
+/// A global the web platform defines for the VM's prelude (the network
+/// broker's handover, see runtime/globals.js); deleted after the prelude.
+pub const FETCH_HOOK: &str = "__isolane_web_fetch";
 
 const PRIMORDIALS: &str = runtime_js!("deno/libs/core/00_primordials.js");
 const CORE: &str = runtime_js!("core.js");
@@ -45,6 +49,13 @@ const EXT: &[(&str, &str)] = &[
     ("ext:deno_web/10_filereader.js", runtime_js!("deno/ext/web/10_filereader.js")),
     ("ext:deno_web/14_compression.js", runtime_js!("deno/ext/web/14_compression.js")),
     ("ext:deno_web/15_performance.js", runtime_js!("deno/ext/web/15_performance.js")),
+    ("ext:deno_fetch/20_headers.js", runtime_js!("deno/ext/fetch/20_headers.js")),
+    ("ext:deno_fetch/21_formdata.js", runtime_js!("deno/ext/fetch/21_formdata.js")),
+    ("ext:deno_fetch/22_body.js", runtime_js!("deno/ext/fetch/22_body.js")),
+    ("ext:deno_fetch/23_request.js", runtime_js!("deno/ext/fetch/23_request.js")),
+    ("ext:deno_fetch/23_response.js", runtime_js!("deno/ext/fetch/23_response.js")),
+    // isolane's fetch() over the network broker (in place of 26_fetch.js).
+    ("ext:isolane/fetch.js", runtime_js!("fetch.js")),
 ];
 
 // ---- helpers shared by the ops ----

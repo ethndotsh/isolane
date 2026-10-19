@@ -27,6 +27,11 @@ FILES=(
   ext/web/10_filereader.js
   ext/web/14_compression.js
   ext/web/15_performance.js
+  ext/fetch/20_headers.js
+  ext/fetch/21_formdata.js
+  ext/fetch/22_body.js
+  ext/fetch/23_request.js
+  ext/fetch/23_response.js
 )
 tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT
