@@ -47,6 +47,29 @@ test('the runtime internals are unreachable', async () => {
   );
 });
 
+test('isolates from the snapshot share nothing per isolate', async () => {
+  // Randomness: fresh per isolate, reproducible with a seed.
+  const draw = '[Math.random(), crypto.randomUUID()]';
+  const [a, b] = [await run(draw), await run(draw)];
+  assert.notEqual(a[0], b[0]);
+  assert.notEqual(a[1], b[1]);
+  assert.deepEqual(await run(draw, { random: { seed: 9 } }), await run(draw, { random: { seed: 9 } }));
+  // The time origin is each isolate's start, not the snapshot's.
+  const first = await run('performance.timeOrigin');
+  await new Promise((r) => setTimeout(r, 30));
+  assert.ok((await run('performance.timeOrigin')) - first >= 20);
+  // State set in one isolate doesn't reach the next: globals, base URL, limits.
+  await run('globalThis.leak = 1; URL.leak = 2; location.href', { web: { baseUrl: 'https://one.example/' } });
+  assert.deepEqual(await run('[typeof leak, typeof URL.leak, typeof location]'), ['undefined', 'undefined', 'undefined']);
+  assert.equal(await run('new Request("/x").url', { web: { baseUrl: 'https://two.example/' } }), 'https://two.example/x');
+  assert.equal(await run('let n = 0; try { for (;;) { setTimeout(() => {}, 1e6); n++ } } catch { n }', { limits: { timers: 3 } }), 3);
+  // Every global is a plain value from the start (not an accessor).
+  assert.deepEqual(
+    await run('["URL", "fetch", "ReadableStream", "Response"].map((n) => "value" in Object.getOwnPropertyDescriptor(globalThis, n))'),
+    [true, true, true, true],
+  );
+});
+
 test('works with code generation off', async () => {
   assert.equal(await run('new URL("https://x.y/z").pathname + typeof eval("1")', { eval: true }), '/znumber');
   assert.equal(await run('new URL("https://x.y/z").pathname'), '/z');

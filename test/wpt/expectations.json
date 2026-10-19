@@ -77,10 +77,6 @@
       "category": "environment",
       "reason": "Uses WPT's proxy for a fake host (bad-port.wpt), which this harness doesn't run; the fetch policy also refuses that host."
     },
-    "lazy-globals": {
-      "category": "bug",
-      "reason": "Web platform globals are installed as lazy getters (so unused APIs cost nothing), but WebIDL wants data properties. Fixed when the startup snapshot makes eager installation free (roadmap: startup snapshot)."
-    },
     "message-channel": {
       "category": "bug",
       "reason": "No MessageChannel/MessagePort (or structuredClone transfer), so tests that use one to detach buffers fail (roadmap: MessageChannel and transfer)."
@@ -278,75 +274,75 @@
           "status": "FAIL",
           "why": "no-shared-memory"
         },
-        "encodeInto() into SharedArrayBuffer with \ud834\udf06 and destination length 4, offset 0, filler 0": {
+        "encodeInto() into SharedArrayBuffer with 𝌆 and destination length 4, offset 0, filler 0": {
           "status": "FAIL",
           "why": "no-shared-memory"
         },
-        "encodeInto() into SharedArrayBuffer with \ud834\udf06 and destination length 4, offset 4, filler 0": {
+        "encodeInto() into SharedArrayBuffer with 𝌆 and destination length 4, offset 4, filler 0": {
           "status": "FAIL",
           "why": "no-shared-memory"
         },
-        "encodeInto() into SharedArrayBuffer with \ud834\udf06 and destination length 4, offset 0, filler 128": {
+        "encodeInto() into SharedArrayBuffer with 𝌆 and destination length 4, offset 0, filler 128": {
           "status": "FAIL",
           "why": "no-shared-memory"
         },
-        "encodeInto() into SharedArrayBuffer with \ud834\udf06 and destination length 4, offset 4, filler 128": {
+        "encodeInto() into SharedArrayBuffer with 𝌆 and destination length 4, offset 4, filler 128": {
           "status": "FAIL",
           "why": "no-shared-memory"
         },
-        "encodeInto() into SharedArrayBuffer with \ud834\udf06 and destination length 4, offset 0, filler random": {
+        "encodeInto() into SharedArrayBuffer with 𝌆 and destination length 4, offset 0, filler random": {
           "status": "FAIL",
           "why": "no-shared-memory"
         },
-        "encodeInto() into SharedArrayBuffer with \ud834\udf06 and destination length 4, offset 4, filler random": {
+        "encodeInto() into SharedArrayBuffer with 𝌆 and destination length 4, offset 4, filler random": {
           "status": "FAIL",
           "why": "no-shared-memory"
         },
-        "encodeInto() into SharedArrayBuffer with \ud834\udf06A and destination length 3, offset 0, filler 0": {
+        "encodeInto() into SharedArrayBuffer with 𝌆A and destination length 3, offset 0, filler 0": {
           "status": "FAIL",
           "why": "no-shared-memory"
         },
-        "encodeInto() into SharedArrayBuffer with \ud834\udf06A and destination length 3, offset 4, filler 0": {
+        "encodeInto() into SharedArrayBuffer with 𝌆A and destination length 3, offset 4, filler 0": {
           "status": "FAIL",
           "why": "no-shared-memory"
         },
-        "encodeInto() into SharedArrayBuffer with \ud834\udf06A and destination length 3, offset 0, filler 128": {
+        "encodeInto() into SharedArrayBuffer with 𝌆A and destination length 3, offset 0, filler 128": {
           "status": "FAIL",
           "why": "no-shared-memory"
         },
-        "encodeInto() into SharedArrayBuffer with \ud834\udf06A and destination length 3, offset 4, filler 128": {
+        "encodeInto() into SharedArrayBuffer with 𝌆A and destination length 3, offset 4, filler 128": {
           "status": "FAIL",
           "why": "no-shared-memory"
         },
-        "encodeInto() into SharedArrayBuffer with \ud834\udf06A and destination length 3, offset 0, filler random": {
+        "encodeInto() into SharedArrayBuffer with 𝌆A and destination length 3, offset 0, filler random": {
           "status": "FAIL",
           "why": "no-shared-memory"
         },
-        "encodeInto() into SharedArrayBuffer with \ud834\udf06A and destination length 3, offset 4, filler random": {
+        "encodeInto() into SharedArrayBuffer with 𝌆A and destination length 3, offset 4, filler random": {
           "status": "FAIL",
           "why": "no-shared-memory"
         },
-        "encodeInto() into SharedArrayBuffer with U+d834AU+df06A\u00a5Hi and destination length 10, offset 0, filler 0": {
+        "encodeInto() into SharedArrayBuffer with U+d834AU+df06A¥Hi and destination length 10, offset 0, filler 0": {
           "status": "FAIL",
           "why": "no-shared-memory"
         },
-        "encodeInto() into SharedArrayBuffer with U+d834AU+df06A\u00a5Hi and destination length 10, offset 4, filler 0": {
+        "encodeInto() into SharedArrayBuffer with U+d834AU+df06A¥Hi and destination length 10, offset 4, filler 0": {
           "status": "FAIL",
           "why": "no-shared-memory"
         },
-        "encodeInto() into SharedArrayBuffer with U+d834AU+df06A\u00a5Hi and destination length 10, offset 0, filler 128": {
+        "encodeInto() into SharedArrayBuffer with U+d834AU+df06A¥Hi and destination length 10, offset 0, filler 128": {
           "status": "FAIL",
           "why": "no-shared-memory"
         },
-        "encodeInto() into SharedArrayBuffer with U+d834AU+df06A\u00a5Hi and destination length 10, offset 4, filler 128": {
+        "encodeInto() into SharedArrayBuffer with U+d834AU+df06A¥Hi and destination length 10, offset 4, filler 128": {
           "status": "FAIL",
           "why": "no-shared-memory"
         },
-        "encodeInto() into SharedArrayBuffer with U+d834AU+df06A\u00a5Hi and destination length 10, offset 0, filler random": {
+        "encodeInto() into SharedArrayBuffer with U+d834AU+df06A¥Hi and destination length 10, offset 0, filler random": {
           "status": "FAIL",
           "why": "no-shared-memory"
         },
-        "encodeInto() into SharedArrayBuffer with U+d834AU+df06A\u00a5Hi and destination length 10, offset 4, filler random": {
+        "encodeInto() into SharedArrayBuffer with U+d834AU+df06A¥Hi and destination length 10, offset 4, filler random": {
           "status": "FAIL",
           "why": "no-shared-memory"
         },
@@ -374,27 +370,27 @@
           "status": "FAIL",
           "why": "no-shared-memory"
         },
-        "encodeInto() into SharedArrayBuffer with \u00a5\u00a5 and destination length 4, offset 0, filler 0": {
+        "encodeInto() into SharedArrayBuffer with ¥¥ and destination length 4, offset 0, filler 0": {
           "status": "FAIL",
           "why": "no-shared-memory"
         },
-        "encodeInto() into SharedArrayBuffer with \u00a5\u00a5 and destination length 4, offset 4, filler 0": {
+        "encodeInto() into SharedArrayBuffer with ¥¥ and destination length 4, offset 4, filler 0": {
           "status": "FAIL",
           "why": "no-shared-memory"
         },
-        "encodeInto() into SharedArrayBuffer with \u00a5\u00a5 and destination length 4, offset 0, filler 128": {
+        "encodeInto() into SharedArrayBuffer with ¥¥ and destination length 4, offset 0, filler 128": {
           "status": "FAIL",
           "why": "no-shared-memory"
         },
-        "encodeInto() into SharedArrayBuffer with \u00a5\u00a5 and destination length 4, offset 4, filler 128": {
+        "encodeInto() into SharedArrayBuffer with ¥¥ and destination length 4, offset 4, filler 128": {
           "status": "FAIL",
           "why": "no-shared-memory"
         },
-        "encodeInto() into SharedArrayBuffer with \u00a5\u00a5 and destination length 4, offset 0, filler random": {
+        "encodeInto() into SharedArrayBuffer with ¥¥ and destination length 4, offset 0, filler random": {
           "status": "FAIL",
           "why": "no-shared-memory"
         },
-        "encodeInto() into SharedArrayBuffer with \u00a5\u00a5 and destination length 4, offset 4, filler random": {
+        "encodeInto() into SharedArrayBuffer with ¥¥ and destination length 4, offset 4, filler random": {
           "status": "FAIL",
           "why": "no-shared-memory"
         },
@@ -858,7 +854,7 @@
     "fetch/api/headers/headers-no-cors.any.js": {
       "why": "cors-and-origin",
       "subtests": {
-        "Loading data\u2026": "FAIL",
+        "Loading data…": "FAIL",
         "\"no-cors\" Headers object cannot have accept set to sssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssss, , sssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssss": "FAIL",
         "\"no-cors\" Headers object cannot have accept-language set to sssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssss, , sssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssss": "FAIL",
         "\"no-cors\" Headers object cannot have content-language set to sssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssss, , sssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssss": "FAIL",
@@ -1611,12 +1607,6 @@
         "readable.cancel() and a parallel writable.close() should reject if a transformer.cancel() calls controller.error()": "FAIL"
       }
     },
-    "url/idlharness.any.js": {
-      "why": "lazy-globals",
-      "subtests": {
-        "URL interface: existence and properties of interface object": "FAIL"
-      }
-    },
     "url/url-constructor.any.js?exclude=(file|javascript|mailto)": {
       "why": "url-crate",
       "subtests": {
@@ -1729,7 +1719,7 @@
         "URL: Setting <https://example.com/>.hostname = 'xn--'": "FAIL",
         "URL: Setting <https://domain.com:3000>.port = '\n\n\t\t'": "FAIL",
         "URL: Setting <foo:///some/path>.pathname = '' Non-special URLs with an empty host can have their paths erased": "FAIL",
-        "URL: Setting <a:/>.pathname = '\u0000\u0001\t\n\r\u001f !\"#$%&'()*+,-./09:;<=>?@AZ[\\]^_`az{|}~\u007f\u0080\u0081\u00c9\u00e9' UTF-8 percent encoding with the default encode set. Tabs and newlines are removed.": "FAIL",
+        "URL: Setting <a:/>.pathname = '\u0000\u0001\t\n\r\u001f !\"#$%&'()*+,-./09:;<=>?@AZ[\\]^_`az{|}~Éé' UTF-8 percent encoding with the default encode set. Tabs and newlines are removed.": "FAIL",
         "URL: Setting <non-spec:/>.pathname = '/.//p' Serialize /. in path": "FAIL",
         "URL: Setting <non-spec:/>.pathname = '/..//p'": "FAIL",
         "URL: Setting <non-spec:/>.pathname = '//p'": "FAIL",
