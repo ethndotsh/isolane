@@ -6,7 +6,7 @@
 // end to end in web.test.mjs.
 import { test, after } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdirSync, mkdtempSync, readFileSync, symlinkSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { createServer } from 'node:http';
 import { createServer as createTcpServer } from 'node:net';
 import { tmpdir } from 'node:os';
@@ -340,6 +340,24 @@ test('fs: writes, directories, removal, and size limits', async () => {
   await assert.rejects(run(`await fs.rm('/out')`), /is a directory/);
   await run(`await fs.rm('/out', { recursive: true })`);
   assert.equal(await run(`return fs.exists('/out')`), false);
+});
+
+test('fs: totals per isolate, and operations in flight at once', async () => {
+  const run = guest({ fs: { root, write: true, limits: { writtenBytes: 10, operations: 4 } } });
+  // Bytes written over the isolate's life, across files.
+  await assert.rejects(
+    run(`await fs.mkdir('/quota'); await fs.writeFile('/quota/a', 'x'.repeat(6)); await fs.writeFile('/quota/b', 'x'.repeat(6));`),
+    /written its 10 bytes \(fs.limits.writtenBytes\)/,
+  );
+  assert.equal(readFileSync(join(root, 'quota/a'), 'utf8'), 'xxxxxx');
+  // At most 4 at once; later ones work again.
+  assert.deepEqual(
+    await run(`const all = await Promise.allSettled(Array.from({ length: 50 }, () => fs.readFile('/hello.txt')));
+      const refused = all.filter((r) => r.status === 'rejected');
+      return [all.length - refused.length, refused.every((r) => /fs.limits.operations/.test(r.reason.message)), (await fs.readFile('/hello.txt', 'utf8'))];`),
+    [4, true, 'héllo'],
+  );
+  rmSync(join(root, 'quota'), { recursive: true });
 });
 
 test('policy names are reserved', () => {

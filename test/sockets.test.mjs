@@ -277,6 +277,36 @@ test('the connection limit', async () => {
   assert.equal(out, 'connect: this isolate already has 1 sockets open (connect.limits.connections)');
 });
 
+test('a connection the server closed stops counting once its data is read', async () => {
+  const hangUp = await listen(createTcpServer((sock) => sock.end()));
+  const sayAndHangUp = await listen(createTcpServer((sock) => sock.end('bye')));
+  const out = await run(
+    `const settle = () => new Promise((r) => setTimeout(r, 100));
+     // Closed with nothing to read: forgotten without the guest doing anything.
+     const a = connect('localhost:${hangUp}');
+     await a.opened;
+     await settle();
+     const b = connect('localhost:${sayAndHangUp}');
+     const opened = await b.opened.then(() => 'opened', (e) => e.message);
+     // Closed with data unread: still counts, until it's read.
+     await settle();
+     const blocked = await connect('localhost:${hangUp}').opened.then(() => 'opened', (e) => e.message);
+     const text = await new Response(b.readable).text();
+     const after = await connect('localhost:${hangUp}').opened.then(() => 'opened', (e) => e.message);
+     // The forgotten socket reads as ended.
+     const first = await a.readable.getReader().read();
+     return { opened, blocked, text, after, firstDone: first.done };`,
+    { hosts: [`localhost:${hangUp}`, `localhost:${sayAndHangUp}`], privateNetworks: true, limits: { connections: 1 } },
+  );
+  assert.deepEqual(out, {
+    opened: 'opened',
+    blocked: 'connect: this isolate already has 1 sockets open (connect.limits.connections)',
+    text: 'bye',
+    after: 'opened',
+    firstDone: true,
+  });
+});
+
 test('a closed isolate closes its sockets', async () => {
   let closed;
   const seen = new Promise((r) => (closed = r));

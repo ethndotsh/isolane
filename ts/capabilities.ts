@@ -568,6 +568,8 @@ interface GuestSocket {
   buffered: number;
   ended: boolean;
   error?: Error;
+  /** The connection is gone; the entry stays only until the guest reads what's left. */
+  closed?: boolean;
   wake?: () => void;
   /** What the guest gets back from open and startTls. */
   remoteAddress: string;
@@ -648,6 +650,10 @@ export function connectBroker(policy: ConnectPolicy, denied: DenialReporter = ()
     });
     socket.on('close', () => {
       g.ended = true;
+      g.closed = true;
+      // Nothing left for the guest to read: forget it now, so a closed
+      // socket stops counting against connect.limits.connections.
+      if (!g.chunks.length && !g.error && !g.wake) sockets.delete(id);
       wake();
     });
     socket.setTimeout(idleTimeoutMs, () => socket.destroy(new Error('idle timeout')));
@@ -696,6 +702,8 @@ export function connectBroker(policy: ConnectPolicy, denied: DenialReporter = ()
   };
 
   const read = async (id: unknown): Promise<Buffer | null> => {
+    // A socket forgotten when its connection closed reads as ended.
+    if (typeof id === 'number' && id > 0 && id < nextId && !sockets.has(id)) return null;
     const g = get(id);
     if (g.wake) throw new Error('socket.read: another read is already waiting');
     while (g.chunks.length === 0 && !g.ended && !g.error) {
@@ -708,6 +716,8 @@ export function connectBroker(policy: ConnectPolicy, denied: DenialReporter = ()
       g.socket.resume();
       return data;
     }
+    // Everything's read: a closed connection's entry goes.
+    if (g.closed) sockets.delete(id as number);
     if (g.error) throw new Error(`socket error: ${g.error.message}`);
     return null; // end of stream
   };
@@ -749,8 +759,10 @@ export function connectBroker(policy: ConnectPolicy, denied: DenialReporter = ()
     if (g.error || g.ended) throw new Error('startTls: the socket is closed');
     // Bytes that arrived before the handshake and weren't read would be
     // taken as coming over TLS: refuse, as STARTTLS clients must (a
-    // man-in-the-middle can inject them).
-    if (g.chunks.length) throw new Error('startTls: the server sent data before the TLS handshake');
+    // man-in-the-middle can inject them). That's the broker's queue and
+    // Node's own buffer; bytes still in the kernel are read by the TLS
+    // layer as handshake records, so they fail the handshake instead.
+    if (g.chunks.length || g.socket.readableLength > 0) throw new Error('startTls: the server sent data before the TLS handshake');
     release(id as number, g);
     upgrading++;
     try {
@@ -803,6 +815,10 @@ export interface FsPolicy {
   limits?: {
     /** Largest file the guest may read or write. Default 10 MiB. */
     fileBytes?: number;
+    /** Bytes the isolate may write in all, over its life. Default 100 MiB. */
+    writtenBytes?: number;
+    /** Operations in flight at once (each holds a file handle). Default 16. */
+    operations?: number;
   };
 }
 
@@ -836,6 +852,10 @@ function fsFailure(op: string, path: string, err: unknown): FsError {
 export function fsBroker(policy: FsPolicy, denied: DenialReporter = () => {}): HostFunction {
   if (!policy || typeof policy.root !== 'string') throw new TypeError('isolane: fs.root must be a directory path');
   const maxBytes = policy.limits?.fileBytes ?? 10 * MiB;
+  const maxWritten = policy.limits?.writtenBytes ?? 100 * MiB;
+  const maxOperations = policy.limits?.operations ?? 16;
+  let written = 0;
+  let running = 0;
   let rootReal: Promise<string> | undefined;
   const root = () => (rootReal ??= realpath(policy.root));
   const inside = (r: string, p: string) => p === r || p.startsWith(r + sep);
@@ -895,6 +915,10 @@ export function fsBroker(policy: FsPolicy, denied: DenialReporter = () => {}): H
       if (!(data instanceof Uint8Array)) throw new FsError('fs.writeFile: malformed data', 'EINVAL');
       const bytes = data;
       if (bytes.length > maxBytes) throw new FsError(`fs.writeFile ${JSON.stringify(path)}: larger than ${maxBytes} bytes (fs.limits.fileBytes)`, 'EFBIG');
+      if (written + bytes.length > maxWritten) {
+        throw new FsError(`fs.writeFile ${JSON.stringify(path)}: this isolate has written its ${maxWritten} bytes (fs.limits.writtenBytes)`, 'EDQUOT');
+      }
+      written += bytes.length;
       const flags = fsConstants.O_WRONLY | fsConstants.O_CREAT | fsConstants.O_TRUNC | fsConstants.O_NOFOLLOW;
       const fh = await open(await resolveEntry(path), flags, 0o644);
       try {
@@ -941,10 +965,16 @@ export function fsBroker(policy: FsPolicy, denied: DenialReporter = () => {}): H
       denied('fs', path, `fs.${op}: the filesystem is read-only`);
       throw new FsError(`fs.${op}: the filesystem is read-only`, 'EROFS');
     }
+    if (running >= maxOperations) {
+      throw new FsError(`fs.${op}: ${maxOperations} operations are already running (fs.limits.operations)`, 'EMFILE');
+    }
+    running++;
     try {
       return await ops[op](path, arg);
     } catch (err) {
       throw fsFailure(op, path, err);
+    } finally {
+      running--;
     }
   };
 }

@@ -399,7 +399,7 @@ export function validateConfig(layer: unknown, where: string, level: Level): Iso
     if (!Array.isArray(m) || !m.every((x) => typeof x === 'string')) throw invalidConfig(at('fetch.methods'), 'must be a list of method names');
   }
   checkPolicy(at('connect'), c.connect, ['hosts', 'privateNetworks', 'ca', 'limits'], ['connections', 'connectMs', 'idleMs']);
-  checkPolicy(at('fs'), c.fs, ['root', 'write', 'limits'], ['fileBytes']);
+  checkPolicy(at('fs'), c.fs, ['root', 'write', 'limits'], ['fileBytes', 'writtenBytes', 'operations']);
   if (c.fs) {
     const fs = c.fs as FsPolicy;
     if (typeof fs.root !== 'string' || fs.root === '') throw invalidConfig(at('fs.root'), 'must be a directory path');

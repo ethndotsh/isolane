@@ -181,7 +181,8 @@ against `ca` (PEM text, or a list) for a private CA such as a cloud
 database's. `startTls()` checks it against the hostname you connected to,
 or `expectedServerHostname`, and refuses to upgrade if the server sent bytes
 the guest hasn't read (they could have been injected before the
-handshake). The same address rules as `fetch` apply, to every connection.
+handshake); bytes still in transit when the upgrade starts are read as TLS
+records, so they fail the handshake instead. The same address rules as `fetch` apply, to every connection.
 
 Libraries written for Workers' `cloudflare:sockets` work: the tests run
 postgres.js's Workers build against Postgres, bundled with `cloudflare:sockets`
@@ -190,13 +191,18 @@ aliased to the global `connect` (guest code can't import modules yet).
 ### `fs`
 
 ```js
-fs: { root: '/srv/tenants/acme', write: false, limits: { fileBytes: 10 << 20 } }
+fs: { root: '/srv/tenants/acme', write: false, limits: { fileBytes: 10 << 20, writtenBytes: 100 << 20, operations: 16 } }
 ```
 
 The guest gets a promise-based `fs` (`readFile`, `writeFile`, `readdir`,
 `stat`, `exists`, `mkdir`, `rm`) confined to `root`, read-only unless
 `write: true`. Symlinks out of the root are refused, errors carry Node-style
 codes (`ENOENT`, `EACCES`, `EROFS`), and they never reveal host paths.
+`fileBytes` caps each file read or written, `writtenBytes` what the isolate
+writes over its life (`EDQUOT` past it; it doesn't track deletions, so it
+isn't a disk quota: give each tenant its own volume or quota if disk space
+matters), and `operations` how many run at once (`EMFILE` past it), each
+holding a file handle in your process.
 
 ### `eval`, `wasm`
 
@@ -429,7 +435,8 @@ least 1, and durations (`timeoutMs`, `cpuMs`, `backgroundMs`, `idleMs`, and the 
 with `ERR_LIMIT`, with `err.limit` naming it, and emits `onLimit`. `fetch`,
 `connect`, and `fs` policies carry their own limits. `connect`'s
 `connections` counts a socket from when it starts opening, so opens racing
-each other can't pass it.
+each other can't pass it, until the guest closes it or the connection closes
+and the guest has read what was left.
 
 ## Errors
 
