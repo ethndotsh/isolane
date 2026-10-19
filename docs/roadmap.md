@@ -208,6 +208,30 @@ randomUUID 100%. Remaining failures, by cause:
 | `vm.call(name, ...args)` for stateful isolates (call an exported/global function with schema-checked args) | idea |
 | **Deployments with user-defined entrypoints** (Workers-style, customizable): `tenant.deploy(code, { entrypoints: ['fetch', 'scheduled', 'onMessage', ...] })` evaluates the module once (its "cold start": top-level code, user-defined init), then `deployment.invoke(name, ...args)` calls an exported handler in a warm isolate. Host-defined handler names and argument shapes (`fetch(request, env, ctx)` is just one preset); warm-isolate pool per deployment with `minWarm`/`maxIsolates`/`idleMs`; `isolation: 'per-invoke' \| 'reuse'` (reuse keeps module state between invocations, like Workers); cold-start hooks (`onColdStart`); V8 code cache per deployment so re-creating an isolate skips parsing | planned |
 
+### Errors and stack traces
+
+Checked on the dev build (October 2026): a guest throw gives a correct stack but with `<anonymous>` as the file; a SyntaxError has no location at all; a host function that throws gives the guest an Error whose stack has **no guest frames** (it's created when the reply arrives, not at the call site); `cause` chains are dropped.
+
+| Item | Status |
+|---|---|
+| Name every script (`ScriptOrigin`): `filename` option per run/eval (default `tenant/eval-N.js`), module paths for multi-file deployments, so frames read `at handler (src/index.ts:12:5)` | planned |
+| SyntaxError (and every compile error) location: line, column, and the source line with a caret, from V8's `Message`, in `err.guest.location` and the formatted stack | planned |
+| Host-call attribution: capture the guest's stack at the call site and use it for the rejection or throw, so a failing host call points at the guest line that made it (`at load (src/db.ts:4:22)`), with the host function's name and Node-style `code` | planned |
+| Structured errors end to end: `cause` chains (and `AggregateError.errors`), own enumerable props like `code`, parsed frames (`err.guest.frames: [{ function, file, line, column }]`) next to the raw stack; host-side errors in host functions surface to hooks (`afterHostCall`) with their full host stack, while the guest only ever sees the message, name, and code | planned |
+| Source-map support for transformed TypeScript/JSX and bundles: map frames back to original files before reporting (in the worker) | planned (with TS transform / bundling) |
+| Hide or mark isolane's own runtime frames (`ext:`/`isolane:` scripts) in guest stacks, like Deno marks `ext:` frames | planned |
+| Errors from timers and unhandled rejections outside an eval: surface as structured `onGuestError` events (not only console output) | planned |
+
+### Bundles, npm, and shims
+
+| Item | Status |
+|---|---|
+| Wrangler-style deploys: an `isolane` CLI (`isolane deploy`, `isolane dev`) that bundles locally (Rolldown or esbuild) with worker export conditions (`workerd`, `worker`, `browser`, `import`, `default`), uploads the bundle (or a file tree), and streams logs back | planned |
+| npm packages: deployers install on their own machine (trusted; lifecycle scripts never run on the platform) and ship the result; or the platform fetches tarballs from the registry by lockfile, with no install scripts, ever | planned |
+| Node compatibility (`node:buffer`, `events`, `util`, `stream`, `crypto`, `path`, `url`, `assert`, `string_decoder`, `process`): unenv presets (the layer behind Wrangler's `nodejs_compat` and Nitro) and/or workerd's `src/node` (Apache-2.0), with `node:net`/`node:tls` on our `connect` broker and `node:fs` on our `fs` broker; anything needing native addons, `child_process`, or real threads stays unsupported, by design | planned |
+| Customizable shims: `modules: { 'node:fs': './my-fs.js', pg: './pg-shim.js' }` (aliases and overrides), host-provided virtual modules (`import { kv } from 'isolane:kv'` backed by host functions), and `define` for compile-time constants | planned |
+| Honest compatibility statement: "anything that runs on Cloudflare Workers with nodejs_compat" as the target; publish a tested-packages list | planned |
+
 ### API v2 (from `docs/api-review.md`)
 
 | Item | Status |
@@ -276,7 +300,7 @@ Measured against isolated-vm (Linux x64 under Rosetta; re-measure natively):
 | Dev build against prebuilt V8 (`--features dev-prebuilt`, `ISOLANE_DEV_INSECURE=1`) for local iteration | done |
 | Build speed, round 1: `fast` Cargo profile for local work (an edit rebuilds in 1.3 s vs 12.3 s with fat-LTO `release`); `release` gets `panic = "abort"` and stripped debug info; CI links with lld, caches the Cargo registry, sets `CARGO_INCREMENTAL=0`, frees disk in the background; V8 built with `symbol_level=0` (GN args in `scripts/v8.gn`, part of the cache key) | done |
 | Measured: a V8 patch bump (15.2.124.1 → .45) is close to a full rebuild on a 2-core runner — patch releases touch widely included headers, so most objects really are stale | done |
-| Bigger lever for V8 builds: more cores. GitHub prices runners per core, so an 8- or 16-core runner costs about the same per build and finishes 4–8× sooner (needs an org on the Team plan for larger runners), or make the repo public for free 4-core runners and unlimited minutes | decide |
+| Bigger lever for V8 builds: more cores. GitHub prices runners per core, so an 8- or 16-core runner costs about the same per build and finishes 4–8× sooner (needs an org on the Team plan for larger runners), or make the repo public: standard runners are free with no minute cap, 4-core on Linux, but concurrency is still capped per account (reportedly 20 jobs on Free, 5 of them macOS; unconfirmed) and jobs still stop at 6 h | decide |
 | A prebuilt CI image (toolchain, libclang 21, strace) to drop the ~1 min of apt and setup per run | idea |
 | sccache for Rust dependencies once oxc and friends land (not for V8: patch bumps change shared headers, so per-object caching mostly misses) | planned |
 | Nightly-only Rust build speedups (parallel frontend `-Zthreads`, Cranelift for dev builds) if we ever move off stable | idea |
