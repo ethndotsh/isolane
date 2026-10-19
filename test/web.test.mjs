@@ -584,6 +584,7 @@ const server = createServer((req, res) => {
       );
     }
     if (req.url === '/redir') return res.writeHead(302, { location: '/json' }).end();
+    if (req.url === '/redir307') return res.writeHead(307, { location: '/echo' }).end();
     if (req.url === '/no-content') return res.writeHead(204).end();
     if (req.url === '/bytes') return res.end(Buffer.from([0, 1, 2, 254, 255]));
     if (req.url === '/stream') {
@@ -662,6 +663,31 @@ test('fetch: request bodies of every kind', async () => {
   assert.match(out[4][0], /^multipart\/form-data; boundary=/);
   assert.match(out[4][1], /name="a"\r\n\r\n1/);
   assert.deepEqual(out[5], [null, 'stream']);
+});
+
+test('fetch: a ReadableStream request body streams to the server', async () => {
+  const out = await fetchRun(`
+    let pulls = 0;
+    const body = new ReadableStream({
+      pull(c) {
+        if (++pulls > 3) return c.close();
+        c.enqueue(new TextEncoder().encode('part' + pulls + ' '));
+      },
+    });
+    const r = await (await fetch('${base}/echo', { method: 'POST', body, duplex: 'half' })).json();
+    const bad = await fetch('${base}/echo', { method: 'POST', body: new ReadableStream({ start(c) { c.enqueue('not bytes'); c.close(); } }), duplex: 'half' })
+      .then(() => 'ok', (e) => e.name);
+    const big = await fetch('${base}/echo', { method: 'POST', body: new ReadableStream({ pull(c) { c.enqueue(new Uint8Array(1024)); } }), duplex: 'half' })
+      .then(() => 'ok', (e) => [e.name, e.message]);
+    const redirected = await fetch('${base}/redir307', { method: 'POST', body: new ReadableStream({ start(c) { c.close(); } }), duplex: 'half' })
+      .then(() => 'ok', (e) => e.name);
+    return [atob(r.body), r.headers['transfer-encoding'], r.headers['content-length'] ?? null, bad, big, redirected];`,
+    { fetch: { ...NET.fetch, limits: { requestBytes: 8192 } } },
+  );
+  assert.deepEqual(out.slice(0, 4), ['part1 part2 part3 ', 'chunked', null, 'TypeError']);
+  assert.equal(out[4][0], 'TypeError');
+  assert.match(out[4][1], /larger than 8192 bytes/);
+  assert.equal(out[5], 'TypeError');
 });
 
 test('fetch: the response body streams', async () => {

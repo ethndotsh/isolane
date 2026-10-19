@@ -11,6 +11,7 @@ import { lstat, mkdir, open, readdir, realpath, rm, stat } from 'node:fs/promise
 import http from 'node:http';
 import https from 'node:https';
 import { BlockList, connect as netConnect, isIP, type Socket } from 'node:net';
+import { PassThrough } from 'node:stream';
 import { connect as tlsConnect } from 'node:tls';
 import { join, posix, sep } from 'node:path';
 
@@ -45,7 +46,7 @@ export interface FetchPolicy {
   limits?: {
     /** Fetches per isolate over its lifetime. Default unlimited. */
     requests?: number;
-    /** Per request body. Default 10 MiB. */
+    /** Per request body, streamed or not. Default 10 MiB. */
     requestBytes?: number;
     /** Per response body. Default 10 MiB. */
     responseBytes?: number;
@@ -144,6 +145,8 @@ interface FetchMeta {
   headers: [string, string][];
   /** Fetch's redirect mode: the broker follows redirects itself, re-checking each hop. */
   redirect: 'follow' | 'manual' | 'error';
+  /** The body is a stream the guest sends with `write` while `open` waits. */
+  streamBody?: boolean;
 }
 
 /** A response's status and headers; its body is read with `read`. */
@@ -168,7 +171,8 @@ function parseFetchMeta(raw: unknown): FetchMeta {
     typeof r.method === 'string' &&
     Array.isArray(r.headers) &&
     r.headers.every((h) => Array.isArray(h) && h.length === 2 && typeof h[0] === 'string' && typeof h[1] === 'string') &&
-    (r.redirect === undefined || REDIRECT_MODES.has(r.redirect));
+    (r.redirect === undefined || REDIRECT_MODES.has(r.redirect)) &&
+    (r.streamBody === undefined || typeof r.streamBody === 'boolean');
   if (!ok) throw new TypeError('fetch: malformed request');
   return { ...(r as FetchMeta), redirect: r.redirect ?? 'follow' };
 }
@@ -177,6 +181,8 @@ function parseFetchMeta(raw: unknown): FetchMeta {
 const FETCH_HIGH_WATER = 1 * MiB;
 /** Fetches a VM may have in flight (request sent, body not finished) at once. */
 const MAX_OPEN_FETCHES = 64;
+/** Streamed request bytes in the broker, unsent, before a guest's write waits. */
+const UPLOAD_HIGH_WATER = 64 << 10;
 
 interface InFlight {
   abort: AbortController;
@@ -188,6 +194,10 @@ interface InFlight {
   ended: boolean;
   error?: Error;
   wake?: () => void;
+  /** A streamed request body: what the guest writes, piped to the request. */
+  upload?: PassThrough;
+  /** Its bytes so far (limits.requestBytes). */
+  sent: number;
 }
 
 /**
@@ -196,6 +206,9 @@ interface InFlight {
  * - `open(id, meta, body?)`: send the request (following redirects as
  *   `meta.redirect` says, each hop checked against the policy) and resolve
  *   with the response's status and headers;
+ * - `write(id, chunk)`: with `meta.streamBody`, the next bytes of the
+ *   request body (null ends it), sent as they come (chunked), while `open`
+ *   waits; resolves when the broker can take more;
  * - `read(id)`: the next bytes of the response body, or null at its end;
  * - `cancel(id)`: abort the request or the body.
  * Every failure reaches the guest as a TypeError, as the Fetch standard
@@ -235,13 +248,25 @@ export function fetchBroker(policy: FetchPolicy, denied: DenialReporter = () => 
   };
 
   // One hop: resolves when the response's headers arrive (its body unread).
-  const send = (url: URL, method: string, headers: Record<string, string>, body: Uint8Array | undefined, signal: AbortSignal) =>
+  // A streamed body is piped in as the guest writes it.
+  const send = (
+    url: URL,
+    method: string,
+    headers: Record<string, string>,
+    body: Uint8Array | PassThrough | undefined,
+    signal: AbortSignal,
+  ) =>
     new Promise<http.IncomingMessage>((resolve, reject) => {
       const mod = url.protocol === 'https:' ? https : http;
       const req = mod.request(url, { method, headers, lookup: lookup as never, agent: false, signal });
       req.on('response', resolve);
       req.on('error', reject);
-      req.end(body);
+      if (body instanceof PassThrough) {
+        body.on('error', (err) => req.destroy(err));
+        body.pipe(req);
+      } else {
+        req.end(body);
+      }
     });
 
   const wake = (f: InFlight) => {
@@ -270,9 +295,10 @@ export function fetchBroker(policy: FetchPolicy, denied: DenialReporter = () => 
     }
     const id = rawId as number;
     const meta = parseFetchMeta(rawMeta);
-    let body = rawBody === undefined || rawBody === null ? undefined : rawBody;
-    if (body !== undefined && !(body instanceof Uint8Array)) throw new TypeError('fetch: malformed request body');
-    if (body && body.length > maxRequest) throw new TypeError(`fetch: request body larger than ${maxRequest} bytes`);
+    const given = rawBody === undefined || rawBody === null ? undefined : rawBody;
+    if (given !== undefined && (!(given instanceof Uint8Array) || meta.streamBody)) throw new TypeError('fetch: malformed request body');
+    let body: Uint8Array | PassThrough | undefined = given;
+    if (given && given.length > maxRequest) throw new TypeError(`fetch: request body larger than ${maxRequest} bytes`);
     if (inFlight.size >= MAX_OPEN_FETCHES) throw new TypeError(`fetch: more than ${MAX_OPEN_FETCHES} fetches in flight`);
     if (maxRequests !== undefined && requests >= maxRequests) {
       denied('fetch', String((rawMeta as { url?: unknown } | null)?.url ?? ''), `used its ${maxRequests} requests`);
@@ -316,7 +342,12 @@ export function fetchBroker(policy: FetchPolicy, denied: DenialReporter = () => 
       buffered: 0,
       received: 0,
       ended: false,
+      sent: 0,
     };
+    if (meta.streamBody) {
+      // Chunked: the length isn't known up front.
+      f.upload = body = new PassThrough({ highWaterMark: UPLOAD_HIGH_WATER });
+    }
     inFlight.set(id, f);
     const urlList: string[] = [];
     try {
@@ -336,12 +367,20 @@ export function fetchBroker(policy: FetchPolicy, denied: DenialReporter = () => 
           res.destroy();
           if (meta.redirect === 'error') throw new TypeError('fetch: the response redirected, and redirect is "error"');
           if (hop >= maxRedirects) throw new TypeError(`fetch: more than ${maxRedirects} redirects`);
+          // Fetch: these become a GET without the body.
+          const toGet = status === 303 ? method !== 'GET' && method !== 'HEAD' : (status === 301 || status === 302) && method === 'POST';
+          // A streamed body can't be sent again (Fetch: a network error).
+          if (body instanceof PassThrough && !toGet) {
+            throw new TypeError("fetch: the response redirected, and a streamed request body can't be sent again");
+          }
           // Node gives header values as Latin-1 (one char per byte); a
           // Location's raw bytes past ASCII are percent-encoded as bytes
           // before parsing, so UTF-8 (and invalid bytes) survive as sent.
           const next = new URL(location.replace(/[\x80-\xff]/g, (c) => `%${c.charCodeAt(0).toString(16).toUpperCase()}`), url);
-          if (status === 303 ? method !== 'GET' && method !== 'HEAD' : (status === 301 || status === 302) && method === 'POST') {
+          if (toGet) {
             method = 'GET';
+            // What the guest still writes of a streamed body goes nowhere.
+            if (body instanceof PassThrough) body.resume();
             body = undefined;
             for (const name of ['content-type', 'content-length', 'content-encoding', 'content-language', 'content-location']) {
               delete headers[name];
@@ -422,11 +461,45 @@ export function fetchBroker(policy: FetchPolicy, denied: DenialReporter = () => 
     return null; // end of the body
   }
 
+  async function write(rawId: unknown, chunk: unknown): Promise<void> {
+    const f = typeof rawId === 'number' ? inFlight.get(rawId) : undefined;
+    const upload = f?.upload;
+    if (!f || !upload) throw new TypeError('fetch: the request body is closed');
+    if (f.error || f.abort.signal.aborted) throw failure(f.error ?? new Error('fetch was cancelled'), f);
+    if (upload.writableEnded) throw new TypeError('fetch: the request body has ended');
+    if (chunk === null) {
+      upload.end();
+      return;
+    }
+    if (!(chunk instanceof Uint8Array)) throw new TypeError('fetch: malformed request body');
+    f.sent += chunk.length;
+    if (f.sent > maxRequest) {
+      const err = new TypeError(`fetch: request body larger than ${maxRequest} bytes`);
+      f.abort.abort(err);
+      throw err;
+    }
+    if (!upload.write(chunk)) {
+      // Backpressure: the next write waits until the request takes these.
+      await new Promise<void>((resolve) => {
+        const done = () => {
+          upload.off('drain', done);
+          upload.off('close', done);
+          f.abort.signal.removeEventListener('abort', done);
+          resolve();
+        };
+        upload.on('drain', done);
+        upload.on('close', done);
+        f.abort.signal.addEventListener('abort', done);
+      });
+    }
+  }
+
   function cancel(rawId: unknown): void {
     const f = typeof rawId === 'number' ? inFlight.get(rawId) : undefined;
     if (!f) return;
     finish(rawId as number);
     f.abort.abort(new Error('fetch was cancelled'));
+    f.upload?.destroy();
     f.res?.destroy();
     f.error ??= new TypeError('fetch was cancelled');
     wake(f);
@@ -435,6 +508,7 @@ export function fetchBroker(policy: FetchPolicy, denied: DenialReporter = () => 
   const fn: HostFunction = (op: unknown, ...args: unknown[]) => {
     if (op === 'open') return open(args[0], args[1], args[2]);
     if (op === 'read') return read(args[0]);
+    if (op === 'write') return write(args[0], args[1]);
     if (op === 'cancel') return cancel(args[0]);
     throw new TypeError('fetch: unknown operation');
   };

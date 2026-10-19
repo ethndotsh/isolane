@@ -2,18 +2,20 @@
 // the web platform, over isolane's network broker instead of a network
 // stack. Adapted from Deno's ext/fetch/26_fetch.js (MIT; see
 // deno/LICENSE.md): Request, Response, Headers, and bodies are Deno's
-// vendored classes, unchanged; this file replaces only the part that talks
+// vendored classes (with patches/deno-*.patch); this file replaces the part that talks
 // to the network, which here is a host function handed over by the
 // prelude (ts/capabilities.ts). The broker sends each request, follows
 // redirects (each hop checked against the isolate's fetch policy), and streams
 // the response body: open(id, meta, body) → status and headers, then
 // read(id) → the next bytes (null at the end), cancel(id) to abort.
 //
-// Differences from Deno's fetch: request bodies are buffered (a streamed
-// request body is read to the end before sending); blob: and data: URLs are
-// fetched here, other non-HTTP(S) schemes are network errors; Subresource
-// Integrity (`integrity`) is checked; no HTTP client options, telemetry, or
-// inspector events.
+// A ReadableStream request body streams to the broker (write(id, chunk));
+// other bodies go whole with open().
+//
+// Differences from Deno's fetch: blob: and data: URLs are fetched here,
+// other non-HTTP(S) schemes are network errors; Subresource Integrity
+// (`integrity`) is checked; no HTTP client options, telemetry, or inspector
+// events.
 (function () {
 const { core, primordials } = __bootstrap;
 const {
@@ -40,6 +42,8 @@ const {
   ReadableStream,
   ReadableStreamPrototype,
   readableStreamCollectIntoUint8Array,
+  readableStreamPipeTo,
+  WritableStream,
 } = core.loadExtScript("ext:deno_web/06_streams.js");
 const { InnerBody } = core.loadExtScript("ext:deno_fetch/22_body.js");
 const { processUrlList, Request, toInnerRequest } = core.loadExtScript(
@@ -217,6 +221,30 @@ function integrityMatches(bytes, metadata) {
   return false;
 }
 
+/** Stream a request body to the broker (its `write`), a chunk at a time:
+ * each write resolves when the broker can take more. A chunk that isn't a
+ * Uint8Array, or a stream that errors, cancels the fetch. The pipe reads
+ * the stream with the streams' internal reads (guest code can't intercept
+ * them), into a sink with no prototype (nothing to inject into it). */
+function sendBody(id, stream) {
+  const sink = new WritableStream({
+    __proto__: null,
+    write(chunk) {
+      if (TypedArrayPrototypeGetSymbolToStringTag(chunk) !== "Uint8Array") {
+        throw new TypeError("a request body stream must give Uint8Arrays");
+      }
+      return transport("write", id, chunk);
+    },
+    close() {
+      return transport("write", id, null);
+    },
+    abort() {
+      cancel(id);
+    },
+  });
+  PromisePrototypeCatch(readableStreamPipeTo(stream, sink, false, false, false), () => cancel(id));
+}
+
 /** Fetch's "main fetch", with Subresource Integrity: a request with
  * integrity metadata waits for the whole body and checks it. */
 async function mainFetch(req, terminator) {
@@ -264,8 +292,11 @@ async function schemeFetch(req, terminator) {
     throw new TypeError("fetch is not available: this isolate has no fetch policy");
   }
 
-  // The request body, buffered.
+  // The request body: bytes, or a ReadableStream body (one with no
+  // source), streamed to the broker as it's read. Bodies with a source
+  // (Blob, FormData) have a known length, and are sent whole.
   let reqBody;
+  let upload = null;
   if (req.body) {
     const stream = req.body.streamOrStatic;
     const body = stream.body;
@@ -274,7 +305,8 @@ async function schemeFetch(req, terminator) {
     } else if (typeof body === "string") {
       reqBody = core.encode(body);
     } else if (ObjectPrototypeIsPrototypeOf(ReadableStreamPrototype, stream)) {
-      reqBody = await readableStreamCollectIntoUint8Array(stream);
+      if (req.body.source === null) upload = stream;
+      else reqBody = await readableStreamCollectIntoUint8Array(stream);
     } else {
       throw new TypeError("Invalid body");
     }
@@ -286,12 +318,15 @@ async function schemeFetch(req, terminator) {
   terminator[abortSignal.add](onAbort);
   let head;
   try {
-    head = await transport("open", id, {
+    const opened = transport("open", id, {
       url: req.currentUrl(),
       method: req.method,
       headers: req.headerList,
       redirect: req.redirectMode,
+      streamBody: upload !== null,
     }, reqBody);
+    if (upload !== null) sendBody(id, upload);
+    head = await opened;
   } catch (err) {
     if (terminator.aborted) return abortedNetworkError();
     throw new TypeError(err?.message ?? "fetch failed", { cause: err });
