@@ -26,6 +26,8 @@ serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["raw_value"] }
 # The web platform (src/web/): WHATWG URL, the Encoding Standard, randomness.
 url = { version = "2", features = ["expose_internals"] }
+# URLPattern: the crate Deno uses (it only parses; V8 runs the regexps).
+urlpattern = "=0.4.2"
 encoding_rs = "0.8"
 getrandom = "0.2"
 # CompressionStream: pure Rust (miniz_oxide for flate2), no C zlib.

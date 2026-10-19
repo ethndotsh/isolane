@@ -17,6 +17,7 @@ FILES=(
   ext/web/00_url.js
   ext/web/01_dom_exception.js
   ext/web/01_mimesniff.js
+  ext/web/01_urlpattern.js
   ext/web/02_event.js
   ext/web/02_structured_clone.js
   ext/web/02_timers.js

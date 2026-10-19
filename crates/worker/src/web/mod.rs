@@ -23,6 +23,7 @@ mod encoding;
 mod fetch;
 pub mod timers;
 mod url;
+mod urlpattern;
 
 macro_rules! runtime_js {
     ($path:literal) => {
@@ -47,6 +48,7 @@ const EXT: &[(&str, &str)] = &[
     ("ext:deno_web/00_url.js", runtime_js!("deno/ext/web/00_url.js")),
     ("ext:deno_web/01_dom_exception.js", runtime_js!("deno/ext/web/01_dom_exception.js")),
     ("ext:deno_web/01_mimesniff.js", runtime_js!("deno/ext/web/01_mimesniff.js")),
+    ("ext:deno_web/01_urlpattern.js", runtime_js!("deno/ext/web/01_urlpattern.js")),
     ("ext:deno_web/02_event.js", runtime_js!("deno/ext/web/02_event.js")),
     ("ext:deno_web/02_structured_clone.js", runtime_js!("deno/ext/web/02_structured_clone.js")),
     ("ext:deno_web/02_timers.js", runtime_js!("deno/ext/web/02_timers.js")),
@@ -417,6 +419,8 @@ fn op_fns() -> Natives {
         "op_url_get_serialization" => url::op_url_get_serialization,
         "op_url_parse_search_params" => url::op_url_parse_search_params,
         "op_url_stringify_search_params" => url::op_url_stringify_search_params,
+        "op_urlpattern_parse" => urlpattern::op_urlpattern_parse,
+        "op_urlpattern_process_match_input" => urlpattern::op_urlpattern_process_match_input,
         "op_encoding_normalize_label" => encoding::op_encoding_normalize_label,
         "op_encoding_decode_utf8" => encoding::op_encoding_decode_utf8,
         "op_encoding_decode_utf8_ascii_only" => encoding::op_encoding_decode_utf8_ascii_only,

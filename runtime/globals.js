@@ -115,6 +115,7 @@
     return URL;
   });
   lazy("URLSearchParams", from(URL_JS, "URLSearchParams"));
+  lazy("URLPattern", from("ext:deno_web/01_urlpattern.js", "URLPattern"));
   lazy("DOMException", from(DOM_EXCEPTION_JS, "DOMException"));
   lazy("QuotaExceededError", from(DOM_EXCEPTION_JS, "QuotaExceededError"));
   for (const name of ["Event", "EventTarget", "CustomEvent", "ErrorEvent", "PromiseRejectionEvent"]) {
@@ -270,7 +271,7 @@
   // replaces its accessor with the value; the EventTarget methods turn the
   // global object into an EventTarget.
   const LAZY = [
-    "URL", "URLSearchParams", "DOMException", "QuotaExceededError",
+    "URL", "URLSearchParams", "URLPattern", "DOMException", "QuotaExceededError",
     "Event", "EventTarget", "CustomEvent", "ErrorEvent", "PromiseRejectionEvent",
     "AbortController", "AbortSignal", "atob", "btoa",
     "TextEncoder", "TextDecoder", "TextEncoderStream", "TextDecoderStream",

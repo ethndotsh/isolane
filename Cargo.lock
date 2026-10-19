@@ -1024,6 +1024,7 @@ dependencies = [
  "spki 0.7.3",
  "thiserror",
  "url",
+ "urlpattern",
  "v8",
  "x25519-dalek",
  "x448",
@@ -1909,6 +1910,18 @@ dependencies = [
  "idna",
  "percent-encoding",
  "serde",
+]
+
+[[package]]
+name = "urlpattern"
+version = "0.4.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0f805818f843b548bacc19609eb3619dd2850e54746f5cada37927393c2ef4ec"
+dependencies = [
+ "icu_properties",
+ "regex",
+ "serde",
+ "url",
 ]
 
 [[package]]
