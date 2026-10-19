@@ -50,13 +50,18 @@ impl Default for Limits {
     }
 }
 
+/// The longest budget a deadline is computed from (about 24.8 days, the
+/// supervisor's maximum): Instant + Duration panics on overflow, which
+/// would abort the worker.
+const MAX_BUDGET_MS: u64 = (1 << 31) - 1;
+
 impl Limits {
     pub fn timeout(&self) -> Option<Duration> {
-        self.timeout_ms.map(Duration::from_millis)
+        self.timeout_ms.map(|ms| Duration::from_millis(ms.min(MAX_BUDGET_MS)))
     }
 
     pub fn cpu(&self) -> Option<Duration> {
-        self.cpu_ms.map(Duration::from_millis)
+        self.cpu_ms.map(|ms| Duration::from_millis(ms.min(MAX_BUDGET_MS)))
     }
 }
 

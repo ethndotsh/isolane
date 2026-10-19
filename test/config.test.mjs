@@ -184,6 +184,26 @@ test('policy errors inside the guest are spec-shaped', async () => {
   );
 });
 
+test('limits out of the range the worker can hold are config errors, not worker crashes', async () => {
+  const rt = new Runtime({ strict: process.env.ISOLANE_STRICT === '1' });
+  const events = [];
+  rt.on('securityEvent', (e) => events.push(e.kind));
+  const code = (limits) => rt.run('1 + 1', { tenant: 'ranges', limits }).then(() => 'ran', (e) => e.code);
+  for (const limits of [
+    { timers: 2 ** 32 },
+    { heapBytes: 2 ** 50 },
+    { timeoutMs: 2 ** 53 - 1 },
+    { cpuMs: 2 ** 53 - 1 },
+    { decompressedBytes: 1.5 },
+  ]) {
+    assert.equal(await code(limits), 'ERR_INVALID_CONFIG', JSON.stringify(limits));
+  }
+  // The largest allowed values work.
+  assert.equal(await code({ timers: 2 ** 32 - 1, timeoutMs: 2 ** 31 - 1, cpuMs: 2 ** 31 - 1, heapBytes: 4 * 1024 ** 3 }), 'ran');
+  assert.deepEqual(events, []);
+  rt.close();
+});
+
 test('config errors name the field, and old names say what to use instead', () => {
   const message = (f) => {
     try {

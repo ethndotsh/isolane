@@ -95,6 +95,18 @@ const ISOLATE_LIMITS = new Set(['timeoutMs', 'cpuMs', 'heapBytes', 'timers', 'ba
 const TENANT_LIMITS = new Set(['isolates', 'concurrentEvals', 'workerMemoryBytes', 'idleMs']);
 const NULLABLE = new Set(['timeoutMs', 'cpuMs', 'heapBytes', 'backgroundMs', 'workerMemoryBytes']);
 const MINIMUM: Record<string, number> = { workerMemoryBytes: 64 * 1024 ** 2, heapBytes: 1024 ** 2 };
+/**
+ * The most each limit can be: what the worker holds it in (timers: a u32;
+ * durations: well inside what a clock can add without overflowing), and
+ * V8's largest heap (its pointer-compression cage).
+ */
+const MAXIMUM: Record<string, number> = {
+  timers: 2 ** 32 - 1,
+  timeoutMs: 2 ** 31 - 1,
+  cpuMs: 2 ** 31 - 1,
+  idleMs: 2 ** 31 - 1,
+  heapBytes: 4 * 1024 ** 3,
+};
 
 /** Old names, for errors that say what to write instead. */
 const RENAMED: Record<string, string> = {
@@ -121,10 +133,11 @@ const RENAMED_LIMITS: Record<string, string> = {
 
 export type Level = 'defaults' | 'tenant' | 'call';
 
-function checkInteger(path: string, value: unknown, min: number, nullable: boolean): void {
+function checkInteger(path: string, value: unknown, min: number, nullable: boolean, max?: number): void {
   if (value === undefined || (value === null && nullable)) return;
-  if (!(Number.isSafeInteger(value) && (value as number) >= min)) {
-    throw invalidConfig(path, `must be an integer of at least ${min}${nullable ? ', or null' : ''}`);
+  if (!(Number.isSafeInteger(value) && (value as number) >= min && (max === undefined || (value as number) <= max))) {
+    const range = max === undefined ? `of at least ${min}` : `from ${min} to ${max}`;
+    throw invalidConfig(path, `must be an integer ${range}${nullable ? ', or null' : ''}`);
   }
 }
 
@@ -150,7 +163,7 @@ export function validateLimits(limits: unknown, path: string, level: Level | 'ru
     } else if (TENANT_LIMITS.has(key) && level === 'call') {
       throw invalidConfig(field, 'is a tenant limit; set it in defaults.limits or tenants(name).limits');
     }
-    checkInteger(field, value, MINIMUM[key] ?? 1, NULLABLE.has(key));
+    checkInteger(field, value, MINIMUM[key] ?? 1, NULLABLE.has(key), MAXIMUM[key]);
   }
 }
 
@@ -306,7 +319,8 @@ function checkPolicy(path: string, value: unknown, keys: string[], limitKeys: st
     if (limits === null || typeof limits !== 'object') throw invalidConfig(`${path}.limits`, 'must be an object');
     for (const [key, v] of Object.entries(limits)) {
       if (!limitKeys.includes(key)) throw invalidConfig(`${path}.limits.${key}`, `is not a ${path} limit (limits: ${limitKeys.join(', ')})`);
-      checkInteger(`${path}.limits.${key}`, v, 1, false);
+      // Durations end up in setTimeout, which takes at most 2^31 - 1 ms.
+      checkInteger(`${path}.limits.${key}`, v, 1, false, key.endsWith('Ms') ? 2 ** 31 - 1 : undefined);
     }
   }
   const p = value as Record<string, unknown>;

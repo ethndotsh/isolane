@@ -26,7 +26,7 @@ use std::sync::mpsc::{self, Sender};
 use std::sync::Arc;
 
 use frame::{read_frame, Writer};
-use proto::{fail, limit, ErrorCode, In, Out};
+use proto::{fail, limit, ErrorCode, Failure, In, Out};
 use vm::{VmConfig, VmMsg};
 
 unsafe extern "C" {
@@ -250,7 +250,7 @@ fn serve(lock_down: bool, memory_limit: Option<u64>, web_background: bool) -> Ex
     });
 
     let mut vms: HashMap<u64, Sender<VmMsg>> = HashMap::new();
-    let mut failed: HashMap<u64, String> = HashMap::new();
+    let mut failed: HashMap<u64, Failure> = HashMap::new();
     let mut stdin = BufReader::new(std::io::stdin().lock());
     loop {
         let frame = match read_frame(&mut stdin) {
@@ -272,6 +272,12 @@ fn serve(lock_down: bool, memory_limit: Option<u64>, web_background: bool) -> Ex
         let msg: In = match serde_json::from_slice(json) {
             Ok(m) => m,
             Err(e) => {
+                // A well-formed create whose config doesn't fit (a limit out
+                // of range): that isolate's evals fail, the worker carries on.
+                if let Some(vm) = create_id(json) {
+                    failed.insert(vm, fail(ErrorCode::Internal, format!("the isolate's config is invalid: {e}")));
+                    continue;
+                }
                 eprintln!("isolane-worker: bad message: {e}");
                 return ExitCode::from(4);
             }
@@ -291,7 +297,7 @@ fn serve(lock_down: bool, memory_limit: Option<u64>, web_background: bool) -> Ex
                     // Out of threads or memory: this VM's evals fail, the
                     // worker carries on.
                     Err(e) => {
-                        failed.insert(vm, format!("the isolate could not start: {e}"));
+                        failed.insert(vm, limit("workerMemoryBytes", format!("the isolate could not start: {e}")));
                     }
                 }
             }
@@ -309,8 +315,8 @@ fn serve(lock_down: bool, memory_limit: Option<u64>, web_background: bool) -> Ex
                         usage: Default::default(),
                     })
                 };
-                if let Some(cause) = failed.get(&vm) {
-                    refuse(limit("workerMemoryBytes", cause.clone()));
+                if let Some(failure) = failed.get(&vm) {
+                    refuse(failure.clone());
                     continue;
                 }
                 let sent = vms.get(&vm).map(|tx| tx.send(VmMsg::Eval { req, code, last }).is_ok());
@@ -348,6 +354,15 @@ fn serve(lock_down: bool, memory_limit: Option<u64>, web_background: bool) -> Ex
             }
         }
     }
+}
+
+/// The isolate id of a `create` message that didn't parse as one.
+fn create_id(json: &[u8]) -> Option<u64> {
+    let value: serde_json::Value = serde_json::from_slice(json).ok()?;
+    if value.get("t")?.as_str()? != "create" {
+        return None;
+    }
+    value.get("vm")?.as_u64()
 }
 
 /// Lock down, then attempt a forbidden operation. Prints `LOCKED` once the

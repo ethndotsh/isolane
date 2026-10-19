@@ -216,7 +216,8 @@ fn vm_main(id: u64, config: VmConfig, rx: Receiver<VmMsg>, out: Output) {
     let cpu = config.limits.cpu();
     let mut params = v8::CreateParams::default();
     if let Some(max) = config.limits.heap_bytes {
-        params = params.heap_limits(0, max as usize);
+        // At most V8's pointer-compression cage (the supervisor's maximum).
+        params = params.heap_limits(0, max.min(4 << 30) as usize);
     }
     // A web VM starts from the web platform's snapshot (built on first
     // use), if there is one; other VMs never touch it.
