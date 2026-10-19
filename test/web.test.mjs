@@ -410,6 +410,34 @@ test('crypto.subtle: a key\'s slots can\'t be read, changed, or forged', async (
   });
 });
 
+test('crypto.subtle: lengths the guest picks are checked before anything is allocated', async () => {
+  const { generateKeyPairSync } = await import('node:crypto');
+  // A 4608-bit private key, over the 4096-bit cap (operations on it can't be interrupted).
+  const big = generateKeyPairSync('rsa', { modulusLength: 4608 }).privateKey.export({ format: 'jwk' });
+  const result = await run(`(async () => {
+    const { subtle } = crypto;
+    const out = {};
+    const pbkdf2 = await subtle.importKey('raw', new Uint8Array(8), 'PBKDF2', false, ['deriveBits']);
+    out.pbkdf2 = await subtle.deriveBits({ name: 'PBKDF2', hash: 'SHA-256', salt: new Uint8Array(8), iterations: 1 }, pbkdf2, 256 * 1024 * 1024 * 8).then((b) => b.byteLength, (e) => e.name);
+    const hkdf = await subtle.importKey('raw', new Uint8Array(8), 'HKDF', false, ['deriveBits']);
+    out.hkdf = await subtle.deriveBits({ name: 'HKDF', hash: 'SHA-256', salt: new Uint8Array(8), info: new Uint8Array(0) }, hkdf, 2 ** 31).then((b) => b.byteLength, (e) => e.name);
+    const pss = await subtle.generateKey({ name: 'RSA-PSS', modulusLength: 2048, publicExponent: new Uint8Array([1, 0, 1]), hash: 'SHA-256' }, false, ['sign', 'verify']);
+    out.pss = await subtle.sign({ name: 'RSA-PSS', saltLength: 256 * 1024 * 1024 }, pss.privateKey, new Uint8Array(4)).then(() => 'signed', (e) => e.name);
+    out.pssVerify = await subtle.verify({ name: 'RSA-PSS', saltLength: 256 * 1024 * 1024 }, pss.publicKey, new Uint8Array(256), new Uint8Array(4)).then((ok) => ok, (e) => e.name);
+    out.pssOk = await subtle.sign({ name: 'RSA-PSS', saltLength: 32 }, pss.privateKey, new Uint8Array(4)).then((b) => b.byteLength, (e) => e.name);
+    out.bigRsa = await subtle.importKey('jwk', big, { name: 'RSA-PSS', hash: 'SHA-256' }, false, ['sign']).then(() => 'imported', (e) => e.name);
+    return out;
+  })()`, { globals: { big } });
+  assert.deepEqual(result, {
+    pbkdf2: 'OperationError',
+    hkdf: 'OperationError',
+    pss: 'OperationError',
+    pssVerify: false,
+    pssOk: 256,
+    bigRsa: 'DataError',
+  });
+});
+
 test('crypto.subtle: long native work stops at the isolate\'s limits', async () => {
   // PBKDF2 with 2^32 - 1 iterations would run for hours; it stops with the eval.
   const started = Date.now();

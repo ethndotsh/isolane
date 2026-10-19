@@ -124,6 +124,12 @@ pub enum CryptoError {
   #[class("DOMExceptionOperationError")]
   #[error("The operation was stopped: the isolate is out of time")]
   Interrupted,
+  #[class("DOMExceptionOperationError")]
+  #[error("isolane: derived keys are at most 1 MiB")]
+  DerivedLengthTooLarge,
+  #[class("DOMExceptionOperationError")]
+  #[error("The salt is too long for this key and hash")]
+  SaltLengthTooLarge,
   #[class(inherit)]
   #[error(transparent)]
   Other(
@@ -176,6 +182,30 @@ pub struct SignArg {
   named_curve: Option<CryptoNamedCurve>,
 }
 
+/// Most bytes PBKDF2 may derive (isolane's cap: the standard allows up to
+/// 2^32 - 1 bits, which is 512 MiB allocated outside the V8 heap).
+const MAX_DERIVED_BYTES: usize = 1 << 20;
+
+/// RSASSA-PSS's emLen - hLen - 2 (RFC 8017 9.1.1): the longest salt that
+/// fits with a `hash_len`-byte hash in a key whose modulus is `key_size`
+/// bytes. Checked before rsa allocates a salt of the requested length.
+fn check_pss_salt(key_size: usize, hash_len: usize, salt_len: usize) -> Result<(), CryptoError> {
+  // emLen is ceil((modBits - 1) / 8), at most the modulus's byte size.
+  if salt_len > key_size.saturating_sub(hash_len + 2) {
+    return Err(CryptoError::SaltLengthTooLarge);
+  }
+  Ok(())
+}
+
+fn hash_len(hash: CryptoHash) -> usize {
+  match hash {
+    CryptoHash::Sha1 => 20,
+    CryptoHash::Sha256 | CryptoHash::Sha3_256 => 32,
+    CryptoHash::Sha384 | CryptoHash::Sha3_384 => 48,
+    _ => 64,
+  }
+}
+
 pub fn op_crypto_sign_key(
   args: SignArg,
   zero_copy: &[u8],
@@ -216,9 +246,11 @@ pub fn op_crypto_sign_key(
           .salt_length
           .ok_or_else(|| CryptoError::MissingArgumentSaltLength)?
           as usize;
+        let hash = args.hash.ok_or_else(|| CryptoError::MissingArgumentHash)?;
+        check_pss_salt(rsa::traits::PublicKeyParts::size(&private_key), hash_len(hash), salt_len)?;
 
         let mut rng = IsolaneRng;
-        match args.hash.ok_or_else(|| CryptoError::MissingArgumentHash)? {
+        match hash {
           CryptoHash::Sha1 => {
             let signing_key = Pss::new_with_salt::<Sha1>(salt_len);
             let hashed = Sha1::digest(data);
@@ -410,8 +442,13 @@ pub fn op_crypto_verify_key(
           .salt_length
           .ok_or_else(|| CryptoError::MissingArgumentSaltLength)?
           as usize;
+        let hash = args.hash.ok_or_else(|| CryptoError::MissingArgumentHash)?;
+        // A salt that can't fit can't have made this signature.
+        if check_pss_salt(rsa::traits::PublicKeyParts::size(&public_key), hash_len(hash), salt_len).is_err() {
+          return Ok(false);
+        }
 
-        match args.hash.ok_or_else(|| CryptoError::MissingArgumentHash)? {
+        match hash {
           CryptoHash::Sha1 => {
             let pss = Pss::new_with_salt::<Sha1>(salt_len);
             let hashed = Sha1::digest(data);
@@ -588,6 +625,9 @@ pub fn op_crypto_derive_bits(
         }
         let hash = args.hash.ok_or_else(JsErrorBox::not_supported)?;
         let secret = args.key.data;
+        if args.length / 8 > MAX_DERIVED_BYTES {
+          return Err(CryptoError::DerivedLengthTooLarge);
+        }
         let mut out = vec![0; args.length / 8];
         match hash {
           CryptoHash::Sha1 => pbkdf2::<hmac::Hmac<Sha1>>(&secret, salt, iterations, &mut out)?,
@@ -719,6 +759,10 @@ pub fn op_crypto_derive_bits(
         let secret = args.key.data;
         // L
         let length = args.length / 8;
+        // RFC 5869: L is at most 255 * HashLen.
+        if length > 255 * hash_len(hash) {
+          return Err(CryptoError::HKDFLengthTooLarge);
+        }
 
         let mut r = vec![0u8; length];
         let expanded = match hash {

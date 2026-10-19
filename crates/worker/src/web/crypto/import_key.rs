@@ -28,6 +28,8 @@ pub enum ImportKeyError {
   ),
   #[error("invalid modulus")]
   InvalidModulus,
+  #[error("isolane: RSA keys are at most 4096 bits")]
+  ModulusTooLarge,
   #[error("invalid public exponent")]
   InvalidPublicExponent,
   #[error("invalid private exponent")]
@@ -157,7 +159,30 @@ pub enum ImportKeyResult {
   Hmac { raw_data: RustRawKeyData },
 }
 
+/// The largest RSA modulus isolane imports, as for generateKey: operations
+/// on a key can't be interrupted, and their cost grows with the cube of its
+/// size (rsa's public-key parser already refuses larger ones).
+const MAX_RSA_MODULUS_LENGTH: usize = 4096;
+/// rsa's largest public exponent is 2^33 - 1: five bytes.
+const MAX_RSA_PUBLIC_EXPONENT_BYTES: usize = 5;
+
 pub fn op_crypto_import_key(
+  opts: ImportKeyOptions,
+  key_data: KeyData,
+) -> Result<ImportKeyResult, ImportKeyError> {
+  let result = import_key(opts, key_data)?;
+  if let ImportKeyResult::Rsa { modulus_length, public_exponent, .. } = &result {
+    if *modulus_length > MAX_RSA_MODULUS_LENGTH {
+      return Err(ImportKeyError::ModulusTooLarge);
+    }
+    if public_exponent.0.len() > MAX_RSA_PUBLIC_EXPONENT_BYTES {
+      return Err(ImportKeyError::InvalidPublicExponent);
+    }
+  }
+  Ok(result)
+}
+
+fn import_key(
   opts: ImportKeyOptions,
   key_data: KeyData,
 ) -> Result<ImportKeyResult, ImportKeyError> {

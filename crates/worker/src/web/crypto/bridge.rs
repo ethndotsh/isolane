@@ -55,7 +55,8 @@ fn from_v8_at(scope: &mut v8::PinScope, value: v8::Local<v8::Value>, depth: usiz
         return copy_bytes(scope, value).map(Val::Bytes).ok_or_else(|| "expected a buffer".into());
     }
     if let Ok(array) = v8::Local::<v8::Array>::try_from(value) {
-        let mut out = Vec::with_capacity(array.length() as usize);
+        // Grows as it goes: a sparse array's length isn't its size.
+        let mut out = Vec::with_capacity((array.length() as usize).min(64));
         for i in 0..array.length() {
             let item = array.get_index(scope, i).ok_or("can't read an array element")?;
             out.push(from_v8_at(scope, item, depth + 1)?);
@@ -66,7 +67,7 @@ fn from_v8_at(scope: &mut v8::PinScope, value: v8::Local<v8::Value>, depth: usiz
         let names = object
             .get_own_property_names(scope, v8::GetPropertyNamesArgs::default())
             .ok_or("can't read an object's properties")?;
-        let mut out = Vec::with_capacity(names.length() as usize);
+        let mut out = Vec::with_capacity((names.length() as usize).min(64));
         for i in 0..names.length() {
             let key = names.get_index(scope, i).ok_or("can't read a property name")?;
             let item = object.get(scope, key).ok_or("can't read a property")?;
