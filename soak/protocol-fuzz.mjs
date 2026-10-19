@@ -42,7 +42,14 @@ process.stdin.on('data', (d) => {
     done = true;
     for (const s of plan.steps) {
       if (s.raw) out(Buffer.from(s.raw, 'base64'));
-      else out(frame(Buffer.from(JSON.stringify(fill(s.msg, msg)))));
+      else if (s.binmsg) {
+        // A binary frame: tag, JSON length (maybe wrong), JSON, bytes.
+        const json = Buffer.from(JSON.stringify(fill(s.binmsg, msg)));
+        const head = Buffer.alloc(5);
+        head[0] = s.tag;
+        head.writeUInt32LE(s.jsonLen ?? json.length, 1);
+        out(frame(Buffer.concat([head, json, Buffer.from(s.bytes, 'base64')])));
+      } else out(frame(Buffer.from(JSON.stringify(fill(s.msg, msg)))));
     }
     if (plan.exit) process.exit(plan.exit);
   }
@@ -91,11 +98,46 @@ function rawStep() {
   else bytes = Buffer.alloc(3);
   return { raw: bytes.toString('base64') };
 }
+// Byte attachments: well-formed host calls with bytes, and every way to get
+// them wrong (lengths that don't add up, bad or repeated indices, a
+// placeholder that isn't null, bytes on a message that takes none, a JSON
+// length that overruns the frame).
+function binStep() {
+  const nArgs = Math.floor(rand() * 4);
+  const args = Array.from({ length: nArgs }, () => (rand() < 0.6 ? null : weird()));
+  const lens = [];
+  const bin = [];
+  for (let i = 0; i < nArgs; i++) {
+    if (args[i] === null && rand() < 0.8) {
+      const len = Math.floor(rand() * 64);
+      bin.push([i, len]);
+      lens.push(len);
+    }
+  }
+  let total = lens.reduce((a, b) => a + b, 0);
+  const corrupt = rand() < 0.5 ? pick(['extra-bytes', 'short-bytes', 'bad-index', 'dup-index', 'non-null', 'not-array', 'other-type', 'json-overrun', 'bad-tag', 'empty-bin']) : null;
+  if (corrupt === 'extra-bytes') total += 1 + Math.floor(rand() * 8);
+  if (corrupt === 'short-bytes' && total > 0) total -= 1;
+  if (corrupt === 'bad-index' && bin.length) bin[0][0] = pick([nArgs, -1, 1.5, '0', 2 ** 40]);
+  if (corrupt === 'dup-index' && bin.length) bin.push([...bin[0]]);
+  if (corrupt === 'non-null' && bin.length) args[bin[0][0]] = weird() ?? 1;
+  const binField = corrupt === 'not-array' ? weird() : corrupt === 'empty-bin' ? [] : bin;
+  const t = corrupt === 'other-type' ? pick(['result', 'log', 'usage', 'ready']) : 'hostCall';
+  const binmsg = { t, vm: '$vm', call: Math.floor(rand() * 5), name: 'echo', args, bin: binField, req: '$req', ok: true, value: 'null' };
+  const bytes = Buffer.from(Array.from({ length: total }, () => Math.floor(rand() * 256)));
+  const step = { binmsg, tag: corrupt === 'bad-tag' ? pick([1, 2, 0x7a, 0xff]) : 0, bytes: bytes.toString('base64') };
+  if (corrupt === 'json-overrun') step.jsonLen = 0xffffff;
+  return step;
+}
+
 function plan() {
   const ready = rand() < 0.9
     ? { t: 'ready', v8: 'fake', sandboxSecure: true, lockdown: { landlock: 'full', seccomp: 'full' } }
     : message();
-  const steps = Array.from({ length: 1 + Math.floor(rand() * 4) }, () => (rand() < 0.75 ? { msg: message() } : rawStep()));
+  const steps = Array.from({ length: 1 + Math.floor(rand() * 4) }, () => {
+    const r = rand();
+    return r < 0.55 ? { msg: message() } : r < 0.8 ? binStep() : rawStep();
+  });
   return { ready, steps, exit: rand() < 0.1 ? pick([0, 1, 139]) : 0 };
 }
 

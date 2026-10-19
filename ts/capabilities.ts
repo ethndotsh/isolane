@@ -130,24 +130,30 @@ function hostAllowed(patterns: readonly string[], host: string): boolean {
   });
 }
 
-interface FetchRequest {
+/** What the guest asks to fetch (the body, if any, is a separate byte argument). */
+interface FetchMeta {
   url: string;
   method: string;
   headers: [string, string][];
-  body?: string; // base64
+  /** Fetch's redirect mode: the broker follows redirects itself, re-checking each hop. */
+  redirect: 'follow' | 'manual' | 'error';
 }
 
-interface FetchResponse {
+/** A response's status and headers; its body is read with `read`. */
+interface FetchHead {
   status: number;
   statusText: string;
   url: string;
+  /** Every URL fetched, in order (one per redirect hop). */
+  urlList: string[];
   redirected: boolean;
   headers: [string, string][];
-  body: string; // base64
 }
 
-function parseFetchRequest(raw: unknown): FetchRequest {
-  const r = raw as Partial<FetchRequest> | null;
+const REDIRECT_MODES = new Set(['follow', 'manual', 'error']);
+
+function parseFetchMeta(raw: unknown): FetchMeta {
+  const r = raw as Partial<FetchMeta> | null;
   const ok =
     r !== null &&
     typeof r === 'object' &&
@@ -155,12 +161,40 @@ function parseFetchRequest(raw: unknown): FetchRequest {
     typeof r.method === 'string' &&
     Array.isArray(r.headers) &&
     r.headers.every((h) => Array.isArray(h) && h.length === 2 && typeof h[0] === 'string' && typeof h[1] === 'string') &&
-    (r.body === undefined || typeof r.body === 'string');
+    (r.redirect === undefined || REDIRECT_MODES.has(r.redirect));
   if (!ok) throw new TypeError('fetch: malformed request');
-  return r as FetchRequest;
+  return { ...(r as FetchMeta), redirect: r.redirect ?? 'follow' };
 }
 
-export function networkBroker(policy: NetworkPolicy): HostFunction {
+/** Unread response bytes per fetch before reading from the network pauses. */
+const FETCH_HIGH_WATER = 1 * MiB;
+/** Fetches a VM may have in flight (request sent, body not finished) at once. */
+const MAX_OPEN_FETCHES = 64;
+
+interface InFlight {
+  abort: AbortController;
+  timer: NodeJS.Timeout;
+  res?: http.IncomingMessage;
+  chunks: Buffer[];
+  buffered: number;
+  received: number;
+  ended: boolean;
+  error?: Error;
+  wake?: () => void;
+}
+
+/**
+ * The guest's fetch, as three host-function operations on a fetch id the
+ * guest picks:
+ * - `open(id, meta, body?)`: send the request (following redirects as
+ *   `meta.redirect` says, each hop checked against the policy) and resolve
+ *   with the response's status and headers;
+ * - `read(id)`: the next bytes of the response body, or null at its end;
+ * - `cancel(id)`: abort the request or the body.
+ * Every failure reaches the guest as a TypeError, as the Fetch standard
+ * has it.
+ */
+export function networkBroker(policy: NetworkPolicy): { fn: HostFunction; dispose: () => void } {
   if (!policy || (!Array.isArray(policy.allow) && typeof policy.allow !== 'function')) {
     throw new TypeError('isolane: network.allow must be a list of hostnames or a function');
   }
@@ -171,6 +205,7 @@ export function networkBroker(policy: NetworkPolicy): HostFunction {
   const maxRedirects = policy.maxRedirects ?? 5;
   const allowPrivate = policy.allowPrivateNetworks === true;
   let requests = 0;
+  const inFlight = new Map<number, InFlight>();
 
   const lookup = pinnedLookup(allowPrivate);
 
@@ -187,112 +222,189 @@ export function networkBroker(policy: NetworkPolicy): HostFunction {
     if (allowed !== true) throw new Error(`fetch to ${url.origin} is not allowed by the network policy`);
   };
 
-  const once = (url: URL, method: string, headers: Record<string, string>, body: Buffer | undefined, deadline: number) =>
-    new Promise<{ status: number; statusText: string; headers: [string, string][]; body: Buffer }>((resolve, reject) => {
-      const remaining = deadline - Date.now();
-      if (remaining <= 0) return reject(new Error('fetch timed out'));
+  // One hop: resolves when the response's headers arrive (its body unread).
+  const send = (url: URL, method: string, headers: Record<string, string>, body: Uint8Array | undefined, signal: AbortSignal) =>
+    new Promise<http.IncomingMessage>((resolve, reject) => {
       const mod = url.protocol === 'https:' ? https : http;
-      const req = mod.request(url, {
-        method,
-        headers,
-        lookup: lookup as never,
-        agent: false,
-        signal: AbortSignal.timeout(remaining),
-      });
-      req.on('response', (res) => {
-        const chunks: Buffer[] = [];
-        let size = 0;
-        let tooBig = false;
-        res.on('data', (chunk: Buffer) => {
-          if (tooBig) return;
-          size += chunk.length;
-          if (size > maxResponse) {
-            tooBig = true;
-            reject(new Error(`response larger than ${maxResponse} bytes`));
-            req.destroy();
-            return;
-          }
-          chunks.push(chunk);
-        });
-        res.on('end', () => {
-          if (tooBig) return;
-          const pairs: [string, string][] = [];
-          for (let i = 0; i < res.rawHeaders.length; i += 2) pairs.push([res.rawHeaders[i].toLowerCase(), res.rawHeaders[i + 1]]);
-          resolve({ status: res.statusCode ?? 0, statusText: res.statusMessage ?? '', headers: pairs, body: Buffer.concat(chunks) });
-        });
-        res.on('error', reject);
-      });
-      req.on('error', (err) => reject(err.name === 'AbortError' ? new Error('fetch timed out') : err));
+      const req = mod.request(url, { method, headers, lookup: lookup as never, agent: false, signal });
+      req.on('response', resolve);
+      req.on('error', reject);
       req.end(body);
     });
 
-  // Every fetch failure reaches the guest as a TypeError, as the Fetch
-  // standard has it (with the reason in the message).
-  return async (raw: unknown): Promise<FetchResponse> => {
-    try {
-      return await doFetch(raw);
-    } catch (err) {
-      throw err instanceof TypeError ? err : new TypeError((err as Error).message);
-    }
+  const wake = (f: InFlight) => {
+    const w = f.wake;
+    f.wake = undefined;
+    w?.();
+  };
+  const finish = (id: number) => {
+    const f = inFlight.get(id);
+    if (!f) return;
+    inFlight.delete(id);
+    clearTimeout(f.timer);
   };
 
-  async function doFetch(raw: unknown): Promise<FetchResponse> {
-    const r = parseFetchRequest(raw);
+  const failure = (err: unknown, f?: InFlight) => {
+    if (f?.abort.signal.aborted) {
+      const reason = f.abort.signal.reason;
+      return new TypeError(reason instanceof Error ? reason.message : 'fetch was cancelled');
+    }
+    return err instanceof TypeError ? err : new TypeError((err as Error).message);
+  };
+
+  async function open(rawId: unknown, rawMeta: unknown, rawBody: unknown): Promise<FetchHead> {
+    if (!(Number.isSafeInteger(rawId) && (rawId as number) >= 0) || inFlight.has(rawId as number)) {
+      throw new TypeError('fetch: bad fetch id');
+    }
+    const id = rawId as number;
+    const meta = parseFetchMeta(rawMeta);
+    let body = rawBody === undefined || rawBody === null ? undefined : rawBody;
+    if (body !== undefined && !(body instanceof Uint8Array)) throw new TypeError('fetch: malformed request body');
+    if (body && body.length > maxRequest) throw new TypeError(`fetch: request body larger than ${maxRequest} bytes`);
+    if (inFlight.size >= MAX_OPEN_FETCHES) throw new TypeError(`fetch: more than ${MAX_OPEN_FETCHES} fetches in flight`);
     if (policy.maxRequests !== undefined && requests >= policy.maxRequests) {
-      throw new Error(`fetch: this VM has used its ${policy.maxRequests} requests`);
+      throw new TypeError(`fetch: this VM has used its ${policy.maxRequests} requests`);
     }
     requests++;
     let url: URL;
     try {
-      url = new URL(r.url);
+      url = new URL(meta.url);
     } catch {
-      throw new TypeError(`fetch: invalid URL ${JSON.stringify(r.url.slice(0, 200))}`);
+      throw new TypeError(`fetch: invalid URL ${JSON.stringify(meta.url.slice(0, 200))}`);
     }
-    let method = r.method.toUpperCase();
+    let method = meta.method.toUpperCase();
     if (!methods.has(method)) throw new TypeError(`fetch: method ${method} is not allowed`);
-    let body = r.body === undefined ? undefined : Buffer.from(r.body, 'base64');
-    if (body && body.length > maxRequest) throw new Error(`fetch: request body larger than ${maxRequest} bytes`);
     const headers: Record<string, string> = {};
-    for (const [k, v] of r.headers) {
+    for (const [k, v] of meta.headers) {
       const name = k.toLowerCase();
       if (DROPPED_HEADERS.has(name)) continue;
       headers[name] = name in headers ? `${headers[name]}, ${v}` : v;
     }
     headers['accept-encoding'] ??= 'identity';
-    const deadline = Date.now() + timeoutMs;
 
-    for (let hop = 0; ; hop++) {
-      await check(url, method);
-      let res;
-      try {
-        res = await once(url, method, headers, body, deadline);
-      } catch (err) {
-        throw new Error(`fetch to ${url.origin} failed: ${(err as Error).message}`);
-      }
-      const location = res.headers.find(([k]) => k === 'location')?.[1];
-      if ([301, 302, 303, 307, 308].includes(res.status) && location !== undefined) {
-        if (hop >= maxRedirects) throw new Error(`fetch: more than ${maxRedirects} redirects`);
-        url = new URL(location, url);
-        if (res.status === 303 || ((res.status === 301 || res.status === 302) && method === 'POST')) {
-          method = 'GET';
-          body = undefined;
-          delete headers['content-type'];
+    // The timeout covers the whole fetch, body included.
+    const abort = new AbortController();
+    const f: InFlight = {
+      abort,
+      timer: setTimeout(() => abort.abort(new Error('fetch timed out')), timeoutMs),
+      chunks: [],
+      buffered: 0,
+      received: 0,
+      ended: false,
+    };
+    inFlight.set(id, f);
+    const urlList: string[] = [];
+    try {
+      for (let hop = 0; ; hop++) {
+        await check(url, method);
+        urlList.push(url.href);
+        let res: http.IncomingMessage;
+        try {
+          res = await send(url, method, headers, body, abort.signal);
+        } catch (err) {
+          throw new Error(`fetch to ${url.origin} failed: ${(err as Error).message}`);
         }
-        // Credentials don't follow a redirect to another origin.
-        delete headers['authorization'];
-        delete headers['cookie'];
-        continue;
+        const status = res.statusCode ?? 0;
+        const location = res.headers.location;
+        if ([301, 302, 303, 307, 308].includes(status) && typeof location === 'string' && meta.redirect !== 'manual') {
+          res.destroy();
+          if (meta.redirect === 'error') throw new TypeError('fetch: the response redirected, and redirect is "error"');
+          if (hop >= maxRedirects) throw new TypeError(`fetch: more than ${maxRedirects} redirects`);
+          const next = new URL(location, url);
+          if (status === 303 ? method !== 'GET' && method !== 'HEAD' : (status === 301 || status === 302) && method === 'POST') {
+            method = 'GET';
+            body = undefined;
+            for (const name of ['content-type', 'content-length', 'content-encoding', 'content-language', 'content-location']) {
+              delete headers[name];
+            }
+          }
+          // Credentials don't follow a redirect to another origin.
+          if (next.origin !== url.origin) {
+            delete headers['authorization'];
+            delete headers['cookie'];
+            delete headers['proxy-authorization'];
+          }
+          url = next;
+          continue;
+        }
+        // Stream the body: buffer up to the high-water mark, then pause
+        // until the guest reads.
+        f.res = res;
+        res.on('data', (chunk: Buffer) => {
+          f.received += chunk.length;
+          if (f.received > maxResponse) {
+            f.error = new TypeError(`fetch: response larger than ${maxResponse} bytes`);
+            res.destroy();
+            wake(f);
+            return;
+          }
+          f.chunks.push(chunk);
+          f.buffered += chunk.length;
+          if (f.buffered >= FETCH_HIGH_WATER) res.pause();
+          wake(f);
+        });
+        res.on('end', () => {
+          f.ended = true;
+          clearTimeout(f.timer);
+          wake(f);
+        });
+        res.on('error', (err) => {
+          f.error ??= failure(err, f);
+          wake(f);
+        });
+        res.on('close', () => {
+          if (!f.ended && !f.error) f.error = failure(new Error('the response was cut off'), f);
+          wake(f);
+        });
+        const pairs: [string, string][] = [];
+        for (let i = 0; i < res.rawHeaders.length; i += 2) pairs.push([res.rawHeaders[i].toLowerCase(), res.rawHeaders[i + 1]]);
+        return { status, statusText: res.statusMessage ?? '', url: url.href, urlList, redirected: hop > 0, headers: pairs };
       }
-      return {
-        status: res.status,
-        statusText: res.statusText,
-        url: url.href,
-        redirected: hop > 0,
-        headers: res.headers,
-        body: res.body.toString('base64'),
-      };
+    } catch (err) {
+      finish(id);
+      throw failure(err, f);
     }
   }
+
+  async function read(rawId: unknown): Promise<Buffer | null> {
+    const f = typeof rawId === 'number' ? inFlight.get(rawId) : undefined;
+    if (!f) throw new TypeError('fetch: the response body is closed');
+    if (f.wake) throw new TypeError('fetch: another read is already waiting');
+    while (f.chunks.length === 0 && !f.ended && !f.error) {
+      await new Promise<void>((r) => (f.wake = r));
+    }
+    if (f.chunks.length) {
+      const data = f.chunks.length === 1 ? f.chunks[0] : Buffer.concat(f.chunks);
+      f.chunks = [];
+      f.buffered = 0;
+      f.res?.resume();
+      return data;
+    }
+    finish(rawId as number);
+    if (f.error) throw f.error;
+    return null; // end of the body
+  }
+
+  function cancel(rawId: unknown): void {
+    const f = typeof rawId === 'number' ? inFlight.get(rawId) : undefined;
+    if (!f) return;
+    finish(rawId as number);
+    f.abort.abort(new Error('fetch was cancelled'));
+    f.res?.destroy();
+    f.error ??= new TypeError('fetch was cancelled');
+    wake(f);
+  }
+
+  const fn: HostFunction = (op: unknown, ...args: unknown[]) => {
+    if (op === 'open') return open(args[0], args[1], args[2]);
+    if (op === 'read') return read(args[0]);
+    if (op === 'cancel') return cancel(args[0]);
+    throw new TypeError('fetch: unknown operation');
+  };
+  const dispose = () => {
+    for (const id of [...inFlight.keys()]) cancel(id);
+  };
+  return { fn, dispose };
 }
 
 // ---- sockets ----
@@ -420,7 +532,7 @@ export function socketBroker(policy: SocketPolicy): { fn: HostFunction; dispose:
     return id;
   };
 
-  const read = async (id: unknown) => {
+  const read = async (id: unknown): Promise<Buffer | null> => {
     const g = get(id);
     if (g.wake) throw new Error('socket.read: another read is already waiting');
     while (g.chunks.length === 0 && !g.ended && !g.error) {
@@ -431,7 +543,7 @@ export function socketBroker(policy: SocketPolicy): { fn: HostFunction; dispose:
       g.chunks = [];
       g.buffered = 0;
       g.socket.resume();
-      return data.toString('base64');
+      return data;
     }
     if (g.error) throw new Error(`socket error: ${g.error.message}`);
     return null; // end of stream
@@ -439,10 +551,10 @@ export function socketBroker(policy: SocketPolicy): { fn: HostFunction; dispose:
 
   const write = async (id: unknown, data: unknown) => {
     const g = get(id);
-    if (typeof data !== 'string') throw new TypeError('socket.write: malformed data');
+    if (!(data instanceof Uint8Array)) throw new TypeError('socket.write: malformed data');
     if (g.error) throw new Error(`socket error: ${g.error.message}`);
     await new Promise<void>((resolve, reject) =>
-      g.socket.write(Buffer.from(data, 'base64'), (err) => (err ? reject(new Error(`socket error: ${err.message}`)) : resolve())),
+      g.socket.write(data, (err) => (err ? reject(new Error(`socket error: ${err.message}`)) : resolve())),
     );
   };
 
@@ -541,7 +653,7 @@ export function fsBroker(policy: FsPolicy): HostFunction {
         const st = await fh.stat();
         if (!st.isFile()) throw new FsError(`fs.readFile ${JSON.stringify(path)}: not a file`, 'EISDIR');
         if (st.size > maxBytes) throw new FsError(`fs.readFile ${JSON.stringify(path)}: larger than ${maxBytes} bytes`, 'EFBIG');
-        return (await fh.readFile()).toString('base64');
+        return await fh.readFile();
       } finally {
         await fh.close();
       }
@@ -562,8 +674,8 @@ export function fsBroker(policy: FsPolicy): HostFunction {
       }
     },
     async writeFile(path, data) {
-      if (typeof data !== 'string') throw new FsError('fs.writeFile: malformed data', 'EINVAL');
-      const bytes = Buffer.from(data, 'base64');
+      if (!(data instanceof Uint8Array)) throw new FsError('fs.writeFile: malformed data', 'EINVAL');
+      const bytes = data;
       if (bytes.length > maxBytes) throw new FsError(`fs.writeFile ${JSON.stringify(path)}: larger than ${maxBytes} bytes`, 'EFBIG');
       const flags = fsConstants.O_WRONLY | fsConstants.O_CREAT | fsConstants.O_TRUNC | fsConstants.O_NOFOLLOW;
       const fh = await open(await resolveEntry(path), flags, 0o644);
@@ -623,12 +735,20 @@ export const FS_HOST_FUNCTION = '__isolane_fs';
 export const SOCKET_HOST_FUNCTION = '__isolane_socket';
 
 /**
+ * The hook a VM's web platform (`webPlatform`) leaves for the prelude: the
+ * prelude hands it the raw fetch host function, and the spec `fetch` uses
+ * it. The worker deletes the hook before guest code runs.
+ */
+export const WEB_FETCH_HOOK = '__isolane_web_fetch';
+
+/**
  * Trusted setup the worker runs in a VM's context before any guest code:
  * wraps the raw host functions in `fetch`/`Response`/`Headers` and `fs`,
- * then deletes the raw ones. Plain ECMAScript (no TextEncoder or atob), so
- * it carries its own UTF-8 and base64. Guest code can tamper with these
- * wrappers, which only affects itself: the brokers above validate every
- * request on their own.
+ * then deletes the raw ones. Plain ECMAScript (no TextEncoder), so it
+ * carries its own UTF-8. Bytes cross as Uint8Arrays (host calls carry them
+ * raw). With the web platform on, its spec `fetch` takes over from the
+ * minimal one here. Guest code can tamper with these wrappers, which only
+ * affects itself: the brokers above validate every request on their own.
  */
 export const PRELUDE = String.raw`(() => {
   'use strict';
@@ -640,29 +760,6 @@ export const PRELUDE = String.raw`(() => {
   delete g.${FS_HOST_FUNCTION};
   delete g.${SOCKET_HOST_FUNCTION};
 
-  const B64 = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/';
-  const B64_INDEX = new Uint8Array(128);
-  for (let i = 0; i < 64; i++) B64_INDEX[B64.charCodeAt(i)] = i;
-  const toBase64 = (bytes) => {
-    let out = '';
-    for (let i = 0; i < bytes.length; i += 3) {
-      const n = (bytes[i] << 16) | ((bytes[i + 1] ?? 0) << 8) | (bytes[i + 2] ?? 0);
-      out += B64[n >> 18] + B64[(n >> 12) & 63] + (i + 1 < bytes.length ? B64[(n >> 6) & 63] : '=') + (i + 2 < bytes.length ? B64[n & 63] : '=');
-    }
-    return out;
-  };
-  const fromBase64 = (s) => {
-    const len = s.length;
-    const pad = s.endsWith('==') ? 2 : s.endsWith('=') ? 1 : 0;
-    const out = new Uint8Array((len / 4) * 3 - pad);
-    for (let i = 0, j = 0; i < len; i += 4) {
-      const n = (B64_INDEX[s.charCodeAt(i)] << 18) | (B64_INDEX[s.charCodeAt(i + 1)] << 12) | (B64_INDEX[s.charCodeAt(i + 2)] << 6) | B64_INDEX[s.charCodeAt(i + 3)];
-      out[j++] = n >> 16;
-      if (j < out.length) out[j++] = (n >> 8) & 255;
-      if (j < out.length) out[j++] = n & 255;
-    }
-    return out;
-  };
   const utf8Encode = (str) => {
     const out = [];
     for (let i = 0; i < str.length; i++) {
@@ -704,6 +801,8 @@ export const PRELUDE = String.raw`(() => {
     }
     return out;
   };
+  // A guest's text, bytes, or buffer as a Uint8Array (a copy: the bytes
+  // cross to the host as they are when called).
   const toBytes = (data) => {
     if (typeof data === 'string') return utf8Encode(data);
     if (data instanceof ArrayBuffer) return new Uint8Array(data);
@@ -711,7 +810,9 @@ export const PRELUDE = String.raw`(() => {
     return utf8Encode(String(data));
   };
 
-  if (rawFetch) {
+  if (rawFetch && typeof g.${WEB_FETCH_HOOK} === 'function') {
+    g.${WEB_FETCH_HOOK}(rawFetch);
+  } else if (rawFetch) {
     class Headers {
       #map = new Map();
       constructor(init) {
@@ -737,33 +838,49 @@ export const PRELUDE = String.raw`(() => {
     class Response {
       #body;
       #used = false;
-      constructor(r) {
+      constructor(r, body) {
         this.status = r.status;
         this.statusText = r.statusText;
         this.ok = r.status >= 200 && r.status < 300;
         this.url = r.url;
         this.redirected = r.redirected;
         this.headers = new Headers(r.headers);
-        this.#body = r.body;
+        this.#body = body;
       }
       get bodyUsed() { return this.#used; }
       #take() {
         if (this.#used) return Promise.reject(new TypeError('body already used'));
         this.#used = true;
-        return Promise.resolve(fromBase64(this.#body));
+        return Promise.resolve(this.#body);
       }
       bytes() { return this.#take(); }
       arrayBuffer() { return this.#take().then((b) => b.buffer); }
       text() { return this.#take().then(utf8Decode); }
       json() { return this.text().then(JSON.parse); }
     }
+    let nextFetch = 1;
     g.Headers = Headers;
     g.Response = Response;
     g.fetch = async function fetch(input, init = {}) {
       const url = typeof input === 'string' ? input : input && typeof input.url === 'string' ? input.url : String(input);
       const headers = [...new Headers(init.headers)];
-      const body = init.body == null ? undefined : toBase64(toBytes(init.body));
-      return new Response(await rawFetch({ url, method: String(init.method ?? 'GET'), headers, body }));
+      const body = init.body == null ? undefined : toBytes(init.body);
+      const id = nextFetch++;
+      const head = await rawFetch('open', id, { url, method: String(init.method ?? 'GET'), headers }, body);
+      // This minimal fetch reads the whole body before resolving.
+      const chunks = [];
+      let size = 0;
+      for (let chunk; (chunk = await rawFetch('read', id)) !== null; ) {
+        chunks.push(chunk);
+        size += chunk.length;
+      }
+      const all = new Uint8Array(size);
+      let at = 0;
+      for (const chunk of chunks) {
+        all.set(chunk, at);
+        at += chunk.length;
+      }
+      return new Response(head, all);
     };
   }
 
@@ -781,11 +898,8 @@ export const PRELUDE = String.raw`(() => {
       const tls = options.secureTransport === 'on';
       const id = await rawSocket('open', { hostname, port, tls });
       return Object.freeze({
-        async read() {
-          const data = await rawSocket('read', id);
-          return data === null ? null : fromBase64(data);
-        },
-        write: (data) => rawSocket('write', id, toBase64(toBytes(data))),
+        read: () => rawSocket('read', id),
+        write: (data) => rawSocket('write', id, toBytes(data)),
         close: () => rawSocket('close', id),
       });
     };
@@ -795,13 +909,13 @@ export const PRELUDE = String.raw`(() => {
     const encodingOf = (options) => (typeof options === 'string' ? options : options?.encoding);
     g.fs = Object.freeze({
       async readFile(path, options) {
-        const bytes = fromBase64(await rawFs('readFile', path));
+        const bytes = await rawFs('readFile', path);
         const enc = encodingOf(options);
         if (enc == null) return bytes;
         if (enc === 'utf8' || enc === 'utf-8') return utf8Decode(bytes);
         throw new TypeError('fs.readFile: unsupported encoding ' + enc);
       },
-      writeFile: (path, data) => rawFs('writeFile', path, toBase64(toBytes(data))),
+      writeFile: (path, data) => rawFs('writeFile', path, toBytes(data)),
       readdir: (path) => rawFs('readdir', path),
       stat: (path) => rawFs('stat', path),
       exists: (path) => rawFs('exists', path),
@@ -814,7 +928,7 @@ export const PRELUDE = String.raw`(() => {
 export interface Capabilities {
   hostFunctions: Record<string, HostFunction>;
   prelude?: string;
-  /** Release what the VM holds open (sockets) when it goes away. */
+  /** Release what the VM holds open (sockets, fetches) when it goes away. */
   dispose(): void;
 }
 
@@ -827,7 +941,9 @@ export function capabilities(
   const reserved = new Set<string>();
   const disposers: (() => void)[] = [];
   if (opts.network) {
-    hostFunctions[FETCH_HOST_FUNCTION] = networkBroker(opts.network);
+    const broker = networkBroker(opts.network);
+    hostFunctions[FETCH_HOST_FUNCTION] = broker.fn;
+    disposers.push(broker.dispose);
     for (const n of ['fetch', 'Headers', 'Response']) reserved.add(n);
   }
   if (opts.fs) {

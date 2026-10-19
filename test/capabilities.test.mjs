@@ -9,7 +9,33 @@ import { createServer as createTcpServer } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import vm from 'node:vm';
+import { splitBytes } from '../dist/binary.js';
 import { capabilities, isPublicAddress } from '../dist/capabilities.js';
+
+/**
+ * How a value crosses the protocol: bytes as bytes (top-level byte
+ * arguments to the host; byte values anywhere in a host's result, back to
+ * the guest as Uint8Arrays), everything else through JSON.
+ */
+const isBytes = (v) => v instanceof ArrayBuffer || ArrayBuffer.isView(v) || (v && typeof v === 'object' && typeof v.byteLength === 'number' && Object.prototype.toString.call(v) === '[object ArrayBuffer]');
+const viewBytes = (v) => (ArrayBuffer.isView(v) ? new Uint8Array(v.buffer, v.byteOffset, v.byteLength) : new Uint8Array(v));
+function argsToHost(args) {
+  // The worker sends top-level byte arguments raw; the rest is JSON.
+  const json = JSON.parse(JSON.stringify(args.map((a) => (isBytes(a) ? null : a))));
+  return args.map((a, i) => (isBytes(a) ? Buffer.from(viewBytes(a)) : json[i]));
+}
+function resultToGuest(value, GuestUint8Array) {
+  const { json, parts } = splitBytes(value);
+  if (json === undefined) return undefined;
+  let out = JSON.parse(json);
+  for (const { path, bytes } of parts) {
+    const u8 = new GuestUint8Array(bytes.length);
+    u8.set(bytes);
+    if (path.length === 0) out = u8;
+    else path.slice(0, -1).reduce((o, k) => o[k], out)[path.at(-1)] = u8;
+  }
+  return out;
+}
 
 /** A guest context with the policies installed; returns an async eval. */
 function guest(policies, track) {
@@ -17,18 +43,23 @@ function guest(policies, track) {
   track?.(caps);
   const ctx = vm.createContext({});
   const GuestError = vm.runInContext('Error', ctx);
+  const GuestTypeError = vm.runInContext('TypeError', ctx);
+  const GuestUint8Array = vm.runInContext('Uint8Array', ctx);
   for (const [name, fn] of Object.entries(caps.hostFunctions)) {
     ctx[name] = (...args) =>
       Promise.resolve()
-        .then(() => fn(...JSON.parse(JSON.stringify(args))))
-        .then((v) => (v === undefined ? undefined : JSON.parse(JSON.stringify(v))))
+        .then(() => fn(...argsToHost(args)))
+        .then((v) => resultToGuest(v, GuestUint8Array))
         .catch((e) => {
-          throw new GuestError(e.message);
+          const err = new (e instanceof TypeError ? GuestTypeError : GuestError)(e.message);
+          if (typeof e.code === 'string') err.code = e.code;
+          throw err;
         });
   }
   vm.runInContext(caps.prelude, ctx);
-  // Results come back through JSON, as from a worker.
-  return (code) => vm.runInContext(`(async () => { ${code} })()`, ctx).then((v) => (v === undefined ? v : JSON.parse(JSON.stringify(v))));
+  // Results come back through JSON, as from a worker (bytes as arrays).
+  return (code) =>
+    vm.runInContext(`(async () => { ${code} })()`, ctx).then((v) => (v === undefined ? v : JSON.parse(JSON.stringify(v))));
 }
 
 // ---- network ----
@@ -43,6 +74,7 @@ const server = createServer((req, res) => {
     if (req.url === '/big') return res.writeHead(200).end(Buffer.alloc(2048));
     if (req.url === '/to-json') return res.writeHead(302, { location: '/json' }).end();
     if (req.url === '/to-echo') return res.writeHead(307, { location: '/echo' }).end();
+    if (req.url === '/to-other-origin') return res.writeHead(307, { location: `http://127.0.0.1:${server.address().port}/echo` }).end();
     if (req.url === '/to-evil') return res.writeHead(302, { location: 'http://evil.example/' }).end();
     if (req.url === '/slow') return setTimeout(() => res.end('late'), 2000);
     res.writeHead(404).end('nope');
@@ -104,7 +136,10 @@ test('fetch: redirects are followed and re-checked', async () => {
   await assert.rejects(run(`await fetch('${base}/to-evil')`), /evil\.example is not allowed/);
   const kept = await run(`const r = await fetch('${base}/to-echo', { method: 'POST', body: 'x', headers: { authorization: 'secret' } }); return await r.json();`);
   assert.equal(kept.method, 'POST'); // 307 keeps the method
-  assert.equal(kept.headers.authorization, undefined);
+  assert.equal(kept.headers.authorization, 'secret'); // same origin: credentials stay
+  const both = guest({ network: { allow: ['localhost', '127.0.0.1'], allowPrivateNetworks: true } });
+  const moved = await both(`const r = await fetch('${base}/to-other-origin', { headers: { authorization: 'secret' } }); return await r.json();`);
+  assert.equal(moved.headers.authorization, undefined); // another origin: dropped
 });
 
 test('fetch: limits', async () => {

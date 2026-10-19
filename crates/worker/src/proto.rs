@@ -63,10 +63,23 @@ pub enum In {
         /// The error's class in the guest, and its `code` property.
         error_name: Option<String>,
         error_code: Option<String>,
+        /// Byte values in the result, in the order their bytes follow the
+        /// frame's JSON: where each goes in the parsed value (`[]` for the
+        /// value itself), and its length. `value` has null there.
+        #[serde(default)]
+        bin: Vec<(Vec<PathSegment>, usize)>,
     },
     Dispose {
         vm: u64,
     },
+}
+
+/// A step into a JSON value: an object key or an array index.
+#[derive(Deserialize, Clone)]
+#[serde(untagged)]
+pub enum PathSegment {
+    Index(u32),
+    Key(String),
 }
 
 /// Why an eval failed (`IsolaneError` codes; the supervisor adds its own
@@ -177,5 +190,9 @@ pub enum Out<'a> {
         call: u64,
         name: &'a str,
         args: &'a RawValue,
+        /// Arguments sent as bytes, in the order their bytes follow the
+        /// frame's JSON: `[argument index, length]`. `args` has null there.
+        #[serde(skip_serializing_if = "<[_]>::is_empty")]
+        bin: &'a [(u32, usize)],
     },
 }

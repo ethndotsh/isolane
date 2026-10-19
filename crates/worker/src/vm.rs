@@ -114,6 +114,8 @@ pub struct Reply {
     /// `code` property (`ENOENT`, ...).
     pub error_name: Option<String>,
     pub error_code: Option<String>,
+    /// Byte values in the result and where they go (`[]`: the result itself).
+    pub bytes: Vec<(Vec<crate::proto::PathSegment>, Vec<u8>)>,
 }
 
 /// A VM's incoming messages. A sync host call waits for its own reply and
@@ -338,19 +340,109 @@ struct Bridge {
 
 /// Serialize a host call's arguments and send it; returns the call id.
 /// None if the arguments can't be serialized (the exception is pending).
+/// Arguments that are bytes (ArrayBuffers and views of them) cross as raw
+/// bytes, not JSON, when passed directly; nested inside other values they
+/// serialize as JSON as before.
 fn send_host_call(scope: &mut v8::PinScope, args: &v8::FunctionCallbackArguments, bridge: &Bridge) -> Option<u64> {
     let name = args.data().to_rust_string_lossy(scope);
     let arr = v8::Array::new(scope, args.length());
+    let mut bin: Vec<(u32, usize)> = Vec::new();
+    let mut attached: Vec<Vec<u8>> = Vec::new();
     for i in 0..args.length() {
-        arr.set_index(scope, i as u32, args.get(i));
+        let arg = args.get(i);
+        if let Some(b) = arg_bytes(arg) {
+            bin.push((i as u32, b.len()));
+            attached.push(b);
+            let null = v8::null(scope).into();
+            arr.set_index(scope, i as u32, null);
+        } else {
+            arr.set_index(scope, i as u32, arg);
+        }
     }
     // A throw here (BigInt, cycles) propagates to the guest caller.
     let json = v8::json::stringify(scope, arr.into())?.to_rust_string_lossy(scope);
+    let attached_len: usize = attached.iter().map(Vec::len).sum();
+    if !crate::frame::fits(json.len() + name.len() + 128, attached_len) {
+        let msg = v8::String::new(scope, "host function arguments are larger than 64 MiB").unwrap();
+        let e = v8::Exception::range_error(scope, msg);
+        scope.throw_exception(e);
+        return None;
+    }
     let call = bridge.next_call.get();
     bridge.next_call.set(call + 1);
     let args = RawValue::from_string(json).expect("V8 produced JSON");
-    bridge.out.send(&Out::HostCall { vm: bridge.vm, call, name: &name, args: &args });
+    let attached: Vec<&[u8]> = attached.iter().map(Vec::as_slice).collect();
+    bridge.out.send_with_bytes(&Out::HostCall { vm: bridge.vm, call, name: &name, args: &args, bin: &bin }, &attached);
     Some(call)
+}
+
+/// A copy of the bytes of an ArrayBuffer or a view of one.
+fn arg_bytes(value: v8::Local<v8::Value>) -> Option<Vec<u8>> {
+    if let Ok(view) = v8::Local::<v8::ArrayBufferView>::try_from(value) {
+        let mut out = vec![0u8; view.byte_length()];
+        let n = view.copy_contents(&mut out);
+        out.truncate(n);
+        return Some(out);
+    }
+    let buffer = v8::Local::<v8::ArrayBuffer>::try_from(value).ok()?;
+    let len = buffer.byte_length();
+    Some(match buffer.data() {
+        Some(p) if len > 0 => unsafe { std::slice::from_raw_parts(p.as_ptr() as *const u8, len) }.to_vec(),
+        _ => Vec::new(),
+    })
+}
+
+/// A new Uint8Array holding `data`, allocated by V8 (inside the sandbox).
+fn new_u8array<'s>(scope: &mut v8::PinScope<'s, '_>, data: &[u8]) -> v8::Local<'s, v8::Value> {
+    let buffer = v8::ArrayBuffer::new(scope, data.len());
+    if let Some(p) = buffer.data() {
+        unsafe { std::ptr::copy_nonoverlapping(data.as_ptr(), p.as_ptr() as *mut u8, data.len()) };
+    }
+    v8::Uint8Array::new(scope, buffer, 0, data.len()).unwrap().into()
+}
+
+/// Put byte values into a parsed host reply at their paths. A path the
+/// value doesn't have is ignored (the supervisor built both).
+fn place_bytes<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    mut value: v8::Local<'s, v8::Value>,
+    bytes: Vec<(Vec<crate::proto::PathSegment>, Vec<u8>)>,
+) -> v8::Local<'s, v8::Value> {
+    use crate::proto::PathSegment;
+    for (path, data) in bytes {
+        let u8s = new_u8array(scope, &data);
+        let Some((last, parents)) = path.split_last() else {
+            value = u8s;
+            continue;
+        };
+        let mut holder = value;
+        let key = |scope: &mut v8::PinScope<'s, '_>, seg: &PathSegment| -> v8::Local<'s, v8::Value> {
+            match seg {
+                PathSegment::Index(i) => v8::Integer::new_from_unsigned(scope, *i).into(),
+                PathSegment::Key(k) => v8::String::new(scope, k).unwrap().into(),
+            }
+        };
+        let mut ok = true;
+        for seg in parents {
+            let Ok(obj) = v8::Local::<v8::Object>::try_from(holder) else {
+                ok = false;
+                break;
+            };
+            let k = key(scope, seg);
+            match obj.get(scope, k) {
+                Some(v) => holder = v,
+                None => {
+                    ok = false;
+                    break;
+                }
+            }
+        }
+        if let (true, Ok(obj)) = (ok, v8::Local::<v8::Object>::try_from(holder)) {
+            let k = key(scope, last);
+            obj.set(scope, k, u8s);
+        }
+    }
+    value
 }
 
 /// Guest-facing host function: send a `hostCall` and return a Promise that
@@ -410,10 +502,13 @@ fn settle<'s>(scope: &mut v8::PinScope<'s, '_>, reply: Reply) -> Result<v8::Loca
             None => Some(v8::undefined(scope).into()),
             Some(json) => v8::String::new(scope, json).and_then(|s| v8::json::parse(scope, s)),
         };
-        return parsed.ok_or_else(|| {
-            let msg = v8::String::new(scope, "host function returned invalid JSON").unwrap();
-            v8::Exception::error(scope, msg)
-        });
+        return match parsed {
+            Some(v) => Ok(place_bytes(scope, v, reply.bytes)),
+            None => {
+                let msg = v8::String::new(scope, "host function returned invalid JSON").unwrap();
+                Err(v8::Exception::error(scope, msg))
+            }
+        };
     }
     let msg = v8::String::new(scope, reply.error.as_deref().unwrap_or("host function failed")).unwrap();
     let e = match reply.error_name.as_deref() {
@@ -614,20 +709,36 @@ fn describe(scope: &mut v8::PinScope, exception: v8::Local<v8::Value>) -> String
 /// `ERR_GUEST_EXCEPTION` for a thrown value: the legacy one-line message
 /// ("stack" or the value), plus name/message/stack as separate fields.
 fn guest_failure(scope: &mut v8::PinScope, exception: v8::Local<v8::Value>) -> Failure {
-    let mut f = fail(ErrorCode::GuestException, describe(scope, exception));
+    let mut f = fail(ErrorCode::GuestException, clip(describe(scope, exception)));
     let get = |scope: &mut v8::PinScope, obj: v8::Local<v8::Object>, key: &str| {
         let k = v8::String::new(scope, key).unwrap();
-        obj.get(scope, k.into()).filter(|v| v.is_string()).map(|v| v.to_rust_string_lossy(scope))
+        obj.get(scope, k.into()).filter(|v| v.is_string()).map(|v| clip(v.to_rust_string_lossy(scope)))
     };
     f.guest = Some(match v8::Local::<v8::Object>::try_from(exception) {
         Ok(obj) => GuestError {
             name: get(scope, obj, "name"),
-            message: get(scope, obj, "message").unwrap_or_else(|| exception.to_rust_string_lossy(scope)),
+            message: get(scope, obj, "message").unwrap_or_else(|| clip(exception.to_rust_string_lossy(scope))),
             stack: get(scope, obj, "stack"),
         },
-        Err(_) => GuestError { name: None, message: exception.to_rust_string_lossy(scope), stack: None },
+        Err(_) => GuestError { name: None, message: clip(exception.to_rust_string_lossy(scope)), stack: None },
     });
     f
+}
+
+/// Longest error text sent for a guest exception (its message, its stack):
+/// a guest can throw an Error with any size of message.
+const ERROR_TEXT_MAX: usize = 64 << 10;
+
+fn clip(mut s: String) -> String {
+    if s.len() > ERROR_TEXT_MAX {
+        let mut cut = ERROR_TEXT_MAX;
+        while !s.is_char_boundary(cut) {
+            cut -= 1;
+        }
+        s.truncate(cut);
+        s.push('…');
+    }
+    s
 }
 
 fn to_json(scope: &mut v8::PinScope, value: v8::Local<v8::Value>) -> Result<String, Failure> {
@@ -773,6 +884,14 @@ fn refuse_all(rx: &Receiver<VmMsg>, out: &Output, cause: String) {
 }
 
 fn send_result(out: &Output, req: u64, result: Result<String, Failure>, usage: Usage) {
+    // A result too large for a frame fails the eval (an oversized frame
+    // would read as a protocol violation).
+    let result = match result {
+        Ok(json) if !crate::frame::fits(json.len() + 256, 0) => {
+            Err(fail(ErrorCode::NotSerializable, "the result is larger than 64 MiB as JSON"))
+        }
+        r => r,
+    };
     match result {
         Ok(json) => {
             let value = RawValue::from_string(json).expect("V8 produced JSON");
