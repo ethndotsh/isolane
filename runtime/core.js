@@ -42,15 +42,16 @@
     }),
   );
 
-  // Scripts outside phase 1 that the vendored code only touches lazily
-  // (inspection for Deno's console, MessagePort transfer).
+  // Scripts outside phase 1 that the vendored code only touches lazily:
+  // inspection for Deno's console, and from MessagePort's script only
+  // markNotSerializable (a brand structuredClone refuses, see web/clone.rs).
   const stubs = {
     __proto__: null,
     "ext:deno_web/01_console.js": ObjectFreeze({
       createFilteredInspectProxy: ({ object }) => object,
     }),
     "ext:deno_web/13_message_port.js": ObjectFreeze({
-      markNotSerializable() {},
+      markNotSerializable: native.markNotSerializable,
       MessagePortPrototype: ObjectFreeze(ObjectCreate(null)),
     }),
   };

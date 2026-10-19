@@ -86,6 +86,7 @@
   lazy("URL", from(URL_JS, "URL"));
   lazy("URLSearchParams", from(URL_JS, "URLSearchParams"));
   lazy("DOMException", from(DOM_EXCEPTION_JS, "DOMException"));
+  lazy("QuotaExceededError", from(DOM_EXCEPTION_JS, "QuotaExceededError"));
   for (const name of ["Event", "EventTarget", "CustomEvent", "ErrorEvent", "PromiseRejectionEvent"]) {
     lazy(name, () => eventModule()[name]);
   }
@@ -162,10 +163,10 @@
           );
         }
         if (TypedArrayPrototypeGetByteLength(array) > 65536) {
-          const { DOMException } = load(DOM_EXCEPTION_JS);
-          throw new DOMException(
+          // WebCrypto leaves quota and requested null.
+          const { QuotaExceededError } = load(DOM_EXCEPTION_JS);
+          throw new QuotaExceededError(
             "The ArrayBufferView's byte length exceeds the number of bytes of entropy available via this API (65536)",
-            "QuotaExceededError",
           );
         }
         core.getRandomValues(array);

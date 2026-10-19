@@ -304,6 +304,7 @@ fn native_object<'s>(scope: &mut v8::PinScope<'s, '_>) -> v8::Local<'s, v8::Obje
         "encode" => encode,
         "decode" => decode,
         "structuredClone" => clone::structured_clone,
+        "markNotSerializable" => clone::mark_not_serializable,
         "getRandomValues" => get_random_values,
         "randomUUID" => random_uuid,
         "reportUnhandledException" => report_unhandled_exception,

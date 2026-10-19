@@ -78,13 +78,33 @@ older, unsupported V8 and brings tokio and its op layer into the worker.
 
 | Phase | Scope | Status |
 |---|---|---|
-| 1 | primordials, webidl, URL/URLSearchParams (`url` crate), TextEncoder/Decoder (`encoding_rs`), atob/btoa, Event/EventTarget/CustomEvent, AbortController/AbortSignal, DOMException, structuredClone (V8 ValueSerializer), performance (frozen-clock semantics), queueMicrotask, reportError, `self`, `navigator.userAgent`, `crypto.getRandomValues`/`randomUUID` | in progress (JS vendored) |
+| 1 | primordials, webidl, URL/URLSearchParams (`url` crate), TextEncoder/Decoder (`encoding_rs`), atob/btoa, Event/EventTarget/CustomEvent/ErrorEvent, AbortController/AbortSignal, DOMException/QuotaExceededError, structuredClone (V8 ValueSerializer), performance (frozen-clock semantics), queueMicrotask, reportError, `self`, `navigator.userAgent`, `crypto.getRandomValues`/`randomUUID` — behind `webPlatform: true` | done (WPT 97.3%, below) |
 | 2 | Timers + an event loop in the VM thread (`setTimeout`, `setInterval`, `AbortSignal.timeout`), Streams (06_streams), Blob/File, TextEncoderStream/DecoderStream, CompressionStream (`flate2`) | planned |
 | 3 | Spec `fetch`/`Request`/`Response`/`Headers`/`FormData` (Deno's 20–26) over our network broker; streaming bodies | planned |
 | 4 | `crypto.subtle` (Deno's ext/crypto Rust, MIT) | planned |
 | — | V8 startup snapshot of the runtime JS (avoid compiling ~15k lines per VM) | planned |
 | — | ES modules for guest code (`export default { fetch }` handlers) | planned |
-| — | WPT subset in CI with tracked pass rates; Deno's and workerd's expectation files as a baseline | planned |
+| — | WPT subset with tracked pass rates (`soak/wpt.mjs`, weekly soak job with a 97% floor); Deno's and workerd's expectation files as a baseline | done (runner); expectations planned |
+| — | Turn `webPlatform` on by default once the startup snapshot lands (today: +0.8 ms per isolate, +1–1.6 ms on first use of an API) | planned |
+
+WPT at phase 1 (pinned commit c47791d, dev build): 14,099 / 14,493 subtests
+(97.3%). url 91.7%, encoding 98.3%, dom/events 92.7%, dom/abort 88.6%,
+atob 100%, microtask-queuing 100%, hr-time 94.7%, getRandomValues 100%,
+randomUUID 100%. Remaining failures, by cause:
+
+- Out of phase 1: streams (TextDecoderStream, ReadableStream), Request/
+  Response/XMLHttpRequest, Blob (the structured-clone battery), timers
+  (AbortSignal.timeout).
+- By design: no SharedArrayBuffer in guests (encodeInto/streaming-decode SAB
+  variants).
+- The `url` crate lags the newest URL spec edge cases (file URL hosts,
+  opaque-path trailing spaces, `xn--` labels): track url crate releases.
+- Lazy globals show as accessors until first use (idlharness wants data
+  properties); fixed by eager install from a snapshot.
+- The global object isn't a `WorkerGlobalScope` (idlharness "unexpected
+  global object"); decide which global interface to model.
+- `Event.timeStamp` is always 0 (Deno's behaviour too); `structuredClone`'s
+  `transfer` option isn't supported yet.
 | — | test262 run (catch regressions from removed globals and flags) | planned |
 | — | List isolane on unjs/runtime-compat | idea |
 | — | Node compatibility layer (workerd's `src/node` JS/TS, Apache-2.0: `node:buffer`, `node:events`, `node:util`, ...) | idea |
