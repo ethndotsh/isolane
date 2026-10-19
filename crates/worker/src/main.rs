@@ -249,7 +249,7 @@ fn serve(lock_down: bool, memory_limit: Option<u64>, web_background: bool) -> Ex
         lockdown: lockdown::Report { landlock, seccomp },
     });
 
-    let mut vms: HashMap<u64, Sender<VmMsg>> = HashMap::new();
+    let mut vms: HashMap<u64, (Sender<VmMsg>, vm::Stopper)> = HashMap::new();
     let mut failed: HashMap<u64, Failure> = HashMap::new();
     let mut stdin = BufReader::new(std::io::stdin().lock());
     loop {
@@ -291,8 +291,8 @@ fn serve(lock_down: bool, memory_limit: Option<u64>, web_background: bool) -> Ex
                 let (tx, rx) = mpsc::channel();
                 let config = VmConfig { limits, time, seed: random.seed, eval, wasm, web, base_url, functions, prelude, shims };
                 match vm::spawn(vm, config, rx, out.clone()) {
-                    Ok(()) => {
-                        vms.insert(vm, tx);
+                    Ok(stopper) => {
+                        vms.insert(vm, (tx, stopper));
                     }
                     // Out of threads or memory: this VM's evals fail, the
                     // worker carries on.
@@ -319,7 +319,7 @@ fn serve(lock_down: bool, memory_limit: Option<u64>, web_background: bool) -> Ex
                     refuse(failure.clone());
                     continue;
                 }
-                let sent = vms.get(&vm).map(|tx| tx.send(VmMsg::Eval { req, code, last }).is_ok());
+                let sent = vms.get(&vm).map(|(tx, _)| tx.send(VmMsg::Eval { req, code, last }).is_ok());
                 if sent != Some(true) {
                     refuse(fail(ErrorCode::IsolateClosed, "the isolate has been closed"));
                 }
@@ -341,15 +341,16 @@ fn serve(lock_down: bool, memory_limit: Option<u64>, web_background: bool) -> Ex
                     eprintln!("isolane-worker: bad message: unclaimed bytes in a host reply");
                     return ExitCode::from(4);
                 }
-                if let Some(tx) = vms.get(&vm) {
+                if let Some((tx, _)) = vms.get(&vm) {
                     let reply = vm::Reply { ok, value, error, error_name, error_code, bytes };
                     let _ = tx.send(VmMsg::HostReply { call, reply });
                 }
             }
             In::Dispose { vm } => {
                 failed.remove(&vm);
-                if let Some(tx) = vms.remove(&vm) {
+                if let Some((tx, stopper)) = vms.remove(&vm) {
                     let _ = tx.send(VmMsg::Dispose);
+                    stopper.stop();
                 }
             }
         }

@@ -103,3 +103,32 @@ test('an idle tenant worker stops after limits.idleMs', async () => {
   assert.equal(rt.diagnostics.workerPid('idle'), undefined);
   rt.close();
 });
+
+test('closing an isolate rejects its in-flight evals at once, and the worker stays healthy', async () => {
+  const rt = new Runtime({ strict });
+  const security = [];
+  rt.on('securityEvent', (e) => security.push(e));
+  const t = rt.tenant('close-in-flight');
+  const vm = t.isolate({ limits: { timeoutMs: 300 } });
+  await vm.eval('1');
+  const busy = vm.eval('for (;;) {}').catch((e) => e.code);
+  const queued = vm.eval('2').catch((e) => e.code);
+  await new Promise((r) => setTimeout(r, 20));
+  const started = Date.now();
+  vm.close();
+  assert.equal(await busy, 'ERR_ISOLATE_CLOSED');
+  assert.equal(await queued, 'ERR_ISOLATE_CLOSED');
+  assert.ok(Date.now() - started < 100, 'rejected promptly');
+  // Past the supervisor's deadline for the abandoned eval: no false alarm.
+  await new Promise((r) => setTimeout(r, 1500));
+  assert.deepEqual(security, []);
+  assert.equal(await t.run('3'), 3);
+  // A busy isolate with no time limit is stopped too, not left running.
+  const forever = t.isolate();
+  const spin = forever.eval('for (;;) {}').catch((e) => e.code);
+  await new Promise((r) => setTimeout(r, 20));
+  forever.close();
+  assert.equal(await spin, 'ERR_ISOLATE_CLOSED');
+  assert.equal(await t.run('4'), 4);
+  rt.close();
+});

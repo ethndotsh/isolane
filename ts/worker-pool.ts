@@ -328,6 +328,16 @@ export class TenantWorker {
 
   closeIsolate(state: IsolateState): void {
     if (!this.#isolates.delete(state.id)) return;
+    // Its evals, running or queued, end now. The worker stops whatever is
+    // running and drops the rest; a late result is ignored, and no eval
+    // timer is left to call the worker unresponsive.
+    const closed = new IsolaneError('ERR_ISOLATE_CLOSED', 'isolane: the isolate was closed', { tenant: this.tenant });
+    for (const [req, p] of this.#requests) {
+      if (p.isolate !== state) continue;
+      this.#requests.delete(req);
+      clearTimeout(p.timer);
+      p.reject(closed);
+    }
     this.#abandonCalls(state, new Error('the isolate was closed'));
     state.dispose();
     this.#proc.send({ t: 'dispose', vm: state.id });

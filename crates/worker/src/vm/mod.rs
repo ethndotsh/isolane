@@ -143,12 +143,27 @@ pub struct Reply {
     pub bytes: Vec<(Vec<crate::proto::PathSegment>, Vec<u8>)>,
 }
 
-pub fn spawn(id: u64, config: VmConfig, rx: Receiver<VmMsg>, out: Output) -> std::io::Result<()> {
+pub fn spawn(id: u64, config: VmConfig, rx: Receiver<VmMsg>, out: Output) -> std::io::Result<Stopper> {
+    let stopper = Stopper(Arc::new(std::sync::OnceLock::new()));
+    let handle = stopper.0.clone();
     std::thread::Builder::new()
         .name(format!("vm-{id}"))
         .stack_size(VM_THREAD_STACK)
-        .spawn(move || vm_main(id, config, rx, out))
-        .map(drop)
+        .spawn(move || vm_main(id, config, rx, out, handle))
+        .map(|_| stopper)
+}
+
+/// Stops whatever a VM is running, from another thread: after `Dispose`,
+/// so a VM busy in guest code (with no time limit, or a long one) doesn't
+/// keep its thread until it finishes.
+pub struct Stopper(Arc<std::sync::OnceLock<v8::IsolateHandle>>);
+
+impl Stopper {
+    pub fn stop(&self) {
+        if let Some(handle) = self.0.get() {
+            handle.terminate_execution();
+        }
+    }
 }
 
 // ---- memory ----
@@ -208,7 +223,7 @@ pub const OOM_EXIT_CODE: i32 = 6;
 
 // ---- the VM thread ----
 
-fn vm_main(id: u64, config: VmConfig, rx: Receiver<VmMsg>, out: Output) {
+fn vm_main(id: u64, config: VmConfig, rx: Receiver<VmMsg>, out: Output, stopper: Arc<std::sync::OnceLock<v8::IsolateHandle>>) {
     crate::limits::set(config.limits);
     crate::clock::set_mode(config.time);
     SEED.with(|seed| seed.set(config.seed));
@@ -235,6 +250,7 @@ fn vm_main(id: u64, config: VmConfig, rx: Receiver<VmMsg>, out: Output) {
 
     let cpu_clock = CpuClock::current();
     let handle = isolate.thread_safe_handle();
+    let _ = stopper.set(handle.clone());
     let watchdog = match Watchdog::start(handle.clone()) {
         Ok(w) => w,
         Err(e) => return refuse_all(&rx, &out, format!("vm could not start: {e}")),
