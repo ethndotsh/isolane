@@ -153,6 +153,22 @@ unsafe extern "C" fn near_heap_limit(data: *mut c_void, current: usize, _initial
     current * 2
 }
 
+/// Which limit stopped an isolate that hit V8's near-heap-limit callback.
+/// V8 calls it both when the heap reaches the isolate's limit and when the
+/// OS refuses V8 more memory (the worker's RLIMIT_DATA cap). Tell them apart
+/// by how much the isolate actually holds (heap plus the external memory,
+/// like ArrayBuffers, that V8 charges to it): near the heap limit means the
+/// heap limit; well under it means the worker ran out first.
+fn memory_limit_hit(isolate: &mut v8::Isolate, heap_limit: usize) -> (&'static str, &'static str) {
+    let stats = isolate.get_heap_statistics();
+    let held = stats.used_heap_size() + stats.external_memory();
+    if held >= heap_limit / 4 * 3 {
+        ("heapBytes", "the isolate exceeded its heap limit (limits.heapBytes)")
+    } else {
+        ("workerMemoryBytes", "the tenant's worker ran out of memory (limits.workerMemoryBytes)")
+    }
+}
+
 /// V8 couldn't get memory (the worker's memory limit, not a VM's heap
 /// limit, which `near_heap_limit` handles). V8 can't continue; exit with a
 /// code the supervisor reports as a memory limit, not a crash.
@@ -207,6 +223,8 @@ fn vm_main(id: u64, config: VmConfig, rx: Receiver<VmMsg>, out: Output) {
     };
     let oom = Box::new(OomState { handle, hit: AtomicBool::new(false) });
     isolate.add_near_heap_limit_callback(near_heap_limit, &*oom as *const OomState as *mut c_void);
+    // The heap limit as configured, before the callback raises it.
+    let heap_limit = isolate.get_heap_statistics().heap_size_limit();
 
     let bridge = Rc::new(Bridge {
         vm: id,
@@ -236,7 +254,10 @@ fn vm_main(id: u64, config: VmConfig, rx: Receiver<VmMsg>, out: Output) {
         Ok(created) if !fired && !oom.hit.load(Ordering::SeqCst) => created,
         failed => {
             retired = Some(match failed {
-                _ if oom.hit.load(Ordering::SeqCst) => limit("heapBytes", "the isolate's setup exceeded its heap limit (limits.heapBytes)"),
+                _ if oom.hit.load(Ordering::SeqCst) => {
+                    let (which, cause) = memory_limit_hit(&mut isolate, heap_limit);
+                    limit(which, format!("the isolate's setup stopped: {cause}"))
+                }
                 _ if fired => limit("timeoutMs", "the isolate's setup shims ran past its time limit (limits.timeoutMs, limits.cpuMs)"),
                 Err(f) => f,
                 Ok(_) => unreachable!(),
@@ -302,9 +323,9 @@ fn vm_main(id: u64, config: VmConfig, rx: Receiver<VmMsg>, out: Output) {
                     EvalEnd::Done(r) => r,
                 };
                 let result = if oom.hit.load(Ordering::SeqCst) {
-                    let cause = "the isolate exceeded its heap limit (limits.heapBytes)";
+                    let (which, cause) = memory_limit_hit(&mut isolate, heap_limit);
                     retired = Some(retire(format!("the isolate was terminated by an earlier eval ({cause}); create a new one")));
-                    Err(limit("heapBytes", cause))
+                    Err(limit(which, cause))
                 } else if fired == Fired::Wall {
                     let ms = config.limits.timeout_ms.unwrap_or(0);
                     Err(limit("timeoutMs", format!("execution timed out after {ms}ms (limits.timeoutMs)")))
