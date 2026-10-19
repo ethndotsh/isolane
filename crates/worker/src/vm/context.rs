@@ -26,7 +26,7 @@ pub(super) fn new_context(isolate: &mut v8::Isolate, config: &VmConfig) -> Resul
     let scope = &mut v8::ContextScope::new(scope, context);
     let global = context.global(scope);
     if config.web {
-        crate::web::install(scope, global)?;
+        crate::web::install(scope, global, config.base_url.as_deref())?;
     }
     let wasm: &[&str] = if config.wasm { &[] } else { &["WebAssembly"] };
     for name in REMOVED_GLOBALS.iter().chain(wasm) {

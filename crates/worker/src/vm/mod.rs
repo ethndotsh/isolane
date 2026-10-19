@@ -71,6 +71,7 @@ pub struct VmConfig {
     pub eval: bool,
     pub wasm: bool,
     pub web: bool,
+    pub base_url: Option<String>,
     pub functions: Vec<crate::proto::FunctionSpec>,
     pub prelude: Option<String>,
 }

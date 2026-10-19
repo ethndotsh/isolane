@@ -240,6 +240,7 @@ export class TenantWorker {
       eval: config.eval,
       wasm: config.wasm,
       web: config.web !== false,
+      baseUrl: config.web ? config.web.baseUrl : undefined,
       functions: functions.map((f) => ({ path: f.path, sync: f.sync })),
       prelude: caps.prelude,
     });

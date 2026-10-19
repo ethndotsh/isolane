@@ -224,6 +224,18 @@
 
   define("self", g);
   define("navigator", ObjectFreeze({ __proto__: null, userAgent: "isolane" }));
+  // `location`, a WorkerLocation, only with a base URL (`web.baseUrl`).
+  // Read-only: guest code can't navigate anywhere.
+  if (core.baseUrl !== undefined) {
+    lazy("location", () => {
+      const url = new (load("ext:deno_web/00_url.js").URL)(core.baseUrl);
+      const fields = ["href", "origin", "protocol", "host", "hostname", "port", "pathname", "search", "hash"];
+      const loc = { __proto__: null };
+      for (const field of fields) loc[field] = url[field];
+      loc.toString = () => url.href;
+      return ObjectFreeze(loc);
+    });
+  }
 
   const INTEGER_ARRAYS = [
     "Int8Array",

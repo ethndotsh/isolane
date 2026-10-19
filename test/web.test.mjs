@@ -625,3 +625,16 @@ test('without web, a fetch policy still gives the minimal fetch', async () => {
     ['undefined', 200, { hi: 'wörld' }],
   );
 });
+
+test('web.baseUrl: relative URLs resolve against it, and location exists', async () => {
+  const W2 = { tenant: 'web', web: { baseUrl: 'https://app.example.com/base/' } };
+  assert.deepEqual(
+    await runtime.run(
+      `[new Request('x?y=1').url, Response.redirect('/z').headers.get('location'), location.href, location.origin, Object.isFrozen(location)]`,
+      W2,
+    ),
+    ['https://app.example.com/base/x?y=1', 'https://app.example.com/z', 'https://app.example.com/base/', 'https://app.example.com', true],
+  );
+  assert.equal(await run('typeof location'), 'undefined');
+  await assert.rejects(run(`new Request('x')`), /Invalid URL/);
+});

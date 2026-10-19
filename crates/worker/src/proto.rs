@@ -33,6 +33,9 @@ pub enum In {
         /// Install the WinterTC web platform globals (src/web/).
         #[serde(default)]
         web: bool,
+        /// The web platform's base URL (`web.baseUrl`): relative URLs
+        /// resolve against it, and `location` exists.
+        base_url: Option<String>,
         /// Host functions, in the order host calls name them (by index).
         #[serde(default)]
         functions: Vec<FunctionSpec>,
