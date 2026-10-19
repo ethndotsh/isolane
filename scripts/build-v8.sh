@@ -40,8 +40,11 @@ if [ "$os" = linux ] && [ -z "${LIBCLANG_PATH:-}" ]; then
   fi
 fi
 
-# Extra GN args, one per line (comments allowed).
-GN_ARGS="${GN_ARGS:-} $(grep -v '^\s*#' scripts/v8.gn | tr '\n' ' ')"
+# Extra GN args from scripts/v8.gn (one per line; comments allowed). Every
+# cargo invocation that builds V8 must see exactly the same GN_ARGS, or
+# rusty_v8's build script regenerates V8's build and recompiles all of it:
+# CI sets it once for the whole job with scripts/gn-args.sh.
+GN_ARGS="${GN_ARGS:-$(scripts/gn-args.sh)}"
 export GN_ARGS
 
 start=$(date +%s)

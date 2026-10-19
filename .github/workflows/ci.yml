@@ -48,6 +48,11 @@ jobs:
         with:
           node-version: 22
 
+      # Every cargo command below builds against the same V8, so they must all
+      # see the same GN_ARGS (or rusty_v8 regenerates and recompiles V8).
+      - name: GN args for V8
+        run: echo "GN_ARGS=$(scripts/gn-args.sh)" >>"$GITHUB_ENV"
+
       - name: Fetch rusty_v8
         run: scripts/fetch-rusty-v8.sh
 
