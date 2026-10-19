@@ -37,13 +37,26 @@ for proc in glob.glob(os.path.join(root, '*/')):
     for _, name, line in events[ready + 1:]:
         if name not in ('exited', 'killed', 'resumed'):
             counts[name] += 1
-        if name in ('openat', 'open', 'ioctl', 'fstat', 'newfstatat', 'statx'):
+        if name in ('openat', 'open', 'ioctl', 'fstat', 'newfstatat', 'statx', 'prctl', 'clone'):
             call = line.split(' ', 1)[1].strip()
             detail[re.sub(r'0x[0-9a-f]+', '0x…', call.split(') = ')[0])[:120]] += 1
 for name, n in sorted(counts.items(), key=lambda kv: -kv[1]):
     print(f'{n:9d} {name}')
 print()
-print('file and ioctl calls after ready:')
-for call, n in detail.most_common(30):
+print('file, ioctl, prctl, and clone calls after ready:')
+for call, n in detail.most_common(40):
     print(f'{n:9d} {call}')
+# The gate: every syscall made after ready must be one the seccomp filter
+# lets through (crates/worker/src/lockdown.rs), so a new one shows up here
+# as a failure instead of as a SIGSYS kill in production. Traced without
+# lockdown, file opens succeed, so the fstat and lseek that follow them
+# are expected too (under lockdown the open fails first).
+allowed = set(re.findall(r'libc::SYS_(\w+)', open('crates/worker/src/lockdown.rs').read()))
+allowed |= {'fstat', 'lseek', 'restart_syscall'}
+unexpected = sorted(set(counts) - allowed)
+print()
+if unexpected:
+    print('NOT ALLOWED by the seccomp filter: ' + ', '.join(unexpected))
+    sys.exit(1)
+print('every syscall after ready is in the seccomp allowlist')
 PY

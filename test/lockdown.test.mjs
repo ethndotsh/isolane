@@ -5,6 +5,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
+import { readdirSync, readlinkSync } from 'node:fs';
 import { Runtime } from '../dist/index.js';
 
 const linux = process.platform === 'linux';
@@ -18,9 +19,22 @@ test('the host provides strict-mode isolation', { skip: !linux || !process.env.I
   assert.equal(report.meetsStrict, true);
 });
 
+test('a serving worker holds no files or sockets, only its pipes', { skip: !linux || !process.env.ISOLANE_WORKER }, async () => {
+  // A file or socket open at lockdown would stay usable through read and
+  // write, which seccomp allows: the worker must have none.
+  const rt = new Runtime();
+  await rt.run('1', { tenant: 'fds', web: true });
+  const pid = rt.diagnostics.workerPid('fds');
+  const fds = readdirSync(`/proc/${pid}/fd`).map((fd) => [fd, readlinkSync(`/proc/${pid}/fd/${fd}`)]);
+  rt.close();
+  const unexpected = fds.filter(([, target]) => !/^(pipe|anon_inode):/.test(target));
+  assert.deepEqual(unexpected, [], JSON.stringify(fds));
+  assert.ok(fds.some(([fd]) => fd === '0') && fds.some(([fd]) => fd === '1'));
+});
+
 const probe = (name) => spawnSync(escapeWorker, ['--escape-test', name], { env: {}, encoding: 'utf8', timeout: 30_000 });
 
-for (const name of ['socket', 'execve', 'ptrace', 'fork']) {
+for (const name of ['socket', 'execve', 'ptrace', 'fork', 'clone-namespace', 'clone-unshared']) {
   test(`seccomp kills the worker on ${name}`, { skip: !linux || !escapeWorker }, () => {
     const r = probe(name);
     assert.match(r.stdout, /LOCKED/, `lockdown did not complete: ${r.stderr}`);

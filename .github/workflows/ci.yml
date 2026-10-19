@@ -206,11 +206,15 @@ jobs:
         if: always()
         run: sudo dmesg | grep -iE 'seccomp|audit.*sig=31' | tail -40 || true
 
+      # A gate: fails if the worker makes a syscall the seccomp filter doesn't allow.
       - name: Syscall audit
         if: always()
         run: |
-          scripts/syscall-audit.sh "$RUNNER_TEMP/isolane-worker" | tee syscall-audit.txt
+          status=0
+          scripts/syscall-audit.sh "$RUNNER_TEMP/isolane-worker" >syscall-audit.txt || status=$?
+          cat syscall-audit.txt
           { echo '### Syscalls after ready'; echo '```'; cat syscall-audit.txt; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+          exit "$status"
 
       - uses: actions/upload-artifact@v4
         if: always()

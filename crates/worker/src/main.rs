@@ -433,6 +433,17 @@ fn escape_test(probe: &str) -> ExitCode {
             }
             "ptrace" => libc::ptrace(libc::PTRACE_TRACEME, 0, 0, 0),
             "fork" => libc::fork() as i64,
+            // A thread in a new mount namespace, and one that doesn't share
+            // its file table: both killed (the kernel would refuse the first
+            // with EINVAL; the filter refuses it first).
+            "clone-namespace" => {
+                let flags = libc::CLONE_VM | libc::CLONE_FS | libc::CLONE_FILES | libc::CLONE_SIGHAND | libc::CLONE_THREAD | libc::CLONE_NEWNS;
+                libc::syscall(libc::SYS_clone, flags as libc::c_ulong, std::ptr::null::<u8>(), 0usize, 0usize, 0usize)
+            }
+            "clone-unshared" => {
+                let flags = libc::CLONE_VM | libc::CLONE_SIGHAND | libc::CLONE_THREAD;
+                libc::syscall(libc::SYS_clone, flags as libc::c_ulong, std::ptr::null::<u8>(), 0usize, 0usize, 0usize)
+            }
             "clone3" => {
                 // Must fail with ENOSYS (libc then falls back to clone).
                 let r = libc::syscall(libc::SYS_clone3, std::ptr::null::<u8>(), 0usize);

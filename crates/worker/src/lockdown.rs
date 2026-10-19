@@ -131,7 +131,8 @@ mod linux {
     ///   the allowlist can inspect (`clone3` passes them in memory).
     /// - filesystem calls return EACCES.
     /// - the allowlist kills the process on anything else, and allows
-    ///   `clone` only with CLONE_THREAD (threads, never new processes).
+    ///   `clone` only for threads: CLONE_THREAD with the memory, files, and
+    ///   signal handlers shared, and no new namespace (never a process).
     /// The kernel applies the most restrictive result across filters.
     pub fn seccomp() -> Result<Level, String> {
         let arch = std::env::consts::ARCH.try_into().map_err(|e| format!("seccomp: {e:?}"))?;
@@ -157,14 +158,20 @@ mod linux {
         let mut rules: BTreeMap<i64, Vec<SeccompRule>> =
             ALLOWED.iter().chain(FILE_SYSCALLS).map(|&s| (s, vec![])).collect();
         rules.insert(libc::SYS_clone3, vec![]);
-        let thread_only = SeccompCondition::new(
-            0,
-            SeccompCmpArgLen::Qword,
-            SeccompCmpOp::MaskedEq(libc::CLONE_THREAD as u64),
-            libc::CLONE_THREAD as u64,
-        )
-        .map_err(err)?;
-        rules.insert(libc::SYS_clone, vec![SeccompRule::new(vec![thread_only]).map_err(err)?]);
+        // A thread as pthread_create makes one: sharing memory, files, the
+        // filesystem context, and signal handlers, in no new namespace.
+        let shared = (libc::CLONE_VM | libc::CLONE_FS | libc::CLONE_FILES | libc::CLONE_SIGHAND | libc::CLONE_THREAD) as u64;
+        let thread_only = SeccompCondition::new(0, SeccompCmpArgLen::Qword, SeccompCmpOp::MaskedEq(shared), shared).map_err(err)?;
+        let namespaces = (libc::CLONE_NEWNS
+            | libc::CLONE_NEWCGROUP
+            | libc::CLONE_NEWUTS
+            | libc::CLONE_NEWIPC
+            | libc::CLONE_NEWUSER
+            | libc::CLONE_NEWPID
+            | libc::CLONE_NEWNET
+            | libc::CLONE_VFORK) as u64;
+        let no_namespaces = SeccompCondition::new(0, SeccompCmpArgLen::Qword, SeccompCmpOp::MaskedEq(namespaces), 0).map_err(err)?;
+        rules.insert(libc::SYS_clone, vec![SeccompRule::new(vec![thread_only, no_namespaces]).map_err(err)?]);
         let allowlist = SeccompFilter::new(rules, SeccompAction::KillProcess, SeccompAction::Allow, arch).map_err(err)?;
 
         for filter in [no_clone3, no_files, allowlist] {
