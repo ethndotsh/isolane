@@ -14,6 +14,7 @@ import {
   type IsolationInfo,
   type LogLevel,
   type WorkerExit,
+  type WorkerHandlers,
   type WorkerMessage,
 } from './worker.js';
 
@@ -233,7 +234,16 @@ export interface RuntimeOptions {
    * `runtime.releaseQuarantine(tenant)` lifts it early.
    */
   quarantineMs?: number | null;
+  /**
+   * Keep this many workers started and ready, so a tenant without a worker
+   * gets one without waiting for V8 to start (tens of ms). Each spare costs
+   * a process (~27 MB). Default 0.
+   */
+  prewarm?: number;
 }
+
+/** Stop prewarming after this many spares in a row die before being used. */
+const MAX_SPARE_FAILURES = 3;
 
 const DEFAULT_WORKER_MEMORY_LIMIT = 2 * 1024 ** 3;
 
@@ -250,6 +260,33 @@ interface Pending {
  * killed. Generous, so a merely overloaded host isn't mistaken for one.
  */
 const unresponsiveAfterMs = (timeoutMs: number) => timeoutMs + Math.max(1000, timeoutMs);
+
+/**
+ * A started worker not yet given to a tenant. It has never run guest code;
+ * a tenant claims it whole, and it serves only that tenant from then on.
+ * Messages go to whoever has claimed it.
+ */
+class SpareWorker {
+  readonly proc: WorkerProcess;
+  handlers: WorkerHandlers | undefined;
+  exited: WorkerExit | undefined;
+
+  constructor(workerPath: string, strict: boolean, memoryLimitBytes: number | undefined, onExit: (s: SpareWorker) => void) {
+    this.proc = new WorkerProcess(
+      workerPath,
+      {
+        onMessage: (msg) => this.handlers?.onMessage(msg),
+        onExit: (exit) => {
+          this.exited = exit;
+          if (this.handlers) this.handlers.onExit(exit);
+          else onExit(this);
+        },
+      },
+      strict,
+      memoryLimitBytes,
+    );
+  }
+}
 
 /** A tenant's worker process and the VMs and requests in flight on it. */
 class TenantWorker {
@@ -275,19 +312,21 @@ class TenantWorker {
     strict: boolean,
     memoryLimitBytes: number | undefined,
     onGone: (worker: TenantWorker, exit: WorkerExit) => void,
+    spare?: SpareWorker,
   ) {
     this.tenant = tenant;
     this.#idleTimeoutMs = idleTimeoutMs;
     this.#onGone = (exit) => onGone(this, exit);
-    this.#proc = new WorkerProcess(
-      workerPath,
-      {
-        onMessage: (msg) => this.#onMessage(msg),
-        onExit: (exit) => this.#onExit(exit),
-      },
-      strict,
-      memoryLimitBytes,
-    );
+    const handlers: WorkerHandlers = {
+      onMessage: (msg) => this.#onMessage(msg),
+      onExit: (exit) => this.#onExit(exit),
+    };
+    if (spare) {
+      this.#proc = spare.proc;
+      spare.handlers = handlers;
+    } else {
+      this.#proc = new WorkerProcess(workerPath, handlers, strict, memoryLimitBytes);
+    }
   }
 
   get ready(): Promise<unknown> {
@@ -491,6 +530,9 @@ export class Runtime {
   #defaults: IsolateOptions | undefined;
   #quarantineMs: number | null;
   #quarantined = new Map<string, number>();
+  #prewarm: number;
+  #spares: SpareWorker[] = [];
+  #spareFailures = 0;
   #strict: boolean;
   #workers = new Map<string, TenantWorker>();
   #nextVm = 1;
@@ -510,11 +552,36 @@ export class Runtime {
     this.#onLog = options.onLog;
     this.#defaults = options.defaults;
     this.#quarantineMs = options.quarantineMs === undefined ? 60_000 : options.quarantineMs;
+    this.#prewarm = options.prewarm ?? 0;
+    if (!(Number.isSafeInteger(this.#prewarm) && this.#prewarm >= 0)) throw invalidOption('prewarm must be a non-negative integer');
     const limit = options.workerMemoryLimitBytes === undefined ? DEFAULT_WORKER_MEMORY_LIMIT : options.workerMemoryLimitBytes;
     if (limit !== null && !(Number.isSafeInteger(limit) && limit >= 64 * 1024 * 1024)) {
       throw invalidOption('workerMemoryLimitBytes must be at least 64 MiB, or null');
     }
     this.#memoryLimit = limit ?? undefined;
+    this.#refill();
+  }
+
+  #refill(): void {
+    while (!this.#closed && this.#spares.length < this.#prewarm && this.#spareFailures < MAX_SPARE_FAILURES) {
+      const spare = new SpareWorker(this.#workerPath, this.#strict, this.#memoryLimit, (gone) => {
+        // Died before anyone used it (it never ran guest code).
+        this.#spares = this.#spares.filter((s) => s !== gone);
+        this.#spareFailures++;
+        this.#refill();
+      });
+      spare.proc.ready.then(
+        () => (this.#spareFailures = 0),
+        () => {},
+      );
+      this.#spares.push(spare);
+    }
+  }
+
+  #takeSpare(): SpareWorker | undefined {
+    const spare = this.#spares.shift();
+    if (spare) setImmediate(() => this.#refill());
+    return spare;
   }
 
   /**
@@ -586,6 +653,8 @@ export class Runtime {
     this.#closed = true;
     for (const w of this.#workers.values()) w.kill();
     this.#workers.clear();
+    for (const s of this.#spares) s.proc.kill();
+    this.#spares = [];
   }
 
   [Symbol.dispose](): void {
@@ -623,7 +692,7 @@ export class Runtime {
             detail: exit.detail,
           });
         }
-      });
+      }, this.#takeSpare());
       this.#workers.set(tenant, w);
     }
     return w;

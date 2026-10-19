@@ -448,6 +448,20 @@ test('each tenant gets its own worker process', async () => {
   [a, a2, b].forEach((vm) => vm.dispose());
 });
 
+test('prewarmed workers still give each tenant its own process', async () => {
+  const warm = new Runtime({ strict: process.env.ISOLANE_STRICT === '1', prewarm: 2 });
+  await new Promise((r) => setTimeout(r, 500));
+  const t0 = performance.now();
+  assert.equal(await warm.run('1 + 1', { tenant: 'w1' }), 2);
+  const fast = performance.now() - t0;
+  await warm.run('1', { tenant: 'w2' });
+  const pids = [warm._workerPid('w1'), warm._workerPid('w2')];
+  assert.ok(pids[0] && pids[1] && pids[0] !== pids[1], `tenants share a worker: ${pids}`);
+  assert.ok(fast < 1000, `a prewarmed tenant took ${fast} ms`);
+  warm.close();
+  assert.throws(() => new Runtime({ prewarm: -1 }), code('ERR_INVALID_OPTION'));
+});
+
 test('workers get an empty environment', { skip: process.platform !== 'linux' }, async () => {
   process.env.ISOLANE_TEST_SECRET = 'leak';
   try {

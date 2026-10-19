@@ -146,7 +146,7 @@ Measured against isolated-vm (Linux x64 under Rosetta; re-measure natively):
 | V8 ValueSerializer as the wire format: **deferred**. Our V8 writes format v16; Node 22 and 26 read only up to v15. And the supervisor would parse a compromised worker's output with V8's deserializer, which Chrome never exposes across a trust boundary (browser IPC uses Mojo); JSON.parse is a much smaller parser to trust. Revisit for the supervisor → worker direction only (trusted sender), where it would carry Map/Set/Date/BigInt/typed arrays into the guest | idea |
 | Lower per-call latency: coalesce frame writes per event-loop turn on the supervisor; spin briefly before blocking in the worker | planned |
 | Frame batching (fewer syscalls), fewer copies | planned |
-| Prewarmed worker pool (hide cold start) | planned |
+| Prewarmed worker pool (`prewarm: n`; spares never run guest code before a tenant claims one): new-tenant p50 36 → 4.9 ms (`bench/cold-start.mjs`, native macOS dev build) | done |
 | Startup snapshot (also cuts per-VM setup once the WinterTC runtime is in) | planned |
 | Native benchmarks (not Rosetta) in CI, tracked over time | planned |
 | Shared-memory transport | idea (needs a native addon; conflicts with plain `npm install`) |
