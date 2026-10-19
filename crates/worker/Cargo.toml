@@ -24,6 +24,10 @@ escape-tests = []
 v8 = { path = "../../build/rusty_v8" }
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["raw_value"] }
+# The web platform (src/web/): WHATWG URL, the Encoding Standard, randomness.
+url = { version = "2", features = ["expose_internals"] }
+encoding_rs = "0.8"
+getrandom = "0.2"
 
 [target.'cfg(target_os = "linux")'.dependencies]
 landlock = "0.4"

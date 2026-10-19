@@ -92,6 +92,19 @@ export function meetsStrict(info: IsolationInfo): boolean {
   return info.sandboxSecure && info.lockdown.seccomp === 'full' && info.lockdown.landlock !== 'none';
 }
 
+/**
+ * The worker parses frames as UTF-8 JSON, which can't carry lone UTF-16
+ * surrogates (JSON.stringify escapes them, and the worker rejects the
+ * escape). Replace them with U+FFFD in every string sent: guest code,
+ * host-function error messages, and names.
+ */
+function wellFormed(_key: string, value: unknown): unknown {
+  return typeof value === 'string' ? toWellFormed(value) : value;
+}
+
+const LONE_SURROGATE = /[\ud800-\udbff](?![\udc00-\udfff])|(?<![\ud800-\udbff])[\udc00-\udfff]/g;
+const toWellFormed = (s: string): string => s.replace(LONE_SURROGATE, '\ufffd');
+
 export class WorkerProcess {
   readonly ready: Promise<IsolationInfo>;
   #child: ChildProcessByStdio<Writable, Readable, Readable>;
@@ -194,7 +207,7 @@ export class WorkerProcess {
 
   send(msg: object): void {
     if (!this.#alive) return;
-    const body = Buffer.from(JSON.stringify(msg), 'utf8');
+    const body = Buffer.from(JSON.stringify(msg, wellFormed), 'utf8');
     const header = Buffer.alloc(4);
     header.writeUInt32LE(body.length, 0);
     this.#child.stdin.write(Buffer.concat([header, body]));
