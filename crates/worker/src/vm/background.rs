@@ -47,6 +47,15 @@ pub(super) struct Batch {
     cpu_start: Duration,
     /// The least it's charged.
     floor: Duration,
+    /// Time it spent blocked in sync host calls (see `blocked`).
+    blocked: Duration,
+}
+
+impl Batch {
+    /// The batch, done, having spent `blocked` waiting in sync host calls.
+    pub(super) fn blocked(self, blocked: Duration) -> Batch {
+        Batch { blocked, ..self }
+    }
 }
 
 impl Background {
@@ -80,15 +89,15 @@ impl Background {
 
     /// Start a batch, charged at least `floor`.
     pub(super) fn start(&self, floor: Duration) -> Batch {
-        Batch { wall_start: Instant::now(), cpu_start: self.clock.map(|c| c.now()).unwrap_or_default(), floor }
+        Batch { wall_start: Instant::now(), cpu_start: self.clock.map(|c| c.now()).unwrap_or_default(), floor, blocked: Duration::ZERO }
     }
 
-    /// Charge a finished batch, plus the time it spent `blocked` in sync
-    /// host calls where time is CPU time (wall time already includes it);
+    /// Charge a finished batch, plus the time it spent blocked in sync host
+    /// calls where time is CPU time (wall time already includes it);
     /// returns whether the budget ran out.
-    fn finish(&mut self, batch: Batch, blocked: Duration) -> bool {
+    fn finish(&mut self, batch: Batch) -> bool {
         let spent = match self.clock {
-            Some(c) => c.now().saturating_sub(batch.cpu_start) + blocked,
+            Some(c) => c.now().saturating_sub(batch.cpu_start) + batch.blocked,
             None => batch.wall_start.elapsed(),
         }
         .max(batch.floor);
@@ -137,8 +146,8 @@ impl Background {
     /// After a batch: charge it, report its usage, and say whether the
     /// isolate is retired (`heap_hit`: it hit its heap limit; or this
     /// budget ran out, which the next eval fails with).
-    pub(super) fn settle(&mut self, batch: Batch, blocked: Duration, spent: Usage, heap_hit: bool, out: &Output, vm: u64, what: &str) -> Option<(Failure, Option<Failure>)> {
-        let exhausted = self.finish(batch, blocked);
+    pub(super) fn settle(&mut self, batch: Batch, spent: Usage, heap_hit: bool, out: &Output, vm: u64, what: &str) -> Option<(Failure, Option<Failure>)> {
+        let exhausted = self.finish(batch);
         self.record(spent);
         let retire = |cause: String| fail(ErrorCode::IsolateRetired, cause);
         if heap_hit {

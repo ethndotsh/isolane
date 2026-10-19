@@ -360,7 +360,7 @@ fn vm_main(id: u64, config: VmConfig, rx: Receiver<VmMsg>, out: Output, stopper:
                 }
                 let spent = usage(&mut isolate, cpu_clock, cpu_start);
                 let heap_hit = oom.hit.load(Ordering::SeqCst);
-                if let Some((r, hit)) = background.settle(batch, bridge.blocked.take(), spent, heap_hit, &out, id, "timer callback") {
+                if let Some((r, hit)) = background.settle(batch.blocked(bridge.blocked.take()), spent, heap_hit, &out, id, "timer callback") {
                     retired = Some(r);
                     background_hit = hit;
                 }
@@ -462,7 +462,7 @@ fn vm_main(id: u64, config: VmConfig, rx: Receiver<VmMsg>, out: Output, stopper:
                 }
                 let spent = usage(&mut isolate, cpu_clock, cpu_start);
                 let heap_hit = oom.hit.load(Ordering::SeqCst);
-                if let Some((r, hit)) = background.settle(batch, bridge.blocked.take(), spent, heap_hit, &out, id, "continuation") {
+                if let Some((r, hit)) = background.settle(batch.blocked(bridge.blocked.take()), spent, heap_hit, &out, id, "continuation") {
                     retired = Some(r);
                     background_hit = hit;
                 }
