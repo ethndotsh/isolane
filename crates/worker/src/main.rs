@@ -119,9 +119,22 @@ fn sandbox_secure() -> bool {
 
 /// Writable private memory (what RLIMIT_DATA counts), in KiB (Linux).
 fn vm_data_kib() -> Option<u64> {
-    let status = std::fs::read_to_string("/proc/self/status").ok()?;
+    parse_vm_data(&std::fs::read_to_string("/proc/self/status").ok()?)
+}
+
+fn parse_vm_data(status: &str) -> Option<u64> {
     let line = status.lines().find(|l| l.starts_with("VmData:"))?;
     line.split_whitespace().nth(1)?.parse().ok()
+}
+
+/// VmData from an already-open /proc/self/status (opened before Landlock,
+/// which then refuses opening it again).
+fn read_vm_data(file: &mut std::fs::File) -> Option<u64> {
+    use std::io::{Read, Seek};
+    file.rewind().ok()?;
+    let mut status = String::new();
+    file.read_to_string(&mut status).ok()?;
+    parse_vm_data(&status)
 }
 
 fn self_check() -> ExitCode {
@@ -153,6 +166,7 @@ fn serve(lock_down: bool, memory_limit: Option<u64>) -> ExitCode {
     // Intl's default zone) would say where the machine is. Set while the
     // process is still single-threaded, before ICU first reads it.
     std::env::set_var("TZ", "UTC");
+    let mut status = memory_limit.and_then(|_| std::fs::File::open("/proc/self/status").ok());
     let none = lockdown::Level::None;
     // Lockdown order matters: Landlock before V8 starts threads, seccomp
     // (on all threads) after V8 has initialized. A layer the host lacks
@@ -165,13 +179,18 @@ fn serve(lock_down: bool, memory_limit: Option<u64>) -> ExitCode {
             return ExitCode::from(5);
         }
     };
+    init_v8();
+    // The limit is for guests, on top of what V8 has already mapped writable
+    // (on x64 mostly its JIT code range: ~550 MiB of address space, little
+    // of it in use).
     if let Some(bytes) = memory_limit {
-        if let Err(e) = lockdown::memory_limit(bytes) {
+        let baseline = status.as_mut().and_then(read_vm_data).unwrap_or(0) * 1024;
+        if let Err(e) = lockdown::memory_limit(baseline + bytes) {
             eprintln!("isolane-worker: {e}");
             return ExitCode::from(5);
         }
     }
-    init_v8();
+    drop(status);
     if !sandbox_secure() && !cfg!(feature = "dev-prebuilt") {
         eprintln!("isolane-worker: the V8 sandbox is not securely configured; refusing to run guest code");
         return ExitCode::from(3);

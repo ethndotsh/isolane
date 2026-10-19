@@ -178,7 +178,9 @@ mod linux {
 /// Cap the worker's writable private memory (RLIMIT_DATA): V8's heap,
 /// ArrayBuffer and WebAssembly memory, JIT pages, thread stacks. The V8
 /// sandbox's address-space reservation is inaccessible until used, so it
-/// doesn't count. Past the cap, allocations fail: a guest ArrayBuffer throws
+/// doesn't count; V8's JIT code range does (it is mapped writable up front),
+/// which is why the caller adds its limit to the post-initialization
+/// baseline. Past the cap, allocations fail: a guest ArrayBuffer throws
 /// a RangeError, and V8 itself running out exits the worker (code 6).
 /// Not enforced on macOS, which ignores RLIMIT_DATA.
 pub fn memory_limit(bytes: u64) -> Result<(), String> {
