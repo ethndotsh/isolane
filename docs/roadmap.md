@@ -308,7 +308,11 @@ Measured against isolated-vm (Linux x64 under Rosetta; re-measure natively):
 | Linux x64 build in CI (from source, sandbox on), incremental rebuilds via source manifest | done |
 | Linux arm64 (cross-compile from x64: Chromium's toolchains are x64-only) | planned |
 | macOS arm64/x64 (needs full Xcode; macOS CI runners) | planned |
-| Per-platform npm packages as optional dependencies; stripped binaries | planned |
+| **npm layout** (the esbuild/SWC/Biome/Rolldown pattern, not Prisma's postinstall download, which breaks offline, in locked-down installs, and with `--ignore-scripts`): `isolane` (the JS library) lists one `optionalDependencies` package per platform, each with `os`/`cpu`/`libc` fields so npm installs only the matching one: `@isolane/worker-linux-x64-gnu`, `@isolane/worker-linux-arm64-gnu`, `@isolane/worker-darwin-arm64`, `@isolane/worker-darwin-x64` (macOS: development only — no lockdown, strict mode refuses it). Later, maybe: `linux-*-musl` (Alpine; rusty_v8 doesn't support musl, so a real porting job). No Windows (no lockdown story). The library resolves its platform package, with `ISOLANE_WORKER` as an override | planned |
+| Sizes (Linux x64, October 2026): 71 MB unstripped, **53 MB stripped, ~18.7 MB gzipped per platform package** (cf. Biome 66 MB, esbuild/SWC ~11 MB unpacked); a little smaller with `symbol_level=0` | done (measured) |
+| Publishing from CI only, with npm trusted publishing (OIDC, no long-lived token) and provenance attestations; all packages versioned in lockstep; every V8 patch bump is a patch release | planned |
+| Needs from the owner: create the npm org `isolane` (free for public packages), and configure the repo as its trusted publisher | to do (owner) |
+| Stripped binaries; the staleness warning reads the worker's V8 version against the newest patch release | planned |
 | Staleness warning when the installed worker's V8 is behind the patch pipeline | planned |
 | Dev build against prebuilt V8 (`--features dev-prebuilt`, `ISOLANE_DEV_INSECURE=1`) for local iteration | done |
 | Build speed, round 1: `fast` Cargo profile for local work (an edit rebuilds in 1.3 s vs 12.3 s with fat-LTO `release`); `release` gets `panic = "abort"` and stripped debug info; CI links with lld, caches the Cargo registry, sets `CARGO_INCREMENTAL=0`, frees disk in the background; V8 built with `symbol_level=0` (GN args in `scripts/v8.gn`, part of the cache key) | done |
