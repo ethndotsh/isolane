@@ -7,8 +7,8 @@
 //!    thread and its future children, hence before V8 starts its threads.
 //! 2. V8 initializes (the caller does this between the two steps).
 //! 3. seccomp-bpf on every thread (TSYNC): a syscall allowlist; anything
-//!    else kills the process, except opening files, which fails with
-//!    EACCES as under Landlock.
+//!    else kills the process, except filesystem calls (open, stat,
+//!    readlink, access), which fail with EACCES as under Landlock.
 
 use serde::Serialize;
 
@@ -95,19 +95,41 @@ mod linux {
         libc::SYS_exit_group,
     ];
 
-    /// Opening files fails with EACCES instead of killing the process: V8 and
-    /// abseil probe a few files lazily (CPU info under /sys) and fall back
-    /// when that fails, as they must under Landlock anyway.
+    /// Filesystem calls fail with EACCES instead of killing the process, as
+    /// Landlock would answer them: V8, ICU, and abseil probe files lazily
+    /// (CPU info under /sys, /etc/localtime for the time zone) and fall back
+    /// when that fails.
     #[cfg(target_arch = "x86_64")]
-    const OPEN: &[i64] = &[libc::SYS_open, libc::SYS_openat, libc::SYS_openat2];
+    const FILE_SYSCALLS: &[i64] = &[
+        libc::SYS_open,
+        libc::SYS_openat,
+        libc::SYS_openat2,
+        libc::SYS_readlink,
+        libc::SYS_readlinkat,
+        libc::SYS_stat,
+        libc::SYS_lstat,
+        libc::SYS_newfstatat,
+        libc::SYS_statx,
+        libc::SYS_access,
+        libc::SYS_faccessat,
+        libc::SYS_faccessat2,
+    ];
     #[cfg(not(target_arch = "x86_64"))]
-    const OPEN: &[i64] = &[libc::SYS_openat, libc::SYS_openat2];
+    const FILE_SYSCALLS: &[i64] = &[
+        libc::SYS_openat,
+        libc::SYS_openat2,
+        libc::SYS_readlinkat,
+        libc::SYS_newfstatat,
+        libc::SYS_statx,
+        libc::SYS_faccessat,
+        libc::SYS_faccessat2,
+    ];
 
     /// Install the allowlist on every thread. Stacked filters, because a
     /// single seccompiler filter has one match action:
     /// - `clone3` returns ENOSYS, so libc falls back to `clone`, whose flags
     ///   the allowlist can inspect (`clone3` passes them in memory).
-    /// - opening files returns EACCES.
+    /// - filesystem calls return EACCES.
     /// - the allowlist kills the process on anything else, and allows
     ///   `clone` only with CLONE_THREAD (threads, never new processes).
     /// The kernel applies the most restrictive result across filters.
@@ -122,8 +144,8 @@ mod linux {
             arch,
         )
         .map_err(err)?;
-        let no_open = SeccompFilter::new(
-            OPEN.iter().map(|&s| (s, vec![])).collect(),
+        let no_files = SeccompFilter::new(
+            FILE_SYSCALLS.iter().map(|&s| (s, vec![])).collect(),
             SeccompAction::Allow,
             SeccompAction::Errno(libc::EACCES as u32),
             arch,
@@ -133,7 +155,7 @@ mod linux {
         // Syscalls refused by the filters above must pass this one, or its
         // kill (the most restrictive action) would win.
         let mut rules: BTreeMap<i64, Vec<SeccompRule>> =
-            ALLOWED.iter().chain(OPEN).map(|&s| (s, vec![])).collect();
+            ALLOWED.iter().chain(FILE_SYSCALLS).map(|&s| (s, vec![])).collect();
         rules.insert(libc::SYS_clone3, vec![]);
         let thread_only = SeccompCondition::new(
             0,
@@ -145,7 +167,7 @@ mod linux {
         rules.insert(libc::SYS_clone, vec![SeccompRule::new(vec![thread_only]).map_err(err)?]);
         let allowlist = SeccompFilter::new(rules, SeccompAction::KillProcess, SeccompAction::Allow, arch).map_err(err)?;
 
-        for filter in [no_clone3, no_open, allowlist] {
+        for filter in [no_clone3, no_files, allowlist] {
             let prog: BpfProgram = filter.try_into().map_err(err)?;
             seccompiler::apply_filter_all_threads(&prog).map_err(|e| format!("seccomp: {e}"))?;
         }
