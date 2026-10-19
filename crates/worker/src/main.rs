@@ -196,6 +196,10 @@ fn serve(lock_down: bool, memory_limit: Option<u64>, web_background: bool) -> Ex
     // Intl's default zone) would say where the machine is. Set while the
     // process is still single-threaded, before ICU first reads it.
     std::env::set_var("TZ", "UTC");
+    if let Err(e) = lockdown::close_inherited_fds() {
+        eprintln!("isolane-worker: {e}");
+        return ExitCode::from(1);
+    }
     let mut status = memory_limit.and_then(|_| std::fs::File::open("/proc/self/status").ok());
     let none = lockdown::Level::None;
     // Lockdown order matters: Landlock before V8 starts threads, seccomp

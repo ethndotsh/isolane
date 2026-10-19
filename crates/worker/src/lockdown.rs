@@ -220,6 +220,35 @@ fn resource_limits() -> Result<(), String> {
     Ok(())
 }
 
+/// Step 0 (first thing): close every file descriptor but stdin, stdout,
+/// and stderr. The supervisor's own process may hold descriptors without
+/// close-on-exec (a CI runner's pipes, say), which spawn() would pass on;
+/// seccomp allows read and write, so the guest could use them. Linux only,
+/// like the rest of lockdown.
+pub fn close_inherited_fds() -> Result<(), String> {
+    #[cfg(target_os = "linux")]
+    {
+        // SAFETY: close_range takes plain integers and touches no memory.
+        if unsafe { libc::syscall(libc::SYS_close_range, 3u32, u32::MAX, 0u32) } == 0 {
+            return Ok(());
+        }
+        // Kernels before 5.9: close what /proc lists. Collect first, since
+        // the listing's own descriptor is among them.
+        let fds: Vec<i32> = std::fs::read_dir("/proc/self/fd")
+            .map_err(|e| format!("listing /proc/self/fd: {e}"))?
+            .filter_map(|e| e.ok()?.file_name().to_str()?.parse().ok())
+            .filter(|&fd| fd > 2)
+            .collect();
+        for fd in fds {
+            // SAFETY: closing a descriptor number touches no memory; nothing
+            // in this process owns descriptors above 2 yet, and EBADF (the
+            // listing's own, already closed) is harmless.
+            unsafe { libc::close(fd) };
+        }
+    }
+    Ok(())
+}
+
 /// Step 1 (before V8 starts any threads).
 pub fn before_v8() -> Result<Level, String> {
     resource_limits()?;

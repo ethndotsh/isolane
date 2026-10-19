@@ -5,7 +5,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { readdirSync, readlinkSync } from 'node:fs';
+import { readFileSync, readdirSync, readlinkSync } from 'node:fs';
 import { Runtime } from '../dist/index.js';
 
 const linux = process.platform === 'linux';
@@ -27,7 +27,12 @@ test('a serving worker holds no files or sockets, only its pipes', { skip: !linu
   const pid = rt.diagnostics.workerPid('fds');
   const fds = readdirSync(`/proc/${pid}/fd`).map((fd) => [fd, readlinkSync(`/proc/${pid}/fd/${fd}`)]);
   rt.close();
-  const unexpected = fds.filter(([, target]) => !/^(pipe|anon_inode):/.test(target));
+  // stdin, stdout, and stderr are what spawn() made: pipes, or, from libuv,
+  // connected Unix socket pairs to the supervisor. Nothing else may be a
+  // file or socket, and nothing inherited survives past stderr.
+  const unix = new Set(readFileSync(`/proc/${pid}/net/unix`, 'utf8').split('\n').slice(1).map((line) => line.trim().split(/\s+/)[6]));
+  const stdio = ([fd, target]) => Number(fd) <= 2 && (/^pipe:/.test(target) || (/^socket:\[(\d+)\]$/.test(target) && unix.has(target.slice(8, -1))));
+  const unexpected = fds.filter((e) => !stdio(e) && !/^anon_inode:/.test(e[1]));
   assert.deepEqual(unexpected, [], JSON.stringify(fds));
   assert.ok(fds.some(([fd]) => fd === '0') && fds.some(([fd]) => fd === '1'));
 });
