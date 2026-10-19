@@ -22,7 +22,7 @@
 // reasons; new entries get the reason "unclassified", which the gate
 // refuses until someone classifies them.
 import { execFileSync, spawn } from 'node:child_process';
-import { existsSync, mkdtempSync, readFileSync, readdirSync, statSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { createServer } from 'node:http';
 import { createServer as createNetServer } from 'node:net';
 import { tmpdir } from 'node:os';
@@ -239,6 +239,7 @@ async function startWptserve() {
       try {
         process.kill(-child.pid, 'SIGTERM');
       } catch {}
+      rmSync(dir, { recursive: true, force: true });
     },
   };
 }
