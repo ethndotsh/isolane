@@ -108,9 +108,9 @@ older, unsupported V8 and brings tokio and its op layer into the worker.
 
 | Phase | Scope | Status |
 |---|---|---|
-| 1 | primordials, webidl, URL/URLSearchParams (`url` crate), TextEncoder/Decoder (`encoding_rs`), atob/btoa, Event/EventTarget/CustomEvent/ErrorEvent, AbortController/AbortSignal, DOMException/QuotaExceededError, structuredClone (V8 ValueSerializer), performance (frozen-clock semantics), queueMicrotask, reportError, `self`, `navigator.userAgent`, `crypto.getRandomValues`/`randomUUID` — behind `webPlatform: true` | done (WPT 97.3%, below) |
+| 1 | primordials, webidl, URL/URLSearchParams (`url` crate), TextEncoder/Decoder (`encoding_rs`), atob/btoa, Event/EventTarget/CustomEvent/ErrorEvent, AbortController/AbortSignal, DOMException/QuotaExceededError, structuredClone (V8 ValueSerializer, with transfer), MessageChannel/MessagePort, performance (frozen-clock semantics), queueMicrotask, reportError, `self`, `navigator.userAgent`, `crypto.getRandomValues`/`randomUUID` — behind `webPlatform: true` | done (WPT 97.3%, below) |
 | 2 | Timers + an event loop in the VM thread (`setTimeout`, `setInterval`, `clearTimeout`, `clearInterval`, `AbortSignal.timeout`), Streams (ReadableStream incl. byte streams/BYOB, WritableStream, TransformStream, queuing strategies), Blob/File/FileReader, `URL.createObjectURL`, TextEncoderStream/TextDecoderStream, CompressionStream/DecompressionStream (gzip, deflate, deflate-raw via `flate2`'s pure-Rust backend; brotli via the pure-Rust `brotli` crate), structuredClone of Blob/File | done (WPT 97.2% over the phase 1 + 2 subset, below) |
-| 3 | Spec `fetch`/`Request`/`Response`/`Headers`/`FormData`: Deno's 20–23 (vendored) plus our own `fetch()` (`runtime/fetch.js`, adapted from Deno's 26_fetch.js) over the network broker; response bodies stream (byte streams pulled from the broker), request bodies are buffered; redirect modes (follow/manual/error; the broker follows, re-checking each hop); abort cancels the broker's request; `data:` and `blob:` URLs; `fetch` without a network policy rejects with a TypeError | done (WPT below) |
+| 3 | Spec `fetch`/`Request`/`Response`/`Headers`/`FormData`: Deno's 20–23 (vendored) plus our own `fetch()` (`runtime/fetch.js`, adapted from Deno's 26_fetch.js) over the network broker; response bodies stream (byte streams pulled from the broker), ReadableStream request bodies stream to it (others are sent whole); Subresource Integrity; redirect modes (follow/manual/error; the broker follows, re-checking each hop); abort cancels the broker's request; `data:` and `blob:` URLs; `fetch` without a network policy rejects with a TypeError | done (WPT below) |
 | — | Streamed request bodies (upload a `ReadableStream` as it's produced; today it's read to the end first, within `maxRequestBytes`). WPT bug `request-streaming` (2 subtests) | planned |
 | — | A base URL option (Deno's `--location`): `web: { baseUrl }`, see API v2 | done |
 | — | Header values Node's HTTP client refuses (control bytes 0x01–0x08, 0x0B–0x1F, 0x7F, which Fetch allows) fail the fetch; would need our own HTTP/1.1 client in the supervisor | idea |
@@ -132,8 +132,8 @@ older, unsupported V8 and brings tokio and its op layer into the worker.
 | — | WPT subset with tracked pass rates: now the WPT gate (`test/wpt/run.mjs`, see "WPT gate" below), which replaced `soak/wpt.mjs` and its 95% floor | done |
 | — | Turn `web` on by default: **not yet**. With the snapshot, a web isolate costs ~0.55 ms more than a plain one (isolate 0.29 → 0.59 ms, context 0.12 → 0.37 ms; all V8 deserialization, `configure` is 0.01 ms), over the 0.3 ms bar set for flipping the default; first use costs nothing. Revisit with an embedded snapshot or an isolate pool | deferred |
 | — | Fair CPU for idle timers: a stateful isolate's `setInterval` runs between evals (each batch budgeted like an eval, but unbounded in count); per-tenant CPU accounting should cover it | planned |
-| — | `structuredClone` `transfer`, transferable streams, `MessageChannel`/`MessagePort`. WPT bug `message-channel` (11 subtests) | planned |
-| — | Error a `DecompressionStream`'s readable immediately on trailing data (needs the transform controller in the op). WPT bug `decompression-trailing` (1 file) | planned |
+| — | `structuredClone` `transfer`, transferable streams, `MessageChannel`/`MessagePort`: Deno's 13_message_port.js over in-isolate ports in runtime/core.js (each message a task), and V8 serializer transfer in web/clone.rs (a transferred buffer's backing store moves to a new ArrayBuffer). Fixed WPT bugs `message-channel` and `structured-clone-edge` | done |
+| — | Error a `DecompressionStream`'s readable right after the output on trailing data (`op_compression_check`, patches/deno-compression-errors.patch). Fixed WPT bug `decompression-trailing` | done |
 | — | Streams backed by native resources (Deno's `op_readable_stream_resource_*`, `internals.readableStreamForRid`): not needed; fetch bodies are byte streams pulled from the broker in JS | dropped |
 
 Timer semantics (phase 2): timers live in the isolate's thread. Scheduling
@@ -212,7 +212,7 @@ randomUUID 100%. Remaining failures, by cause:
 - The global object isn't a `WorkerGlobalScope` (idlharness "unexpected
   global object"); decide which global interface to model.
 - `Event.timeStamp` is always 0 (Deno's behaviour too); `structuredClone`'s
-  `transfer` option isn't supported yet.
+  `transfer` option isn't supported yet (since done).
 
 ### WPT gate
 
@@ -251,21 +251,30 @@ environment 49, bug 177. Under wptserve, the fixes below took the run from
   `Location` bytes, and let a NUL in a response header through (now a
   network error, as in Fetch).
 
+After the Deno-gaps pass (compared against Deno's own WPT expectations at
+the commit we vendor, which is Deno's main; nothing newer to take): 17,829 /
+18,590 subtests (95.9%), **99.0% of the 18,003 that apply**; bug 177 → 125,
+of which 112 are `url-crate`. Deno's own patches to its vendored files are
+in `patches/deno-*.patch`, applied by `scripts/vendor-deno.sh`.
+
 | Phase | Item | Status |
 |---|---|---|
 | — | WPT expectations file (every allowed failure listed with a reason: by-design / browser-only / environment / bug) and per-subtest gating in CI and the soak; `--update` rewrites it from a run, keeping reasons | done |
 | — | Run WPT's own server (wptserve) for the gate so tests that need its Python handlers run | done |
 | — | Optional `web: { baseUrl }` (like Deno's `--location`) so relative Request/fetch URLs resolve and `location` exists | done |
-| — | MIME parser: Deno's vendored `01_mimesniff.js` drops a parameter with an empty quoted value (`a=""`), which the MIME Sniffing standard keeps (1 WPT subtest, `mime-empty-quoted-param`) | planned |
-| — | Fix or upstream the `url` crate's lag on newest URL-spec edge cases: WPT bug `url-crate` (112 subtests) | planned |
-| — | Compression conformance: smaller output for tiny repetitive inputs, detect truncated deflate input. WPT bug `compression-format` (4) | planned |
-| — | Encoding conformance: EUC-JP state after a fatal streaming error (`encoding_rs`). WPT bug `encoding-edge` (1) | planned |
-| — | Event attributes: `Event.timeStamp`, `isTrusted` as an own unforgeable attribute. WPT bug `event-attrs` (3) | planned |
-| — | Fetch `integrity` (Subresource Integrity) checks. WPT bug `sri` (3) | planned |
-| — | Request attributes: `destination`, `isReloadNavigation`, `isHistoryNavigation`, `duplex` and its validation, refusing credentials in the URL. WPT bug `request-attrs` (11) | planned |
-| — | Body conformance (vendored classes): BYOB readers on non-stream bodies, `Object.prototype.then` injection, UTF-16 JSON, an empty `FormData` as text. WPT bug `body-edge` (11) | planned |
-| — | Streams conformance (vendored): synchronous write algorithm on enqueue, enqueue after a detached BYOB buffer, byobRequest after a patched `then`, transformer cancel race. WPT bug `streams-edge` (4) | planned |
-| — | Structured clone: keep a resizable `ArrayBuffer`'s `maxByteLength`, refuse out-of-bounds views. WPT bug `structured-clone-edge` (14) | planned |
+| — | `data:` URLs processed natively with the `data-url` crate, as Deno's fetch does (its MIME serialization keeps `a=""`). Fixed WPT bug `mime-empty-quoted-param` | done |
+| — | URL parser: the `url` crate lags the URL standard (WPT bug `url-crate`, 112 subtests). Evaluated ada (Node's parser, `ada-url` 4.0.0): on WPT's own data it gets urltestdata 896/896 (url crate 831) and setters 277/278 (255; the miss is an href case outside the setter harness). It builds cleanly against V8's own libc++ (compile `ada.cpp` with `-nostdinc++` and rusty_v8's `third_party/libc++` headers and `__config_site`, `-fno-exceptions -fno-rtti -DNDEBUG`: every C++ symbol it needs resolves inside librusty_v8.a, so no second C++ runtime); the crate's default build would instead link the system libc++/libstdc++ next to V8's static libc++abi, duplicating `__cxa_*`. Not adopted: it's 1.1 MB of C++ parsing guest-controlled strings outside the V8 sandbox, where the `url` crate is safe Rust, a change to what the worker's safety rests on. Options: adopt ada behind that decision (vendor ada.cpp, a worker build.rs, map its components to Deno's url-crate offsets; cross builds need a target sysroot), or fix the gaps in rust-url upstream | decide |
+| — | Compression conformance: deflate and deflate-raw decoders drive flate2's inflater directly, so truncated input and input after the end are TypeErrors (flate2's write decoders accept both). The "output larger than input" failures were the WPT checkout missing the media file the test compresses. Fixed WPT bug `compression-format` | done |
+| — | Encoding conformance: after a fatal streaming error, keep only the byte the decoder looked at (EUC-JP's JIS0212 case). encoding_rs's fatal API doesn't say whether it did; ask upstream for that, or add per-encoding rules. WPT bug `encoding-edge` (1; same op in Deno) | planned (upstream) |
+| — | Event attributes: `Event.timeStamp` (always 0; under the frozen clock `performance.now()` is often 0 too, so the `> 0` checks couldn't pass reliably) and `isTrusted` as an own [LegacyUnforgeable] property (Deno chose a prototype accessor for speed). WPT bug `event-attrs` (3) | deferred |
+| — | Fetch `integrity` (Subresource Integrity): sha256/384/512 via the `sha2` crate, strongest algorithm wins, base64 or base64url. Fixed WPT bug `sri` | done |
+| — | Request attributes: `destination`, `isReloadNavigation`, `isHistoryNavigation`, `duplex` and its validation (a ReadableStream body needs `duplex: 'half'`), no keepalive or no-cors stream bodies, refusing credentials in the URL (patches/deno-request-attributes.patch). Fixed WPT bug `request-attrs` | done |
+| — | Stream ReadableStream request bodies to the broker (`write(id, chunk)`, chunked, backpressure, `limits.requestBytes` counted as sent; a redirect that would resend a streamed body is a network error). Fixed WPT bug `request-streaming` | done |
+| — | Body conformance (vendored classes): bodies from strings and bytes are byte streams (BYOB works; patches/deno-body-byte-streams.patch). Left: `Object.prototype.then` injection through promises resolved with body bytes (`then-injection`, 5, needs a rework of Deno's body/stream results), and an empty `FormData` as text (`empty-formdata`, 2: contradicts other WPT tests) | partly done |
+| — | Streams conformance (vendored): pipeTo writes in a microtask, not inside enqueue() (patches/deno-pipe-to-async-write.patch); enqueue after a detached BYOB buffer came with transfer. Left (`streams-edge`, 2): byobRequest seen by a patched `then`, and a transformer.cancel() that errors during a pending close (the writable is still erroring when the cancel settles) | partly done |
+| — | Structured clone: keep a resizable `ArrayBuffer`'s `maxByteLength`, refuse out-of-bounds views (the global is now 13_message_port.js's, straight to V8's serializer), non-transferable platform objects in a transfer list are DataCloneErrors. Fixed WPT bug `structured-clone-edge` | done |
+| — | Blob from a detached buffer is empty (patches/deno-blob-detached-buffers.patch) | done |
+| — | A port never closed keeps its queue until the isolate ends (no GC of ports): free entangled pairs when both MessagePort objects are collected | idea |
 | — | test262 run (catch regressions from removed globals and flags) | planned |
 | — | List isolane on unjs/runtime-compat | idea |
 | — | Node compatibility layer | later (see "Later milestone: npm and Node compatibility") |

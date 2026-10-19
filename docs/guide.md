@@ -68,16 +68,26 @@ Minimum Common API), built on Deno's web-platform JavaScript (vendored, MIT)
 over isolane's own native code:
 
 - `fetch`, `Request`, `Response`, `Headers`, `FormData` (needs a `fetch`
-  policy; response bodies stream)
+  policy; response bodies stream, and so do `ReadableStream` request bodies,
+  which need `duplex: 'half'`; `integrity` is checked, Subresource
+  Integrity's sha256/384/512; `data:` and `blob:` URLs work without a
+  policy)
 - `URL`, `URLSearchParams`
 - `TextEncoder`, `TextDecoder`, and their streams; `atob`, `btoa`
 - `Event`, `EventTarget`, `AbortController`, `AbortSignal` (incl. `timeout`),
   `DOMException`
-- `structuredClone`, `queueMicrotask`, `reportError`, `performance`
+- `structuredClone` (with `transfer` for ArrayBuffers, ports, and
+  streams), `MessageChannel`, `MessagePort`, `MessageEvent`,
+  `queueMicrotask`, `reportError`, `performance`
 - `crypto.getRandomValues`, `crypto.randomUUID`
 - timers: `setTimeout`, `setInterval`
 - streams: `ReadableStream`, `WritableStream`, `TransformStream`
 - `Blob`, `File`, `FileReader`, `CompressionStream`, `DecompressionStream`
+
+Ports and transfer stay inside the isolate (there's nothing else to post
+to): each message is delivered as its own task, a transferred buffer is
+detached where it was, and a port that's never closed keeps its queue until
+the isolate ends.
 
 `web: { baseUrl: 'https://app.example/' }` also resolves relative URLs
 (`fetch('/x')`, `new Request('/x')`) against it and adds a read-only
@@ -155,18 +165,18 @@ the guest's behalf. A refusal throws in the guest (a `TypeError` for
 `web` is checked against a pinned subset of the
 [web-platform-tests](https://web-platform-tests.org) (WPT): URL, encoding,
 DOM events and abort, streams, compression, FileAPI, structured clone,
-timers, and fetch, about 18,400 subtests. **98.7% of the subtests that
-apply pass** (95.6% of all of them).
+timers, and fetch, about 18,600 subtests. **99.0% of the subtests that
+apply pass** (95.9% of all of them).
 
 Every subtest that doesn't pass is listed in `test/wpt/expectations.json`
 with a reason, in one of four categories:
 
 | Category | Subtests | What it means |
 |---|---|---|
-| by-design | 101 | isolane's choices: no SharedArrayBuffer, no WebAssembly unless allowed, a global that isn't a `WorkerGlobalScope`, tentative APIs |
-| browser-only | 483 | rules for browsers that server runtimes (Deno, workerd) don't apply either: CORS and origins, forbidden headers, referrers, the HTTP cache, `XMLHttpRequest`, the Cache API |
+| by-design | 103 | isolane's choices: no SharedArrayBuffer, no WebAssembly unless allowed, a global that isn't a `WorkerGlobalScope`, tentative APIs |
+| browser-only | 484 | rules for browsers that server runtimes (Deno, workerd) don't apply either: CORS and origins, forbidden headers, referrers, the HTTP cache, `XMLHttpRequest`, the Cache API, canvas |
 | environment | 49 | the test setup or Node's HTTP client: no TLS or HTTP/2 in the test server, no WPT proxy, header bytes Node refuses |
-| bug | 177 | real gaps, each a row in the roadmap: mostly the `url` crate lagging the newest URL spec (112), then structured clone, `MessageChannel`, `Request` attributes, and body and streams edge cases |
+| bug | 125 | real gaps, each a row in the roadmap: mostly the `url` crate lagging the newest URL spec (112), then a patched `Object.prototype.then` seeing body reads, `Event` attributes, and a few streams and encoding edge cases |
 
 The applicable rate leaves out by-design and browser-only failures; bugs
 and environment failures count against it.
