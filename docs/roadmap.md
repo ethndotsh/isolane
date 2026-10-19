@@ -95,6 +95,8 @@ older, unsupported V8 and brings tokio and its op layer into the worker.
 | — | **TypeScript guest code** (`lang: 'ts'`, `.ts` deployments): type stripping, not checking, done in the worker with `oxc` (pure Rust), so untrusted source is parsed only inside the locked-down worker. Erasable syntax only (like TypeScript's `erasableSyntaxOnly`: no enum/namespace/parameter properties, which get a clear error; a `transform` mode later). Types are blanked to whitespace, so line:column in guest stack traces match the TypeScript source with no source maps. Pairs with generated `.d.ts` for host APIs so developers can type-check against the exact host API at deploy time | planned (after API v2 and WPT) |
 | — | **Multi-file programs**: deployments upload an in-memory file tree (`files: { path: source }`, `entry`); the worker resolves imports with `oxc_resolver` over a virtual filesystem (package.json exports/imports and conditions — `workerd`/`worker`/`browser`/`import`/`default` — tsconfig paths, extension probing), compiles each module with V8's native ES module API (resolve → strip/transform with oxc → compile → link), with dynamic `import()`, `import.meta.url` as the virtual path, and JSON modules. All parsing, resolving, and transforming of untrusted input stays in the locked-down worker, and resolution can't leave the uploaded tree. New limits: `modules`, `moduleBytes`. Packages work if uploaded; `node:*` only with the Node compat layer | planned |
 | — | **JSX/TSX** via oxc's transformer: classic (`React.createElement` or a custom factory) and automatic (`jsxImportSource`, resolved in the uploaded tree), so SSR with Hono JSX, Preact render-to-string, or React's server renderer works; the serverless example becomes a `.tsx` app rendering HTML | planned |
+| — | V8 code cache for deployments: compile each module eagerly once per worker, keep `create_code_cache()` bytes keyed by content hash, and later isolates use `ConsumeCodeCache` (celld calls the equivalent the largest share of its cold-wake latency) | planned (with deployments) |
+| — | Per-tenant cache of compiled WebAssembly modules (`CompiledWasmModule`) keyed by content hash, so new isolates rehydrate instead of recompiling | planned (with deployments) |
 | — | Optional deploy-time bundling with Rolldown (Rust, on oxc) for large dependency trees, plus V8 code cache per deployment | idea |
 | — | TypeScript **transform mode** (`ts: { mode: 'transform' }`) via `oxc_transformer`: enums and const enums (inlined within a file), namespaces (partial: no cross-block merging, no exported `var`/`let`), legacy decorators + metadata, JSX/TSX; per-file (`isolatedModules`) semantics. Positions shift, so the worker maps guest stack traces back through the source map before reporting `err.guest.stack`. Strip mode stays the default. Verify parameter properties and standard decorators before documenting them | planned |
 | — | **Type checking** at deploy time (`deploy(code, { check: true })`, cached by content hash), never per run: TypeScript's checker running *inside an isolane isolate* (tsc is plain JS; a large heap budget, nothing else enabled), so a checker bug or DoS on hostile input stays sandboxed. Checked against generated `.d.ts` for exactly the host functions (from their schemas) plus the WinterTC globals; failures are `ERR_TYPE_CHECK` with file:line:col diagnostics. Evaluate the native TypeScript 7 compiler (tsgo) as a separate sandboxed process once its embedding API settles | planned |
@@ -415,6 +417,18 @@ Linux 2-core $0.006/min, Linux arm64 2-core $0.005/min, macOS $0.062/min.
   untrusted code "does not automatically make your application safe"; a
   rewrite on its experimental branch "is certainly not ready for serious
   applications".
+- **celld** (Deno's self-hosted Durable Objects runtime, studied at 90b4301,
+  October 2026): explicitly not a hostile-multi-tenant sandbox (no V8
+  sandbox, all tenants in one process, no OS lockdown, CPU limits only when
+  configured, a JS-level clock shim). Worth adopting: a per-process V8 code
+  cache (eager compile once, then `ConsumeCodeCache`) for user code in
+  deployments; a per-tenant cache of compiled WebAssembly modules keyed by
+  content hash. Already equivalent in isolane: ops passed as parameters
+  rather than globals, thread-CPU-clock budgets, pumping V8's foreground
+  tasks each turn, near-heap-limit headroom. Not to copy: shared processes
+  or heaps across tenants, isolates migrating between threads, the JS clock
+  shim, unvalidated op arguments.
+
 
 ## 10. Housekeeping
 
