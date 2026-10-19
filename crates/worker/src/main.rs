@@ -117,13 +117,29 @@ fn sandbox_secure() -> bool {
     false
 }
 
+/// Writable private memory (what RLIMIT_DATA counts), in KiB (Linux).
+fn vm_data_kib() -> Option<u64> {
+    let status = std::fs::read_to_string("/proc/self/status").ok()?;
+    let line = status.lines().find(|l| l.starts_with("VmData:"))?;
+    line.split_whitespace().nth(1)?.parse().ok()
+}
+
 fn self_check() -> ExitCode {
+    let before = vm_data_kib();
     init_v8();
+    let after_init = vm_data_kib();
     let enabled = unsafe { v8__V8__IsSandboxEnabled() };
     let secure = sandbox_secure();
+    let isolate = v8::Isolate::new(Default::default());
+    let with_isolate = vm_data_kib();
+    drop(isolate);
+    let kib = |v: Option<u64>| v.map(|k| k.to_string()).unwrap_or_else(|| "null".into());
     println!(
-        "{{\"v8\":\"{}\",\"sandboxEnabled\":{enabled},\"sandboxSecure\":{secure}}}",
-        v8::V8::get_version()
+        "{{\"v8\":\"{}\",\"sandboxEnabled\":{enabled},\"sandboxSecure\":{secure},\"vmDataKiB\":{{\"start\":{},\"afterInit\":{},\"withIsolate\":{}}}}}",
+        v8::V8::get_version(),
+        kib(before),
+        kib(after_init),
+        kib(with_isolate)
     );
     if enabled && secure {
         ExitCode::SUCCESS
