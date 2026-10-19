@@ -11,6 +11,8 @@
  *
  * limit (a budget ran out):
  * - `ERR_TIMEOUT`: `timeoutMs` elapsed. The isolate stays usable.
+ * - `ERR_CPU_LIMIT`: the eval used more than `cpuTimeLimitMs` of CPU time
+ *   (Linux). The isolate stays usable.
  * - `ERR_MEMORY_LIMIT`: the isolate exceeded `memoryLimitBytes` (it is
  *   retired), or the tenant's worker exceeded `workerMemoryLimitBytes` (it
  *   restarts on the next call).
@@ -21,6 +23,10 @@
  * - `ERR_INVALID_OPTION`: an option is malformed. Thrown synchronously.
  * - `ERR_ISOLATE_DISPOSED`: `dispose()` was called.
  * - `ERR_RUNTIME_CLOSED`: `close()` was called.
+ *
+ * security:
+ * - `ERR_TENANT_QUARANTINED`: the tenant's worker had a security event
+ *   recently (see `quarantineMs`), so the runtime refuses it for now.
  *
  * infrastructure (the worker or the host):
  * - `ERR_WORKER_CRASHED`: the tenant's worker process died. It may mean an
@@ -34,28 +40,32 @@ export type IsolaneErrorCode =
   | 'ERR_UNSETTLED'
   | 'ERR_NOT_SERIALIZABLE'
   | 'ERR_TIMEOUT'
+  | 'ERR_CPU_LIMIT'
   | 'ERR_MEMORY_LIMIT'
   | 'ERR_ISOLATE_RETIRED'
   | 'ERR_INVALID_OPTION'
   | 'ERR_ISOLATE_DISPOSED'
   | 'ERR_RUNTIME_CLOSED'
+  | 'ERR_TENANT_QUARANTINED'
   | 'ERR_WORKER_CRASHED'
   | 'ERR_WORKER_UNRESPONSIVE'
   | 'ERR_ISOLATION_UNAVAILABLE'
   | 'ERR_INTERNAL';
 
-export type IsolaneErrorKind = 'guest' | 'limit' | 'usage' | 'infrastructure';
+export type IsolaneErrorKind = 'guest' | 'limit' | 'usage' | 'security' | 'infrastructure';
 
 const KINDS: Record<IsolaneErrorCode, IsolaneErrorKind> = {
   ERR_GUEST_EXCEPTION: 'guest',
   ERR_UNSETTLED: 'guest',
   ERR_NOT_SERIALIZABLE: 'guest',
   ERR_TIMEOUT: 'limit',
+  ERR_CPU_LIMIT: 'limit',
   ERR_MEMORY_LIMIT: 'limit',
   ERR_ISOLATE_RETIRED: 'limit',
   ERR_INVALID_OPTION: 'usage',
   ERR_ISOLATE_DISPOSED: 'usage',
   ERR_RUNTIME_CLOSED: 'usage',
+  ERR_TENANT_QUARANTINED: 'security',
   ERR_WORKER_CRASHED: 'infrastructure',
   ERR_WORKER_UNRESPONSIVE: 'infrastructure',
   ERR_ISOLATION_UNAVAILABLE: 'infrastructure',

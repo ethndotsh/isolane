@@ -50,6 +50,12 @@ export interface LogEntry {
 
 /** Everything about a VM except which tenant it belongs to. */
 export interface IsolateOptions {
+  /**
+   * CPU time an eval (or a host-reply continuation) may use, separately from
+   * the wall clock, so time spent waiting on host calls doesn't count.
+   * Exceeding it fails the eval with `ERR_CPU_LIMIT`. Linux only.
+   */
+  cpuTimeLimitMs?: number;
   /** Wall-clock budget per eval (and per host-reply continuation). */
   timeoutMs?: number;
   /**
@@ -185,6 +191,8 @@ function clockSpec(clock: RunOptions['clock']): ClockSpec {
 export interface SecurityEvent {
   kind: 'worker-crash' | 'protocol-violation' | 'worker-unresponsive';
   tenant: string;
+  /** When the tenant's quarantine ends (ms since the epoch), if it is quarantined. */
+  quarantinedUntil?: number;
   exitCode: number | null;
   signal: string | null;
   detail?: string;
@@ -218,6 +226,13 @@ export interface RuntimeOptions {
   workerMemoryLimitBytes?: number | null;
   /** Options every VM starts from; a tenant's and a call's options override them. */
   defaults?: IsolateOptions;
+  /**
+   * After a security event, refuse the tenant for this long (new isolates
+   * throw `ERR_TENANT_QUARANTINED`), so a tenant probing for an exploit
+   * can't retry in a tight loop. Default 60 s; `null` to turn it off.
+   * `runtime.releaseQuarantine(tenant)` lifts it early.
+   */
+  quarantineMs?: number | null;
 }
 
 const DEFAULT_WORKER_MEMORY_LIMIT = 2 * 1024 ** 3;
@@ -294,6 +309,7 @@ class TenantWorker {
       t: 'create',
       vm,
       timeoutMs: opts.timeoutMs,
+      cpuTimeLimitMs: opts.cpuTimeLimitMs,
       heapBytes: opts.memoryLimitBytes,
       hostFunctions: Object.keys(setup.hostFunctions).filter((n) => !setup.syncHostFunctions.includes(n)),
       syncHostFunctions: setup.syncHostFunctions,
@@ -473,6 +489,8 @@ export class Runtime {
   #onLog: ((e: LogEntry) => void) | undefined;
   #memoryLimit: number | undefined;
   #defaults: IsolateOptions | undefined;
+  #quarantineMs: number | null;
+  #quarantined = new Map<string, number>();
   #strict: boolean;
   #workers = new Map<string, TenantWorker>();
   #nextVm = 1;
@@ -491,6 +509,7 @@ export class Runtime {
     this.#strict = options.strict ?? process.env.NODE_ENV === 'production';
     this.#onLog = options.onLog;
     this.#defaults = options.defaults;
+    this.#quarantineMs = options.quarantineMs === undefined ? 60_000 : options.quarantineMs;
     const limit = options.workerMemoryLimitBytes === undefined ? DEFAULT_WORKER_MEMORY_LIMIT : options.workerMemoryLimitBytes;
     if (limit !== null && !(Number.isSafeInteger(limit) && limit >= 64 * 1024 * 1024)) {
       throw invalidOption('workerMemoryLimitBytes must be at least 64 MiB, or null');
@@ -538,6 +557,17 @@ export class Runtime {
     if (typeof options?.tenant !== 'string' || options.tenant === '') {
       throw invalidOption('options.tenant is required');
     }
+    const until = this.#quarantined.get(options.tenant);
+    if (until !== undefined) {
+      if (Date.now() < until) {
+        throw new IsolaneError(
+          'ERR_TENANT_QUARANTINED',
+          `isolane: tenant ${options.tenant} is quarantined for ${Math.ceil((until - Date.now()) / 1000)}s more after a security event`,
+          { tenant: options.tenant },
+        );
+      }
+      this.#quarantined.delete(options.tenant);
+    }
     const opts = mergeOptions(this.#defaults, options);
     const setup = vmSetup(opts);
     const worker = this.#workerFor(opts.tenant);
@@ -562,6 +592,11 @@ export class Runtime {
     this.close();
   }
 
+  /** Lift a tenant's quarantine early. */
+  releaseQuarantine(tenant: string): void {
+    this.#quarantined.delete(tenant);
+  }
+
   #workerFor(tenant: string): TenantWorker {
     let w = this.#workers.get(tenant);
     if (!w) {
@@ -572,6 +607,8 @@ export class Runtime {
         // A clean exit only happens when stdin closes; anything else from a
         // worker that ran guest code is treated as a possible exploit.
         if (exit.reason === 'protocol-violation' || exit.reason === 'unresponsive' || exit.signal || exit.code !== 0) {
+          const quarantinedUntil = this.#quarantineMs === null ? undefined : Date.now() + this.#quarantineMs;
+          if (quarantinedUntil !== undefined) this.#quarantined.set(tenant, quarantinedUntil);
           this.#onSecurityEvent?.({
             kind:
               exit.reason === 'protocol-violation'
@@ -580,6 +617,7 @@ export class Runtime {
                   ? 'worker-unresponsive'
                   : 'worker-crash',
             tenant,
+            quarantinedUntil,
             exitCode: exit.code,
             signal: exit.signal,
             detail: exit.detail,

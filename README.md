@@ -76,6 +76,23 @@ before running guest code: Landlock and seccomp on Linux. In strict mode the
 pool refuses hosts where that lockdown can't be applied
 (`pool.isolationReport()` shows what a host provides).
 
+### Known limits
+
+- **Time still moves at I/O.** A frozen clock stops guest code from timing
+  itself between I/O events, but each host call, fetch, or eval moves the
+  clock to the real time, so a guest that makes many calls can still
+  measure coarse durations.
+- **An `fs` root must not be writable by anyone else.** Paths are confined
+  by resolving symlinks before each operation; another process creating
+  symlinks inside the root at the same moment could race that check.
+- **A seeded isolate's hash seeds are predictable** to its own code (it can
+  slow its own hash tables down, within its time limits).
+- **On macOS**, the per-worker memory cap and CPU-time budgets aren't
+  enforced, and there's no seccomp or Landlock: strict mode refuses it.
+- **Everything is UTC.** Guests can't see the host's time zone, and can't
+  choose another one as the default (they can still format for any zone
+  with `Intl`).
+
 ## Building
 
 V8 is compiled from source, because no published rusty_v8 build has the V8

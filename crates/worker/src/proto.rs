@@ -17,6 +17,8 @@ pub enum In {
         /// Wall-clock budget for each eval, and for each host-reply
         /// continuation that runs between evals.
         timeout_ms: Option<u64>,
+        /// CPU-time budget for each eval and continuation.
+        cpu_time_limit_ms: Option<u64>,
         #[serde(default)]
         host_functions: Vec<String>,
         /// Host functions that return directly instead of a Promise.
@@ -69,6 +71,8 @@ pub enum In {
 pub enum ErrorCode {
     #[serde(rename = "ERR_TIMEOUT")]
     Timeout,
+    #[serde(rename = "ERR_CPU_LIMIT")]
+    CpuLimit,
     #[serde(rename = "ERR_GUEST_EXCEPTION")]
     GuestException,
     #[serde(rename = "ERR_MEMORY_LIMIT")]

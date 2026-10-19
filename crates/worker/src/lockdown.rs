@@ -172,8 +172,24 @@ pub fn memory_limit(bytes: u64) -> Result<(), String> {
     Ok(())
 }
 
+/// No core dumps (a crashed worker's memory holds tenant data) and no file
+/// writes (defense in depth: seccomp and Landlock already refuse opening
+/// files). RLIMIT_NPROC is per user, not per process, so it would also cap
+/// other workers' threads; seccomp already forbids creating processes.
+fn resource_limits() -> Result<(), String> {
+    #[cfg(target_os = "linux")]
+    for (resource, name) in [(libc::RLIMIT_CORE, "RLIMIT_CORE"), (libc::RLIMIT_FSIZE, "RLIMIT_FSIZE")] {
+        let zero = libc::rlimit { rlim_cur: 0, rlim_max: 0 };
+        if unsafe { libc::setrlimit(resource, &zero) } != 0 {
+            return Err(format!("setrlimit({name}): {}", std::io::Error::last_os_error()));
+        }
+    }
+    Ok(())
+}
+
 /// Step 1 (before V8 starts any threads).
 pub fn before_v8() -> Result<Level, String> {
+    resource_limits()?;
     #[cfg(target_os = "linux")]
     return linux::landlock();
     #[cfg(not(target_os = "linux"))]

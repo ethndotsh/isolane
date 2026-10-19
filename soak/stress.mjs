@@ -90,7 +90,8 @@ const scenarios = {
 
   // Workers dying over and over: does the supervisor leak fds or zombies?
   async crashChurn() {
-    const pool = newPool();
+    // These kills are ours, not the tenant's: no quarantine.
+    const pool = newPool({ quarantineMs: null });
     const fd0 = fds();
     let ok = 0;
     for (let i = 0; i < 300; i++) {

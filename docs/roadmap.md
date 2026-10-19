@@ -42,14 +42,17 @@ safety posture, installable with `npm install`:
 | Fuzzilli against our worker config (REPRL mode, sanitizer-coverage V8 build, V8 sandbox fuzzing profile / memory-corruption API) | planned | rented box ~$20–80/mo or weekly 6 h CI job; 1–2 days to set up |
 | V8 "sandbox testing" mode: give guest arbitrary in-sandbox R/W, check it can't escape the worker | idea | |
 | Temporal: re-enable after audit (it exposes the host time zone; temporal_rs `sys` paths) | planned | |
-| Host time zone leaks via `Date` (`getTimezoneOffset`): pin workers to UTC | planned | |
-| Quarantine tenants after security events; tenant trust levels (group or isolate by plan) | planned | |
-| CPU-time budgets (per-eval CPU, not just wall clock; per-tenant accounting) | planned | |
-| rlimits: NPROC, FSIZE, CORE; opportunistic cgroups v2 and namespaces | planned | |
+| Host time zone leaks via `Date` (`getTimezoneOffset`): pin workers to UTC | done | the worker sets `TZ=UTC` before ICU reads it |
+| Quarantine tenants after security events (`quarantineMs`, default 60 s; `releaseQuarantine`) | done | |
+| Tenant trust levels (group or isolate by plan) | planned | |
+| CPU-time budgets per eval (`cpuTimeLimitMs`, `ERR_CPU_LIMIT`; VM thread's CPU clock, Linux) | done | |
+| Per-tenant CPU accounting (cumulative, for billing and fairness) | planned | |
+| rlimits: CORE=0 (no tenant data in core dumps), FSIZE=0 | done | NPROC is per user (would cap other workers' threads); seccomp already forbids process creation |
+| Opportunistic cgroups v2 and namespaces | planned | |
 | macOS: Seatbelt profile (sandbox_init) | planned | |
 | `isolane doctor` (explain what this host provides and why) | planned | |
 | External security review; written threat-model sign-off (P5 gate) | planned | the README says "not ready for untrusted code" until then |
-| Known limits to document: fs root must not be writable by others (TOCTOU); time still advances at I/O (coarse timing); a seeded VM's hash seeds are predictable to itself | planned | |
+| Known limits documented (README) | done | |
 
 ## 2. Guest capabilities (per-VM policies)
 

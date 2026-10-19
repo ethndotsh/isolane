@@ -118,6 +118,10 @@ fn self_check() -> ExitCode {
 }
 
 fn serve(lock_down: bool, memory_limit: Option<u64>) -> ExitCode {
+    // Every guest sees UTC: the host's time zone (Date#getTimezoneOffset,
+    // Intl's default zone) would say where the machine is. Set while the
+    // process is still single-threaded, before ICU first reads it.
+    std::env::set_var("TZ", "UTC");
     let none = lockdown::Level::None;
     // Lockdown order matters: Landlock before V8 starts threads, seccomp
     // (on all threads) after V8 has initialized. A layer the host lacks
@@ -182,6 +186,7 @@ fn serve(lock_down: bool, memory_limit: Option<u64>) -> ExitCode {
                 vm,
                 heap_bytes,
                 timeout_ms,
+                cpu_time_limit_ms,
                 host_functions,
                 sync_host_functions,
                 clock,
@@ -195,6 +200,7 @@ fn serve(lock_down: bool, memory_limit: Option<u64>) -> ExitCode {
                 let config = VmConfig {
                     heap_bytes,
                     timeout: timeout_ms.map(Duration::from_millis),
+                    cpu_limit: cpu_time_limit_ms.map(Duration::from_millis),
                     host_functions,
                     sync_host_functions,
                     clock,

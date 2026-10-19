@@ -57,6 +57,8 @@ const LOG_MESSAGE_MAX: usize = 16 << 10;
 pub struct VmConfig {
     pub heap_bytes: Option<u64>,
     pub timeout: Option<Duration>,
+    /// CPU time the VM thread may use per eval (or continuation).
+    pub cpu_limit: Option<Duration>,
     pub host_functions: Vec<String>,
     /// Host functions that return their result directly instead of a Promise.
     pub sync_host_functions: Vec<String>,
@@ -162,25 +164,70 @@ pub fn spawn(id: u64, config: VmConfig, rx: Receiver<VmMsg>, out: Output) -> std
 
 // ---- watchdog ----
 
-#[derive(Default)]
+/// A thread's CPU clock, readable from another thread (Linux:
+/// `pthread_getcpuclockid`). Elsewhere CPU budgets aren't enforced.
+#[derive(Clone, Copy)]
+struct CpuClock(#[cfg(target_os = "linux")] libc::clockid_t);
+
+impl CpuClock {
+    /// The calling thread's clock.
+    fn current() -> Option<CpuClock> {
+        #[cfg(target_os = "linux")]
+        unsafe {
+            let mut id: libc::clockid_t = 0;
+            (libc::pthread_getcpuclockid(libc::pthread_self(), &mut id) == 0).then_some(CpuClock(id))
+        }
+        #[cfg(not(target_os = "linux"))]
+        None
+    }
+
+    fn now(self) -> Duration {
+        #[cfg(target_os = "linux")]
+        unsafe {
+            let mut ts = libc::timespec { tv_sec: 0, tv_nsec: 0 };
+            libc::clock_gettime(self.0, &mut ts);
+            Duration::new(ts.tv_sec as u64, ts.tv_nsec as u32)
+        }
+        #[cfg(not(target_os = "linux"))]
+        Duration::ZERO
+    }
+}
+
+/// How often the watchdog samples a CPU budget.
+const CPU_POLL: Duration = Duration::from_millis(2);
+
+/// Which budget ran out.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Fired {
+    No,
+    Wall,
+    Cpu,
+}
+
 struct WatchState {
     deadline: Option<Instant>,
-    fired: bool,
+    /// The VM thread's CPU time at which to stop.
+    cpu_deadline: Option<Duration>,
+    fired: Fired,
     closed: bool,
 }
 
-/// Terminates the isolate when an armed deadline passes. `TerminateExecution`
-/// is thread-safe and stops JIT-compiled code as well as the interpreter.
+/// Terminates the isolate when an armed budget runs out: a wall-clock
+/// deadline, or CPU time used by the VM thread. `TerminateExecution` is
+/// thread-safe and stops JIT-compiled code as well as the interpreter.
 struct Watchdog {
     state: Mutex<WatchState>,
     cv: Condvar,
+    cpu: Option<CpuClock>,
 }
 
 impl Watchdog {
+    /// Call on the VM thread (its CPU clock is the one budgets measure).
     fn start(handle: v8::IsolateHandle) -> std::io::Result<Arc<Watchdog>> {
         let w = Arc::new(Watchdog {
-            state: Mutex::new(WatchState::default()),
+            state: Mutex::new(WatchState { deadline: None, cpu_deadline: None, fired: Fired::No, closed: false }),
             cv: Condvar::new(),
+            cpu: CpuClock::current(),
         });
         let watch = w.clone();
         let spawned = std::thread::Builder::new().stack_size(WATCHDOG_STACK).spawn(move || {
@@ -189,38 +236,56 @@ impl Watchdog {
                 if s.closed {
                     return;
                 }
-                match s.deadline {
-                    None => s = watch.cv.wait(s).unwrap(),
-                    Some(d) => {
-                        let now = Instant::now();
-                        if now >= d {
-                            s.deadline = None;
-                            s.fired = true;
-                            handle.terminate_execution();
-                        } else {
-                            s = watch.cv.wait_timeout(s, d - now).unwrap().0;
-                        }
+                let now = Instant::now();
+                if s.deadline.is_some_and(|d| now >= d) {
+                    s.deadline = None;
+                    s.cpu_deadline = None;
+                    s.fired = Fired::Wall;
+                    handle.terminate_execution();
+                    continue;
+                }
+                if let (Some(limit), Some(clock)) = (s.cpu_deadline, watch.cpu) {
+                    if clock.now() >= limit {
+                        s.deadline = None;
+                        s.cpu_deadline = None;
+                        s.fired = Fired::Cpu;
+                        handle.terminate_execution();
+                        continue;
                     }
                 }
+                let wall = s.deadline.map(|d| d - now);
+                let cpu = s.cpu_deadline.and(watch.cpu).map(|_| CPU_POLL);
+                s = match (wall, cpu) {
+                    (None, None) => watch.cv.wait(s).unwrap(),
+                    (w, c) => {
+                        let wait = w.unwrap_or(Duration::MAX).min(c.unwrap_or(Duration::MAX));
+                        watch.cv.wait_timeout(s, wait).unwrap().0
+                    }
+                };
             }
         });
         spawned.map(|_| w)
     }
 
-    fn arm(&self, budget: Duration) -> Instant {
-        let deadline = Instant::now() + budget;
+    /// Arm for one eval or continuation; returns the wall-clock deadline.
+    /// Call on the VM thread.
+    fn arm(&self, wall: Option<Duration>, cpu: Option<Duration>) -> Option<Instant> {
+        let deadline = wall.map(|t| Instant::now() + t);
+        let cpu_deadline = cpu.and_then(|c| self.cpu.map(|clock| clock.now() + c));
         let mut s = self.state.lock().unwrap();
-        s.deadline = Some(deadline);
-        s.fired = false;
+        s.deadline = deadline;
+        s.cpu_deadline = cpu_deadline;
+        s.fired = Fired::No;
         self.cv.notify_one();
         deadline
     }
 
-    /// Disarm; returns whether the deadline fired.
-    fn disarm(&self) -> bool {
+    /// Disarm; returns which budget ran out, if one did.
+    fn disarm(&self) -> Fired {
         let mut s = self.state.lock().unwrap();
         s.deadline = None;
-        std::mem::take(&mut s.fired)
+        s.cpu_deadline = None;
+        std::mem::replace(&mut s.fired, Fired::No)
     }
 
     fn close(&self) {
@@ -744,14 +809,18 @@ fn vm_main(id: u64, config: VmConfig, rx: Receiver<VmMsg>, out: Output) {
                     send_result(&out, req, Err(fail(ErrorCode::IsolateRetired, cause.clone())));
                     continue;
                 }
-                let deadline = config.timeout.map(|t| watchdog.arm(t));
+                let deadline = watchdog.arm(config.timeout, config.cpu_limit);
                 bridge.deadline.set(deadline);
                 bridge.timed_out.set(false);
                 let end = eval(&mut isolate, &context, &code, &bridge.mailbox, deadline);
                 pump_tasks(&isolate);
                 bridge.deadline.set(None);
-                let fired = watchdog.disarm() | bridge.timed_out.take();
-                if isolate.is_execution_terminating() || fired || oom.hit.load(Ordering::SeqCst) {
+                let fired = match watchdog.disarm() {
+                    Fired::No if bridge.timed_out.take() => Fired::Wall,
+                    f => f,
+                };
+                bridge.timed_out.set(false);
+                if isolate.is_execution_terminating() || fired != Fired::No || oom.hit.load(Ordering::SeqCst) {
                     isolate.cancel_terminate_execution();
                 }
                 let result = match end {
@@ -762,9 +831,12 @@ fn vm_main(id: u64, config: VmConfig, rx: Receiver<VmMsg>, out: Output) {
                     let cause = "vm exceeded its heap limit";
                     retired = Some(format!("vm was terminated by an earlier eval ({cause}); create a new one"));
                     Err(fail(ErrorCode::MemoryLimit, cause))
-                } else if fired {
+                } else if fired == Fired::Wall {
                     let ms = config.timeout.map(|t| t.as_millis()).unwrap_or(0);
                     Err(fail(ErrorCode::Timeout, format!("execution timed out after {ms}ms")))
+                } else if fired == Fired::Cpu {
+                    let ms = config.cpu_limit.map(|t| t.as_millis()).unwrap_or(0);
+                    Err(fail(ErrorCode::CpuLimit, format!("execution used more than {ms}ms of CPU time")))
                 } else {
                     result
                 };
@@ -776,7 +848,7 @@ fn vm_main(id: u64, config: VmConfig, rx: Receiver<VmMsg>, out: Output) {
                 if retired.is_some() {
                     continue;
                 }
-                bridge.deadline.set(config.timeout.map(|t| watchdog.arm(t)));
+                bridge.deadline.set(watchdog.arm(config.timeout, config.cpu_limit));
                 bridge.timed_out.set(false);
                 {
                     v8::scope_with_context!(scope, &mut isolate, &context);
@@ -787,7 +859,7 @@ fn vm_main(id: u64, config: VmConfig, rx: Receiver<VmMsg>, out: Output) {
                     }
                 }
                 bridge.deadline.set(None);
-                let fired = watchdog.disarm() | bridge.timed_out.take();
+                let fired = watchdog.disarm() != Fired::No || bridge.timed_out.take();
                 if isolate.is_execution_terminating() || fired || oom.hit.load(Ordering::SeqCst) {
                     isolate.cancel_terminate_execution();
                 }

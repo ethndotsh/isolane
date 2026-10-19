@@ -336,6 +336,24 @@ test('host functions on a stateful vm', async () => {
   vm.dispose();
 });
 
+test('guests see UTC, not the host time zone', async () => {
+  assert.deepEqual(await pool.run('[new Date(0).getTimezoneOffset(), new Date(Date.UTC(2026, 6, 1)).getTimezoneOffset(), Intl.DateTimeFormat().resolvedOptions().timeZone]', T), [0, 0, 'UTC']);
+});
+
+test('cpuTimeLimitMs bounds CPU time, not time spent waiting', { skip: process.platform !== 'linux' }, async () => {
+  const hostFunctions = { wait: () => new Promise((r) => setTimeout(r, 300)) };
+  const opts = { ...T, cpuTimeLimitMs: 100, timeoutMs: 5000, hostFunctions };
+  // Waiting 300 ms on a host call uses no CPU.
+  assert.equal(await pool.run('wait().then(() => "waited")', opts), 'waited');
+  const err = await pool.run('for (;;) {}', opts).catch((e) => e);
+  assert.deepEqual([err.code, err.kind], ['ERR_CPU_LIMIT', 'limit']);
+  // The isolate stays usable after a CPU-limit termination.
+  const vm = pool.createIsolate(opts);
+  await vm.eval('globalThis.n = 1').then(() => vm.eval('for (;;) {}')).catch(() => {});
+  assert.equal(await vm.eval('n + 1'), 2);
+  vm.dispose();
+});
+
 test('sync host functions return directly', async () => {
   const hostFunctions = {
     add: { sync: true, fn: (a, b) => a + b },
@@ -472,6 +490,28 @@ test('a crashing worker rejects in-flight evals and raises a security event', as
   assert.equal(events[0].tenant, 'victim');
   assert.equal(events[0].signal, 'SIGABRT');
   crashy.close();
+});
+
+test('a security event quarantines the tenant', async () => {
+  const events = [];
+  const rt = new Runtime({
+    workerPath: fakeWorker(`send({ t: 'ready', v8: 'fake', sandboxSecure: true, lockdown: { landlock: 'full', seccomp: 'full' } }); process.stdin.once('data', () => process.abort());`),
+    onSecurityEvent: (e) => events.push(e),
+    quarantineMs: 60_000,
+  });
+  await assert.rejects(rt.run('1', { tenant: 'prober' }), code('ERR_WORKER_CRASHED'));
+  assert.ok(events[0].quarantinedUntil > Date.now());
+  const err = (() => {
+    try {
+      rt.createIsolate({ tenant: 'prober' });
+    } catch (e) {
+      return e;
+    }
+  })();
+  assert.deepEqual([err?.code, err?.kind, err?.tenant], ['ERR_TENANT_QUARANTINED', 'security', 'prober']);
+  rt.releaseQuarantine('prober');
+  rt.createIsolate({ tenant: 'prober' }).dispose();
+  rt.close();
 });
 
 test('a worker that breaks the protocol is killed', async () => {
