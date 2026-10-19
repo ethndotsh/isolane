@@ -393,7 +393,10 @@ class TenantWorker {
     });
   }
 
-  eval(vm: number, req: number, code: string): Promise<unknown> {
+  /** `last`: the isolate is disposed after this eval (a one-shot run), so
+   * the worker drops it as soon as the result is sent and its pending
+   * timers never run. */
+  eval(vm: number, req: number, code: string, last = false): Promise<unknown> {
     return new Promise((resolve, reject) => {
       if (!this.#proc.alive) {
         reject(new IsolaneError('ERR_WORKER_CRASHED', `worker for tenant ${this.tenant} is gone`, { tenant: this.tenant }));
@@ -412,7 +415,7 @@ class TenantWorker {
       }
       this.#requests.set(req, pending);
       this.#touch();
-      this.#proc.send({ t: 'eval', vm, req, code });
+      this.#proc.send(last ? { t: 'eval', vm, req, code, last } : { t: 'eval', vm, req, code });
     });
   }
 
@@ -660,7 +663,7 @@ export class Runtime {
   async run(code: string, options: RunOptions): Promise<unknown> {
     const vm = this.createIsolate(options);
     try {
-      return await vm.eval(code);
+      return await vm._evalLast(code);
     } finally {
       vm.dispose();
     }
@@ -808,6 +811,11 @@ export class Isolate {
 
   /** Evaluate code in this VM, preserving global state between calls. */
   async eval(code: string): Promise<unknown> {
+    await this.#ready();
+    return this.#worker.eval(this.#id, this.#nextReq(), code);
+  }
+
+  async #ready(): Promise<void> {
     if (this.#disposed) throw new IsolaneError('ERR_ISOLATE_DISPOSED', 'the isolate has been disposed');
     await this.#worker.ready.catch((err: Error) => {
       const refused = /strict mode/.test(err.message);
@@ -815,7 +823,12 @@ export class Isolate {
         tenant: this.#worker.tenant,
       });
     });
-    return this.#worker.eval(this.#id, this.#nextReq(), code);
+  }
+
+  /** @internal The isolate's last eval (Runtime.run): its timers die with it. */
+  async _evalLast(code: string): Promise<unknown> {
+    await this.#ready();
+    return this.#worker.eval(this.#id, this.#nextReq(), code, true);
   }
 
   /** Free the VM's isolate. Idempotent. */

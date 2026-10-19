@@ -28,6 +28,9 @@ serde_json = { version = "1", features = ["raw_value"] }
 url = { version = "2", features = ["expose_internals"] }
 encoding_rs = "0.8"
 getrandom = "0.2"
+# CompressionStream: pure Rust (miniz_oxide for flate2), no C zlib.
+flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
+brotli = "8"
 
 [target.'cfg(target_os = "linux")'.dependencies]
 landlock = "0.4"

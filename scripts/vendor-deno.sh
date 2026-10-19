@@ -17,10 +17,15 @@ FILES=(
   ext/web/01_mimesniff.js
   ext/web/02_event.js
   ext/web/02_structured_clone.js
+  ext/web/02_timers.js
   ext/web/03_abort_signal.js
   ext/web/04_global_interfaces.js
   ext/web/05_base64.js
+  ext/web/06_streams.js
   ext/web/08_text_encoding.js
+  ext/web/09_file.js
+  ext/web/10_filereader.js
+  ext/web/14_compression.js
   ext/web/15_performance.js
 )
 tmp=$(mktemp -d)

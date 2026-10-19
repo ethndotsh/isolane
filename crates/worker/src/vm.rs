@@ -97,7 +97,9 @@ pub fn seeded_entropy(buf: &mut [u8]) -> bool {
 }
 
 pub enum VmMsg {
-    Eval { req: u64, code: String },
+    /// `last`: the VM is disposed right after (a one-shot run), so timers
+    /// left pending never run.
+    Eval { req: u64, code: String, last: bool },
     HostReply { call: u64, reply: Reply },
     Dispose,
 }
@@ -142,15 +144,19 @@ impl Mailbox {
         }
     }
 
-    /// The next message between evals.
-    fn idle(&self) -> Option<VmMsg> {
+    /// The next message between evals, waiting at most `timeout` (until the
+    /// next timer is due).
+    fn idle(&self, timeout: Option<Duration>) -> Result<VmMsg, RecvTimeoutError> {
         if let Some(m) = self.replies.borrow_mut().pop_front() {
-            return Some(m);
+            return Ok(m);
         }
         if let Some(m) = self.later.borrow_mut().pop_front() {
-            return Some(m);
+            return Ok(m);
         }
-        self.rx.recv().ok()
+        match timeout {
+            Some(t) => self.rx.recv_timeout(t),
+            None => self.rx.recv().map_err(|_| RecvTimeoutError::Disconnected),
+        }
     }
 }
 
@@ -696,25 +702,35 @@ fn eval(
         if pump_tasks(tc) {
             continue;
         }
+        // One due timer per turn, then microtasks again.
+        if crate::web::timers::run_due_timer(tc) {
+            continue;
+        }
         let waiting = tc.get_slot::<Rc<Bridge>>().map(|b| !b.pending.borrow().is_empty()).unwrap_or(false);
         let background = tc.has_pending_background_tasks();
-        if !waiting && !background {
+        let timer = crate::web::timers::next_timer();
+        // Only ref'd timers keep a pending eval waiting (AbortSignal.timeout
+        // without listeners doesn't).
+        let timers = timer.is_some_and(|(_, refed)| refed);
+        if !waiting && !background && !timers {
             return EvalEnd::Done(Err(fail(
                 ErrorCode::Unsettled,
                 "promise never settled: there are no timers or I/O, only host functions",
             )));
         }
-        // Wait for a host reply; with V8 work in flight, only briefly, then
-        // look for its results.
+        // Wait for a host reply, the next timer, or (with V8 work in flight)
+        // briefly, then look for its results.
         let left = deadline.map(|d| d.saturating_duration_since(Instant::now()));
         if left == Some(Duration::ZERO) {
-            return EvalEnd::Done(Err(fail(ErrorCode::Timeout, "timed out waiting for a host function")));
+            return EvalEnd::Done(Err(fail(ErrorCode::Timeout, "timed out waiting for a host function or timer")));
         }
-        let wait = match (background, left) {
-            (true, Some(l)) => Some(l.min(BACKGROUND_POLL)),
-            (true, None) => Some(BACKGROUND_POLL),
-            (false, l) => l,
-        };
+        let mut wait = left;
+        if background {
+            wait = Some(wait.map_or(BACKGROUND_POLL, |w| w.min(BACKGROUND_POLL)));
+        }
+        if let Some((due, _)) = timer {
+            wait = Some(wait.map_or(due, |w| w.min(due)));
+        }
         let msg = match mailbox.during_eval(wait) {
             Ok(m) => m,
             Err(RecvTimeoutError::Timeout) => continue,
@@ -724,6 +740,23 @@ fn eval(
             VmMsg::HostReply { call, reply } => apply_host_reply(tc, call, reply),
             VmMsg::Dispose => return EvalEnd::Disposed,
             VmMsg::Eval { .. } => unreachable!("deferred by the mailbox"),
+        }
+    }
+}
+
+/// Timers that came due between evals (a stateful isolate's setInterval, a
+/// setTimeout left by an earlier eval): run them, each followed by its
+/// microtasks, under the same budget as an eval.
+fn run_idle_timers(scope: &mut v8::PinScope) {
+    loop {
+        if scope.is_execution_terminating() {
+            return;
+        }
+        let ran = crate::web::timers::run_due_timer(scope);
+        scope.perform_microtask_checkpoint();
+        let pumped = pump_tasks(scope);
+        if !ran && !pumped {
+            return;
         }
     }
 }
@@ -813,10 +846,36 @@ fn vm_main(id: u64, config: VmConfig, rx: Receiver<VmMsg>, out: Output) {
     };
 
     loop {
-        let Some(msg) = bridge.mailbox.idle() else { break };
+        // Between evals, wake for the next timer too (stateful isolates keep
+        // theirs; see run_idle_timers).
+        let next_timer = if retired.is_none() { crate::web::timers::next_timer().map(|(due, _)| due) } else { None };
+        let msg = match bridge.mailbox.idle(next_timer) {
+            Ok(m) => m,
+            Err(RecvTimeoutError::Timeout) => {
+                let cpu_start = cpu_clock.map(|c| c.now()).unwrap_or_default();
+                bridge.deadline.set(watchdog.arm(config.timeout, config.cpu_limit));
+                bridge.timed_out.set(false);
+                {
+                    v8::scope_with_context!(scope, &mut isolate, &context);
+                    run_idle_timers(scope);
+                }
+                bridge.deadline.set(None);
+                let fired = watchdog.disarm() != Fired::No || bridge.timed_out.take();
+                if isolate.is_execution_terminating() || fired || oom.hit.load(Ordering::SeqCst) {
+                    isolate.cancel_terminate_execution();
+                }
+                if oom.hit.load(Ordering::SeqCst) {
+                    retired = Some("vm was terminated by an earlier timer callback (heap limit); create a new one".into());
+                }
+                let spent = usage(&mut isolate, cpu_clock, cpu_start);
+                out.send(&Out::Usage { vm: id, usage: spent });
+                continue;
+            }
+            Err(RecvTimeoutError::Disconnected) => break,
+        };
         match msg {
             VmMsg::Dispose => break,
-            VmMsg::Eval { req, code } => {
+            VmMsg::Eval { req, code, last } => {
                 if let Some(cause) = &retired {
                     send_result(&out, req, Err(fail(ErrorCode::IsolateRetired, cause.clone())), Usage::default());
                     continue;
@@ -855,6 +914,9 @@ fn vm_main(id: u64, config: VmConfig, rx: Receiver<VmMsg>, out: Output) {
                 };
                 let spent = usage(&mut isolate, cpu_clock, cpu_start);
                 send_result(&out, req, result, spent);
+                if last {
+                    break;
+                }
             }
             VmMsg::HostReply { call, reply } => {
                 // A reply after its eval finished: the continuation it wakes

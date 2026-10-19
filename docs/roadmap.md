@@ -82,13 +82,56 @@ older, unsupported V8 and brings tokio and its op layer into the worker.
 | Phase | Scope | Status |
 |---|---|---|
 | 1 | primordials, webidl, URL/URLSearchParams (`url` crate), TextEncoder/Decoder (`encoding_rs`), atob/btoa, Event/EventTarget/CustomEvent/ErrorEvent, AbortController/AbortSignal, DOMException/QuotaExceededError, structuredClone (V8 ValueSerializer), performance (frozen-clock semantics), queueMicrotask, reportError, `self`, `navigator.userAgent`, `crypto.getRandomValues`/`randomUUID` — behind `webPlatform: true` | done (WPT 97.3%, below) |
-| 2 | Timers + an event loop in the VM thread (`setTimeout`, `setInterval`, `AbortSignal.timeout`), Streams (06_streams), Blob/File, TextEncoderStream/DecoderStream, CompressionStream (`flate2`) | planned |
+| 2 | Timers + an event loop in the VM thread (`setTimeout`, `setInterval`, `clearTimeout`, `clearInterval`, `AbortSignal.timeout`), Streams (ReadableStream incl. byte streams/BYOB, WritableStream, TransformStream, queuing strategies), Blob/File/FileReader, `URL.createObjectURL`, TextEncoderStream/TextDecoderStream, CompressionStream/DecompressionStream (gzip, deflate, deflate-raw via `flate2`'s pure-Rust backend; brotli via the pure-Rust `brotli` crate), structuredClone of Blob/File | done (WPT 97.2% over the phase 1 + 2 subset, below) |
 | 3 | Spec `fetch`/`Request`/`Response`/`Headers`/`FormData` (Deno's 20–26) over our network broker; streaming bodies | planned |
 | 4 | `crypto.subtle` (Deno's ext/crypto Rust, MIT) | planned |
 | — | V8 startup snapshot of the runtime JS (avoid compiling ~15k lines per VM) | planned |
 | — | ES modules for guest code (`export default { fetch }` handlers) | planned |
 | — | WPT subset with tracked pass rates (`soak/wpt.mjs`, weekly soak job with a 97% floor); Deno's and workerd's expectation files as a baseline | done (runner); expectations planned |
 | — | Turn `webPlatform` on by default once the startup snapshot lands (today: +0.8 ms per isolate, +1–1.6 ms on first use of an API) | planned |
+| — | Fair CPU for idle timers: a stateful isolate's `setInterval` runs between evals (each batch budgeted like an eval, but unbounded in count); per-tenant CPU accounting should cover it | planned |
+| — | `structuredClone` `transfer`, transferable streams, `MessageChannel`/`MessagePort` | planned |
+| — | Error a `DecompressionStream`'s readable immediately on trailing data (needs the transform controller in the op) | planned |
+| — | Streams backed by native resources (Deno's `op_readable_stream_resource_*`, `internals.readableStreamForRid`): unreachable today, since bodies come from our brokers as bytes; revisit for streaming fetch/socket bodies in phase 3 | planned |
+
+Timer semantics (phase 2): timers live in the isolate's thread. Scheduling
+uses the real monotonic clock; firing a timer is an I/O event, so a frozen
+guest clock moves forward before each callback. Each callback is its own
+task (a microtask checkpoint runs between callbacks). HTML's nesting clamp
+applies (4 ms past nesting level 5); at most 10,000 live timers per isolate
+(RangeError past that). A pending eval waits for ref'd timers within
+`timeoutMs` (an unobserved `AbortSignal.timeout` doesn't keep it alive). A
+one-shot `run()` sends its eval as the isolate's last, so timers left
+pending never fire; a stateful isolate keeps its timers between evals and
+runs them when due, each batch under the same time/CPU budget as an eval.
+Timers don't fire while a sync host call waits.
+
+WPT at phase 2 (same commit, dev build): 16,171 / 16,635 subtests (97.2%),
+up from 87.3% on the same directories before phase 2: streams 2.3% →
+98.2%, compression 0.9% → 90.0%, FileAPI/blob 0% → 98.2%, FileAPI/file 0% →
+56.6%, FileAPI/reading-data-section 0% → 100%, html/webappapis/timers 22% →
+100%, encoding/streams 0% → 100%, dom/abort 88.6% → 100%,
+html/webappapis/structured-clone n/a → 71.5%, FileAPI/url n/a → 8.3%. No
+worker crashes in either run (the runner now fails on any). Remaining
+failures, by cause:
+
+- Phase 3: `Response`/`Request`/`FormData`/`fetch` (the structured-clone
+  Blob battery reads Blobs via `Response`; FileAPI/file's FormData uploads;
+  FileAPI/url's fetch/XHR of blob URLs; compression tests reading through
+  `Response`).
+- By design: no SharedArrayBuffer and no WebAssembly unless allowed
+  (streams' non-transferable-buffer and compression bad-chunk variants).
+- Not supported: transfer lists (structuredClone `transfer`, transferable
+  streams, `MessageChannel`), tentative "owning" streams.
+- `DecompressionStream`: trailing data after the end of a gzip/zlib/brotli
+  stream keeps the decoded output and errors at the next write or at close;
+  browsers error the readable right away, which needs the stream's
+  controller inside the op (Deno instead throws at once and loses the
+  output).
+- Small spec gaps in vendored streams code (Deno's too): synchronous write
+  algorithm in one piping case, patched-global byobRequest, transformer
+  cancel error.
+- `URL.createObjectURL` returns `blob:null/<uuid>` (no origin).
 
 WPT at phase 1 (pinned commit c47791d, dev build): 14,099 / 14,493 subtests
 (97.3%). url 91.7%, encoding 98.3%, dom/events 92.7%, dom/abort 88.6%,

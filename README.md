@@ -39,7 +39,7 @@ code runs. Each VM can opt in to more:
 
 | Option | Default | |
 |---|---|---|
-| `webPlatform` | `false` | WinterTC's Minimum Common API, phase 1: `URL`, `URLSearchParams`, `TextEncoder`/`TextDecoder`, `atob`/`btoa`, `Event`/`EventTarget`, `AbortController`, `DOMException`, `structuredClone`, `performance`, `queueMicrotask`, `reportError`, `crypto.getRandomValues`/`randomUUID`. Deno's web-platform JS (vendored, MIT) on native ops; 97.3% of the WPT subset passes (`soak/wpt.mjs`). |
+| `webPlatform` | `false` | WinterTC's Minimum Common API, phases 1–2: `URL`, `URLSearchParams`, `TextEncoder`/`TextDecoder` (and their streams), `atob`/`btoa`, `Event`/`EventTarget`, `AbortController`/`AbortSignal.timeout`, `DOMException`, `structuredClone`, `performance`, `queueMicrotask`, `reportError`, `crypto.getRandomValues`/`randomUUID`, timers (`setTimeout`, `setInterval`), streams (`ReadableStream`, `WritableStream`, `TransformStream`), `Blob`/`File`/`FileReader`, `CompressionStream`/`DecompressionStream`. Deno's web-platform JS (vendored, MIT) on native ops; 97.2% of the WPT subset passes (`soak/wpt.mjs`). Timers advance a frozen clock when they fire; a one-shot `run()` drops timers still pending when it returns. |
 | `clock` | `'frozen'` | `'frozen'` moves only when an eval starts and when a host call returns (no timers for side channels). `'realtime'`, or `{ fixedMs }` for reproducible runs. |
 | `randomSeed` | none (OS randomness) | Seeds `Math.random` for reproducible runs. |
 | `allowCodeGeneration` | `false` | Allows `eval` and `new Function`. |
