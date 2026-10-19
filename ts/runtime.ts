@@ -341,7 +341,7 @@ export class Runtime {
       usage: this.#usageOf(tenant),
       chain,
       onGone: (gone, exit) => this.#gone(tenant, gone, exit, chain),
-      webSnapshot: web,
+      prepareWeb: web,
       spare: this.#takeSpare(memory),
     });
     this.#workers.set(tenant, w);

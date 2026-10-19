@@ -191,7 +191,7 @@ fn serve(lock_down: bool, memory_limit: Option<u64>, web_background: bool) -> Ex
     };
     init_v8();
     // The web platform's snapshot is built when the first web VM wants it,
-    // or, with --web-snapshot=background (the supervisor expects web VMs),
+    // or, with --prepare-web (the supervisor expects web VMs),
     // right away in the background: the worker reports ready without
     // waiting, and a web VM that comes sooner waits for the rest. Either
     // way it's memory operations only, the same under the lockdown below.
@@ -426,7 +426,7 @@ fn main() -> ExitCode {
     let mut memory_limit = None;
     let mut web_background = false;
     for arg in &args {
-        if arg == "--web-snapshot=background" {
+        if arg == "--prepare-web" {
             web_background = true;
         } else if let Some(n) = arg.strip_prefix("--memory-limit=") {
             match n.parse::<u64>() {
@@ -448,7 +448,7 @@ fn main() -> ExitCode {
         Some("--no-lockdown") => serve(false, memory_limit, web_background),
         Some(other) => {
             eprintln!(
-                "usage: isolane-worker [--serve | --self-check | --no-lockdown] [--memory-limit=BYTES] [--web-snapshot=background] (got {other})"
+                "usage: isolane-worker [--serve | --self-check | --no-lockdown] [--memory-limit=BYTES] [--prepare-web] (got {other})"
             );
             ExitCode::from(2)
         }

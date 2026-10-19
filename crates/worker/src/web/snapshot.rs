@@ -11,7 +11,11 @@ use std::sync::OnceLock;
 /// The external references: function pointers, fixed for the life of the
 /// process, so safe to share between VM threads.
 struct References(&'static [v8::ExternalReference]);
+// SAFETY: the entries are pointers to `extern "C"` functions (and a null
+// terminator) in this binary: immutable for the life of the process, so
+// sending or sharing them between threads can't race.
 unsafe impl Send for References {}
+// SAFETY: as above.
 unsafe impl Sync for References {}
 
 static REFERENCES: OnceLock<References> = OnceLock::new();

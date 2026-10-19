@@ -81,7 +81,7 @@ export class SpareWorker {
     workerPath: string,
     strict: boolean,
     memoryBytes: number | undefined,
-    webSnapshot: boolean,
+    prepareWeb: boolean,
     onExit: (s: SpareWorker) => void,
   ) {
     this.memoryBytes = memoryBytes;
@@ -96,7 +96,7 @@ export class SpareWorker {
       },
       strict,
       memoryBytes,
-      webSnapshot,
+      prepareWeb,
     );
   }
 }
@@ -170,7 +170,7 @@ export interface TenantWorkerOptions {
   chain: HookChain;
   onGone: (worker: TenantWorker, exit: WorkerExit) => void;
   /** Its first isolate uses the web platform: build its snapshot right away. */
-  webSnapshot: boolean;
+  prepareWeb: boolean;
   spare?: SpareWorker;
 }
 
@@ -216,7 +216,7 @@ export class TenantWorker {
       this.#proc = o.spare.proc;
       o.spare.handlers = handlers;
     } else {
-      this.#proc = new WorkerProcess(o.workerPath, handlers, o.strict, o.limits.workerMemoryBytes ?? undefined, o.webSnapshot);
+      this.#proc = new WorkerProcess(o.workerPath, handlers, o.strict, o.limits.workerMemoryBytes ?? undefined, o.prepareWeb);
     }
     this.#proc.ready.then(
       () => this.#chain.emit('worker', { tenant: this.tenant, event: 'start', pid: this.#proc.pid }),
