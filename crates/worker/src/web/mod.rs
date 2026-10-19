@@ -315,24 +315,21 @@ fn random_uuid(scope: &mut v8::PinScope, _args: Args, mut rv: Rv) {
 /// that threw): the guest's console, at error level.
 fn report_unhandled_exception(scope: &mut v8::PinScope, args: Args, _rv: Rv) {
     let e = args.get(0);
-    let text = if let Ok(obj) = v8::Local::<v8::Object>::try_from(e) {
+    let mut text = e;
+    if let Ok(obj) = v8::Local::<v8::Object>::try_from(e) {
         let key = v8::String::new(scope, "stack").unwrap();
-        match obj.get(scope, key.into()) {
-            Some(stack) if stack.is_string() => stack.to_rust_string_lossy(scope),
-            _ => e.to_rust_string_lossy(scope),
+        if let Some(stack) = obj.get(scope, key.into()).filter(|s| s.is_string()) {
+            text = stack;
         }
-    } else {
-        e.to_rust_string_lossy(scope)
-    };
-    crate::vm::guest_log(scope, "error", &format!("Uncaught {text}"));
+    }
+    crate::vm::guest_log(scope, "error", "Uncaught ", text);
 }
 
 /// native.log(level, message): Deno's core.print, to the guest's console.
 fn log(scope: &mut v8::PinScope, args: Args, _rv: Rv) {
     let level = string_arg(scope, &args, 0);
-    let message = string_arg(scope, &args, 1);
     let level = if level == "error" { "error" } else { "log" };
-    crate::vm::guest_log(scope, level, &message);
+    crate::vm::guest_log(scope, level, "", args.get(1));
 }
 
 // ---- ops (Deno's names and conventions) ----

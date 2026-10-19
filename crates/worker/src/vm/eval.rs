@@ -13,6 +13,7 @@ use super::host_call::{apply_host_reply, Bridge};
 use super::mailbox::Mailbox;
 use super::watchdog::CpuClock;
 use super::{pump_tasks, Output, VmMsg};
+use super::console::bounded_string;
 use crate::proto::{fail, limit, ErrorCode, Failure, GuestError, Out, ShimRef, Usage};
 
 /// How often to look for V8's foreground tasks while it has background work
@@ -23,40 +24,44 @@ const BACKGROUND_POLL: Duration = Duration::from_millis(1);
 /// a guest can throw an Error with any size of message.
 const ERROR_TEXT_MAX: usize = 64 << 10;
 
+/// Room left in a frame for everything around a guest-sized value.
+const FRAME_SLACK: usize = 1 << 20;
+
 pub(super) enum EvalEnd {
     Done(Result<String, Failure>),
     /// The supervisor disposed the VM while an eval waited on a host call.
     Disposed,
 }
 
-/// "Message\nstack" for thrown errors, or the value's string form.
+/// "Message\nstack" for thrown errors, or the value's string form, at most
+/// `ERROR_TEXT_MAX` bytes (copied out of V8 no further than that).
 pub(super) fn describe(scope: &mut v8::PinScope, exception: v8::Local<v8::Value>) -> String {
     if let Ok(obj) = v8::Local::<v8::Object>::try_from(exception) {
         let key = v8::String::new(scope, "stack").unwrap();
         if let Some(stack) = obj.get(scope, key.into()) {
             if stack.is_string() {
-                return stack.to_rust_string_lossy(scope);
+                return bounded_string(scope, stack, ERROR_TEXT_MAX);
             }
         }
     }
-    exception.to_rust_string_lossy(scope)
+    bounded_string(scope, exception, ERROR_TEXT_MAX)
 }
 
 /// `ERR_GUEST_EXCEPTION` for a thrown value: the one-line message ("stack"
 /// or the value), plus name/message/stack as separate fields.
 fn guest_failure(scope: &mut v8::PinScope, exception: v8::Local<v8::Value>) -> Failure {
-    let mut f = fail(ErrorCode::GuestException, clip(describe(scope, exception)));
+    let mut f = fail(ErrorCode::GuestException, describe(scope, exception));
     let get = |scope: &mut v8::PinScope, obj: v8::Local<v8::Object>, key: &str| {
         let k = v8::String::new(scope, key).unwrap();
-        obj.get(scope, k.into()).filter(|v| v.is_string()).map(|v| clip(v.to_rust_string_lossy(scope)))
+        obj.get(scope, k.into()).filter(|v| v.is_string()).map(|v| bounded_string(scope, v, ERROR_TEXT_MAX))
     };
     f.guest = Some(match v8::Local::<v8::Object>::try_from(exception) {
         Ok(obj) => GuestError {
             name: get(scope, obj, "name"),
-            message: get(scope, obj, "message").unwrap_or_else(|| clip(exception.to_rust_string_lossy(scope))),
+            message: get(scope, obj, "message").unwrap_or_else(|| bounded_string(scope, exception, ERROR_TEXT_MAX)),
             stack: get(scope, obj, "stack"),
         },
-        Err(_) => GuestError { name: None, message: clip(exception.to_rust_string_lossy(scope)), stack: None },
+        Err(_) => GuestError { name: None, message: bounded_string(scope, exception, ERROR_TEXT_MAX), stack: None },
     });
     f
 }
@@ -87,14 +92,17 @@ fn to_json(scope: &mut v8::PinScope, value: v8::Local<v8::Value>) -> Result<Stri
     v8::tc_scope!(let tc, scope);
     match v8::json::stringify(tc, value) {
         Some(s) => {
-            let s = s.to_rust_string_lossy(tc);
-            let max = crate::limits::get().result_bytes;
-            if s.len() > max {
+            // Measured before it's copied out, and never more than a frame
+            // can carry (an oversized frame is a protocol violation).
+            let max = crate::limits::get().result_bytes.min(crate::frame::MAX_FRAME - FRAME_SLACK);
+            let len = s.utf8_length(tc);
+            if len > max {
                 return Err(limit(
                     "resultBytes",
-                    format!("the result is {} bytes as JSON, more than the {max}-byte limit (limits.resultBytes)", s.len()),
+                    format!("the result is {len} bytes as JSON, more than the {max}-byte limit (limits.resultBytes)"),
                 ));
             }
+            let s = s.to_rust_string_lossy(tc);
             Ok(if s == "undefined" { "null".into() } else { s })
         }
         None => {

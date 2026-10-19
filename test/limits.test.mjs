@@ -261,3 +261,38 @@ test('a modest setInterval keeps running between evals within the default budget
   assert.ok((await vm.eval('ticks')) >= 5);
   vm.close();
 });
+test('console output stays within logLineBytes and logBytes, with or without the web platform', async () => {
+  for (const web of [false, true]) {
+    const logs = [];
+    await pool.run(
+      `const big = 'x'.repeat(20 << 20);
+       if (typeof reportError === 'function') reportError(new Error(big));
+       console.log(big); console.error('a', big, { big });
+       for (let i = 0; i < 100; i++) console.log(big);`,
+      { ...T, web, limits: { logLineBytes: 1024, logBytes: 4096, heapBytes: 512 << 20 }, hooks: { onLog: (e) => logs.push(e.message) } },
+    );
+    const total = logs.reduce((n, m) => n + Buffer.byteLength(m), 0);
+    assert.ok(logs.every((m) => Buffer.byteLength(m) <= 1024 + 3), `web ${web}: a line over logLineBytes`);
+    assert.ok(total <= 4096 + 200, `web ${web}: ${total} bytes logged`);
+    assert.match(logs.at(-1), /output limit reached/);
+  }
+});
+
+test('a huge unhandled error is cut to size, not a protocol violation', async () => {
+  const rt = new Runtime({ strict });
+  const security = [];
+  rt.on('securityEvent', (e) => security.push(e));
+  const logs = [];
+  const t = rt.tenant('huge-error');
+  const limits = { heapBytes: 1 << 30, timeoutMs: 20_000 };
+  // Past the 64 MiB frame limit, three ways: unhandled, thrown, and as a value.
+  await t.run(`reportError(new Error('x'.repeat(80 << 20)))`, { web: true, limits, hooks: { onLog: (e) => logs.push(e.message) } });
+  assert.ok(logs.length === 1 && Buffer.byteLength(logs[0]) <= 16 * 1024 + 3, `${logs.length} lines`);
+  const thrown = await t.run(`throw new Error('y'.repeat(80 << 20))`, { limits }).catch((e) => e);
+  assert.equal(thrown.code, 'ERR_GUEST_EXCEPTION');
+  assert.ok(thrown.guest.message.length <= 64 * 1024 + 3);
+  await assert.rejects(t.run(`'z'.repeat(80 << 20)`, { limits: { ...limits, resultBytes: 1 << 30 } }), limit('resultBytes'));
+  assert.equal(await t.run('1'), 1);
+  assert.deepEqual(security, []);
+  rt.close();
+});

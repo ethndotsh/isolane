@@ -7,12 +7,50 @@ use std::rc::Rc;
 use super::host_call::Bridge;
 use crate::proto::Out;
 
+/// `value`'s string form, at most `max` bytes of UTF-8 (cut at a character
+/// boundary, with "…" after a cut). Only what's kept is copied out of V8's
+/// heap, so a guest string of any size costs at most `max` bytes here.
+pub(crate) fn bounded_string(scope: &mut v8::PinScope, value: v8::Local<v8::Value>, max: usize) -> String {
+    let Some(s) = value.to_string(scope) else { return String::new() };
+    let mut buf = vec![0u8; max.min(s.length().saturating_mul(3))];
+    let n = s.write_utf8_v2(scope, &mut buf, v8::WriteFlags::kReplaceInvalidUtf8, None);
+    buf.truncate(n);
+    let mut out = String::from_utf8(buf).unwrap_or_else(|e| String::from_utf8_lossy(e.as_bytes()).into_owned());
+    if n < s.utf8_length(scope) {
+        out.push('…');
+    }
+    out
+}
+
+/// Send one console line within the eval's budget: the line that would
+/// exhaust it becomes a single notice, and later lines are dropped.
+fn emit(bridge: &Bridge, level: &str, message: &str) {
+    let left = bridge.log_budget.get();
+    if left == 0 {
+        return;
+    }
+    if message.len() >= left {
+        bridge.log_budget.set(0);
+        let notice = "[isolane] console output limit reached for this eval; further output dropped";
+        bridge.out.send(&Out::Log { vm: bridge.vm, level, message: notice });
+    } else {
+        bridge.log_budget.set(left - message.len());
+        bridge.out.send(&Out::Log { vm: bridge.vm, level, message });
+    }
+}
+
+/// The longest line sent: `limits.logLineBytes`, but never more than a
+/// frame carries (an oversized frame is a protocol violation).
+fn max_line() -> usize {
+    crate::limits::get().log_line_bytes.min(crate::frame::MAX_FRAME / 2)
+}
+
 /// `console.log` and friends: format the arguments like a terminal would
 /// (strings as-is, other values as JSON where possible) and send a one-way
 /// log frame. Output past the VM's per-eval budget is dropped.
 fn console_method(scope: &mut v8::PinScope, args: v8::FunctionCallbackArguments, _rv: v8::ReturnValue<v8::Value>) {
     let level = args.data().to_rust_string_lossy(scope);
-    let max_line = crate::limits::get().log_line_bytes;
+    let max_line = max_line();
     let Some(bridge) = scope.get_slot::<Rc<Bridge>>().cloned() else { return };
     if bridge.log_budget.get() == 0 {
         return;
@@ -22,17 +60,18 @@ fn console_method(scope: &mut v8::PinScope, args: v8::FunctionCallbackArguments,
         if i > 0 {
             message.push(' ');
         }
+        let room = max_line.saturating_sub(message.len());
         let v = args.get(i);
         // Strings as-is, and values JSON can't represent by their string form.
         let part = if v.is_string() || v.is_function() || v.is_symbol() || v.is_undefined() || v.is_big_int() {
-            v.to_rust_string_lossy(scope)
+            bounded_string(scope, v, room)
         } else {
             v8::tc_scope!(let tc, scope);
             match v8::json::stringify(tc, v) {
-                Some(s) => s.to_rust_string_lossy(tc),
+                Some(s) => bounded_string(tc, s.into(), room),
                 None => {
                     tc.reset();
-                    v.to_rust_string_lossy(tc)
+                    bounded_string(tc, v, room)
                 }
             }
         };
@@ -41,34 +80,21 @@ fn console_method(scope: &mut v8::PinScope, args: v8::FunctionCallbackArguments,
             break;
         }
     }
-    if message.len() > max_line {
-        let mut cut = max_line;
-        while !message.is_char_boundary(cut) {
-            cut -= 1;
-        }
-        message.truncate(cut);
-        message.push('…');
-    }
-    let left = bridge.log_budget.get();
-    if message.len() >= left {
-        bridge.log_budget.set(0);
-        message = "[isolane] console output limit reached for this eval; further output dropped".into();
-    } else {
-        bridge.log_budget.set(left - message.len());
-    }
-    bridge.out.send(&Out::Log { vm: bridge.vm, level: &level, message: &message });
+    emit(&bridge, &level, &message);
 }
 
-/// A console line from the runtime itself (the web platform's unhandled
-/// errors), subject to the same per-eval budget as guest console output.
-pub fn guest_log(scope: &mut v8::PinScope, level: &str, message: &str) {
+/// A console line from the runtime itself (the web platform's console and
+/// its unhandled errors): `prefix` then `value`'s string form, held to the
+/// same line length and per-eval budget as guest console output.
+pub fn guest_log(scope: &mut v8::PinScope, level: &str, prefix: &str, value: v8::Local<v8::Value>) {
     let Some(bridge) = scope.get_slot::<Rc<Bridge>>().cloned() else { return };
-    let left = bridge.log_budget.get();
-    if left == 0 {
+    if bridge.log_budget.get() == 0 {
         return;
     }
-    bridge.log_budget.set(left.saturating_sub(message.len()));
-    bridge.out.send(&Out::Log { vm: bridge.vm, level, message });
+    let max_line = max_line();
+    let mut message = String::from(prefix);
+    message.push_str(&bounded_string(scope, value, max_line.saturating_sub(prefix.len())));
+    emit(&bridge, level, &message);
 }
 
 pub(super) fn install_console(scope: &mut v8::PinScope, global: v8::Local<v8::Object>) {

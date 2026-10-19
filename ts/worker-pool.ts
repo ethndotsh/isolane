@@ -151,6 +151,8 @@ export interface IsolateState {
   readonly chain: HookChain;
   readonly timeoutMs: number | null;
   readonly codeBytes: number;
+  /** The longest console line it may send (the worker cuts lines; this checks it did). */
+  readonly logLineBytes: number;
   /** Its shims, for naming the one in an `ERR_SHIM`. */
   readonly shims: ResolvedShims;
   /** When its queued evals will have run out their timeouts (they run one at a time). */
@@ -264,6 +266,7 @@ export class TenantWorker {
       chain,
       timeoutMs: config.limits.timeoutMs,
       codeBytes: config.limits.codeBytes,
+      logLineBytes: config.limits.logLineBytes,
       shims: config.shims,
       busyUntil: 0,
       calls: new Map(),
@@ -417,8 +420,14 @@ export class TenantWorker {
     }
     const state = this.#isolates.get(msg.vm);
     if (msg.t === 'log') {
-      this.#usage.logBytes += msg.message.length;
-      state?.chain.emit('log', { tenant: this.tenant, isolate: msg.vm, level: msg.level, message: msg.message, source: 'guest' });
+      if (!state) return;
+      // The worker cuts long lines; a worker that didn't is cut here too.
+      let message = msg.message;
+      if (Buffer.byteLength(message) > state.logLineBytes + 3) {
+        message = `${Buffer.from(message).subarray(0, state.logLineBytes).toString('utf8').replace(/\uFFFD$/, '')}…`;
+      }
+      this.#usage.logBytes += message.length;
+      state.chain.emit('log', { tenant: this.tenant, isolate: msg.vm, level: msg.level, message, source: 'guest' });
       return;
     }
     this.#onHostCall(state, msg);
