@@ -365,6 +365,27 @@ test('limits.pendingHostCalls and limits.hostCalls bound host-call floods', asyn
   assert.equal(ran, 9);
   // The defaults allow ordinary use.
   assert.equal(await pool.run('Promise.all(Array.from({ length: 900 }, () => one())).then((r) => r.length)', { ...T, host }), 900);
+  // An eval that runs out of a limit frees its isolate's slots: the
+  // abandoned calls don't block the next eval.
+  const signals = [];
+  // The call context is `this` for a plain function.
+  function hang() {
+    signals.push(this.signal);
+    return new Promise(() => {});
+  }
+  for (const [limits, code] of [
+    [{ timeoutMs: 100, pendingHostCalls: 5 }, 'for (let i = 0; i < 5; i++) hang(); await new Promise(() => {})'],
+    [{ pendingHostCalls: 5 }, 'for (let i = 0; i < 6; i++) hang()'],
+    [{ hostCallBytes: 3 << 20 }, 'for (let i = 0; i < 4; i++) hang(new Uint8Array(1 << 20))'],
+  ]) {
+    signals.length = 0;
+    const stateful = isolate({ ...T, host: { hang, one: host.one }, limits });
+    const first = await stateful.eval(`(async () => { ${code} })()`).catch((e) => e);
+    assert.equal(first.code, 'ERR_LIMIT', JSON.stringify(limits));
+    assert.equal(await stateful.eval('Promise.all([one(), one(), one(), one(), one()]).then((r) => r.length)'), 5, JSON.stringify(limits));
+    assert.ok(signals.length > 0 && signals.every((s) => s.aborted), 'abandoned calls are aborted');
+    stateful.close();
+  }
 });
 
 test('an eval waiting behind its isolate\'s background work is not mistaken for an unresponsive worker', async () => {

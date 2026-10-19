@@ -417,6 +417,15 @@ fn vm_main(id: u64, config: VmConfig, rx: Receiver<VmMsg>, out: Output, stopper:
                 } else {
                     result
                 };
+                // An eval that ran out of a limit leaves its isolate's host
+                // calls with no one waiting (the supervisor abandons them
+                // too): free their slots, or they'd count against
+                // limits.pendingHostCalls and hostCallBytes in the next eval.
+                // Late replies to them are ignored.
+                if let Err(Failure { code: ErrorCode::Limit | ErrorCode::IsolateRetired, .. }) = &result {
+                    bridge.pending.borrow_mut().clear();
+                    bridge.pending_bytes.set(0);
+                }
                 let spent = usage(&mut isolate, cpu_clock, cpu_start);
                 send_result(&out, req, result, spent);
                 if last {

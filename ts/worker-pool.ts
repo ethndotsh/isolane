@@ -447,9 +447,10 @@ export class TenantWorker {
         });
         if (code === 'ERR_LIMIT') {
           this.#chain.emit('limit', { tenant: this.tenant, isolate: pending.isolate.id, limit: msg.limit ?? 'unknown', message: msg.message });
-          // The eval is over: its host calls have no one waiting.
-          if (msg.limit === 'timeoutMs' || msg.limit === 'cpuMs') this.#abandonCalls(pending.isolate, err);
         }
+        // The eval ran out of a limit: its isolate's host calls have no one
+        // waiting (the worker frees their slots too).
+        if (code === 'ERR_LIMIT' || code === 'ERR_ISOLATE_RETIRED') this.#abandonCalls(pending.isolate, err);
         pending.reject(err);
       }
       this.#touch();
