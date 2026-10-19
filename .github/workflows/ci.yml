@@ -98,7 +98,7 @@ jobs:
         env:
           ISOLANE_WORKER: ${{ runner.temp }}/isolane-worker
           ISOLANE_STRICT: '1'
-        run: node --test --test-reporter=spec test/runtime.test.mjs
+        run: node --test --test-reporter=spec test/runtime.test.mjs test/capabilities.test.mjs test/web.test.mjs
 
       - name: Seccomp kills (kernel log)
         if: always()
