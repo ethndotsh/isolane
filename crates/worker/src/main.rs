@@ -221,13 +221,13 @@ fn serve(lock_down: bool, memory_limit: Option<u64>) -> ExitCode {
                     }
                 }
             }
-            In::Eval { vm, req, code } => {
+            In::Eval { vm, req, code, last } => {
                 if let Some(cause) = failed.get(&vm) {
                     let f = fail(ErrorCode::MemoryLimit, cause.clone());
                     out.send(&Out::Result { req, ok: false, value: None, code: Some(f.code), message: Some(&f.message), guest: None });
                     continue;
                 }
-                let sent = vms.get(&vm).map(|tx| tx.send(VmMsg::Eval { req, code }).is_ok());
+                let sent = vms.get(&vm).map(|tx| tx.send(VmMsg::Eval { req, code, last }).is_ok());
                 if sent != Some(true) {
                     let f = fail(ErrorCode::IsolateDisposed, "vm has been disposed");
                     out.send(&Out::Result { req, ok: false, value: None, code: Some(f.code), message: Some(&f.message), guest: None });

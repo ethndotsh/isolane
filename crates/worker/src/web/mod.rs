@@ -1,5 +1,5 @@
-//! The web platform (WinterTC's Minimum Common Web Platform API, phase 1)
-//! for VMs created with `webPlatform`. The APIs themselves are Deno's
+//! The web platform (WinterTC's Minimum Common Web Platform API, phases 1
+//! and 2) for VMs created with `webPlatform`. The APIs themselves are Deno's
 //! web-platform JS, vendored in runtime/deno/ (MIT). In place of deno_core,
 //! this module provides the native layer that JS calls: Deno's ops (same
 //! names and calling conventions) and a few helpers for runtime/core.js.
@@ -11,7 +11,9 @@
 
 mod base64;
 mod clone;
+mod compression;
 mod encoding;
+pub mod timers;
 mod url;
 
 macro_rules! runtime_js {
@@ -33,10 +35,15 @@ const EXT: &[(&str, &str)] = &[
     ("ext:deno_web/01_mimesniff.js", runtime_js!("deno/ext/web/01_mimesniff.js")),
     ("ext:deno_web/02_event.js", runtime_js!("deno/ext/web/02_event.js")),
     ("ext:deno_web/02_structured_clone.js", runtime_js!("deno/ext/web/02_structured_clone.js")),
+    ("ext:deno_web/02_timers.js", runtime_js!("deno/ext/web/02_timers.js")),
     ("ext:deno_web/03_abort_signal.js", runtime_js!("deno/ext/web/03_abort_signal.js")),
     ("ext:deno_web/04_global_interfaces.js", runtime_js!("deno/ext/web/04_global_interfaces.js")),
     ("ext:deno_web/05_base64.js", runtime_js!("deno/ext/web/05_base64.js")),
+    ("ext:deno_web/06_streams.js", runtime_js!("deno/ext/web/06_streams.js")),
     ("ext:deno_web/08_text_encoding.js", runtime_js!("deno/ext/web/08_text_encoding.js")),
+    ("ext:deno_web/09_file.js", runtime_js!("deno/ext/web/09_file.js")),
+    ("ext:deno_web/10_filereader.js", runtime_js!("deno/ext/web/10_filereader.js")),
+    ("ext:deno_web/14_compression.js", runtime_js!("deno/ext/web/14_compression.js")),
     ("ext:deno_web/15_performance.js", runtime_js!("deno/ext/web/15_performance.js")),
 ];
 
@@ -194,12 +201,15 @@ fn encode(scope: &mut v8::PinScope, args: Args, mut rv: Rv) {
     rv.set(new_u8array(scope, &out).into());
 }
 
-/// `core.decode`: UTF-8 bytes to a string (invalid sequences → U+FFFD).
+/// `core.decode`: UTF-8 bytes to a string (invalid sequences → U+FFFD),
+/// dropping one leading byte order mark, as deno_core's does (Blob.text()
+/// relies on it: the Encoding Standard's UTF-8 decode strips the BOM).
 fn decode(scope: &mut v8::PinScope, args: Args, mut rv: Rv) {
     let Some(b) = bytes(scope, args.get(0)) else {
         throw_type(scope, "expected a buffer");
         return;
     };
+    let b = b.strip_prefix(&[0xEF, 0xBB, 0xBF]).unwrap_or(b);
     let text = String::from_utf8_lossy(b).into_owned();
     if let Some(s) = v8::String::new(scope, &text) {
         rv.set(s.into());
@@ -258,6 +268,14 @@ fn report_unhandled_exception(scope: &mut v8::PinScope, args: Args, _rv: Rv) {
     crate::vm::guest_log(scope, "error", &format!("Uncaught {text}"));
 }
 
+/// native.log(level, message): Deno's core.print, to the guest's console.
+fn log(scope: &mut v8::PinScope, args: Args, _rv: Rv) {
+    let level = string_arg(scope, &args, 0);
+    let message = string_arg(scope, &args, 1);
+    let level = if level == "error" { "error" } else { "log" };
+    crate::vm::guest_log(scope, level, &message);
+}
+
 // ---- ops (Deno's names and conventions) ----
 
 fn op_now(scope: &mut v8::PinScope, args: Args, _rv: Rv) {
@@ -311,6 +329,14 @@ fn native_object<'s>(scope: &mut v8::PinScope<'s, '_>) -> v8::Local<'s, v8::Obje
         "newDecoder" => encoding::new_decoder,
         "decoderDecode" => encoding::decoder_decode,
         "freeDecoder" => encoding::free_decoder,
+        "compressionNew" => compression::compression_new,
+        "compressionWrite" => compression::compression_write,
+        "compressionFinish" => compression::compression_finish,
+        "compressionFree" => compression::compression_free,
+        "timerNow" => timers::timer_now,
+        "timerState" => timers::timer_state,
+        "setTimerRunner" => timers::set_timer_runner,
+        "log" => log,
     });
     native
 }

@@ -1,4 +1,4 @@
-// The web platform globals (WinterTC Minimum Common API, phase 1), defined
+// The web platform globals (WinterTC Minimum Common API, phases 1–2), defined
 // non-enumerable like Deno's 98_global_scope_shared.js. Most are lazy: the
 // first access loads the vendored script behind them, so a VM pays only
 // for what its code uses. Called once per context by the worker:
@@ -11,6 +11,7 @@
     ArrayPrototypeIncludes,
     ObjectDefineProperty,
     ObjectFreeze,
+    ObjectHasOwn,
     ObjectSetPrototypeOf,
     PromisePrototypeThen,
     PromiseResolve,
@@ -55,6 +56,11 @@
   const BASE64_JS = "ext:deno_web/05_base64.js";
   const ENCODING_JS = "ext:deno_web/08_text_encoding.js";
   const PERFORMANCE_JS = "ext:deno_web/15_performance.js";
+  const TIMERS_JS = "ext:deno_web/02_timers.js";
+  const STREAMS_JS = "ext:deno_web/06_streams.js";
+  const FILE_JS = "ext:deno_web/09_file.js";
+  const FILE_READER_JS = "ext:deno_web/10_filereader.js";
+  const COMPRESSION_JS = "ext:deno_web/14_compression.js";
 
   // The global object is an EventTarget (reportError dispatches "error" on
   // it). Set up the first time anything event-related is used.
@@ -83,7 +89,27 @@
     });
   }
 
-  lazy("URL", from(URL_JS, "URL"));
+  // URL.createObjectURL and revokeObjectURL come with Blob (09_file.js
+  // assigns them when it loads); until then, accessors that load it.
+  lazy("URL", () => {
+    const URL = load(URL_JS).URL;
+    for (const name of ["createObjectURL", "revokeObjectURL"]) {
+      if (ObjectHasOwn(URL, name)) continue; // 09_file.js already loaded
+      ObjectDefineProperty(URL, name, {
+        __proto__: null,
+        configurable: true,
+        enumerable: true,
+        get() {
+          load(FILE_JS);
+          return URL[name];
+        },
+        set(value) {
+          ObjectDefineProperty(URL, name, { __proto__: null, value, writable: true, configurable: true, enumerable: true });
+        },
+      });
+    }
+    return URL;
+  });
   lazy("URLSearchParams", from(URL_JS, "URLSearchParams"));
   lazy("DOMException", from(DOM_EXCEPTION_JS, "DOMException"));
   lazy("QuotaExceededError", from(DOM_EXCEPTION_JS, "QuotaExceededError"));
@@ -96,6 +122,41 @@
   lazy("btoa", from(BASE64_JS, "btoa"));
   lazy("TextEncoder", from(ENCODING_JS, "TextEncoder"));
   lazy("TextDecoder", from(ENCODING_JS, "TextDecoder"));
+  lazy("TextEncoderStream", from(ENCODING_JS, "TextEncoderStream"));
+  lazy("TextDecoderStream", from(ENCODING_JS, "TextDecoderStream"));
+
+  // Timers. An exception in a callback is reported like any uncaught
+  // error: an "error" event on the global object, then the console.
+  core.setReportException((error) => eventModule().reportException(error));
+  for (const name of ["setTimeout", "setInterval", "clearTimeout", "clearInterval"]) {
+    lazy(name, from(TIMERS_JS, name));
+  }
+
+  for (
+    const name of [
+      "ReadableStream",
+      "ReadableStreamDefaultReader",
+      "ReadableStreamBYOBReader",
+      "ReadableStreamBYOBRequest",
+      "ReadableByteStreamController",
+      "ReadableStreamDefaultController",
+      "WritableStream",
+      "WritableStreamDefaultWriter",
+      "WritableStreamDefaultController",
+      "TransformStream",
+      "TransformStreamDefaultController",
+      "ByteLengthQueuingStrategy",
+      "CountQueuingStrategy",
+    ]
+  ) {
+    lazy(name, from(STREAMS_JS, name));
+  }
+  lazy("Blob", from(FILE_JS, "Blob"));
+  lazy("File", from(FILE_JS, "File"));
+  lazy("FileReader", from(FILE_READER_JS, "FileReader"));
+  lazy("ProgressEvent", () => eventModule().ProgressEvent);
+  lazy("CompressionStream", from(COMPRESSION_JS, "CompressionStream"));
+  lazy("DecompressionStream", from(COMPRESSION_JS, "DecompressionStream"));
   lazy("structuredClone", from("ext:deno_web/02_structured_clone.js", "structuredClone"));
   let perf;
   const performanceModule = () => {

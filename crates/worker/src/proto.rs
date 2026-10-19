@@ -45,6 +45,10 @@ pub enum In {
         vm: u64,
         req: u64,
         code: String,
+        /// The VM is disposed after this eval (a one-shot run): it exits
+        /// once the result is sent, and pending timers never run.
+        #[serde(default)]
+        last: bool,
     },
     #[serde(rename_all = "camelCase")]
     HostReply {
