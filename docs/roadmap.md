@@ -31,7 +31,7 @@ Agreed October 2026:
    - `URLPattern` (done: Deno's `01_urlpattern.js` on the `urlpattern` crate, with the Minimum Common API now complete);
    - ~~`connect()` as the Sockets API~~ done: see section 2, and the Postgres test authenticates with SCRAM-SHA-256 (postgres.js on `crypto.subtle`);
    - the web snapshot built into the binary and a pool of pre-created web isolates, so `web` can default to on;
-   - fair CPU accounting for timers;
+   - fair CPU accounting for timers (done: `limits.backgroundMs`);
    - test262 (done: a CI gate, section 3);
    - delete the old prelude.
 3. **Errors and stack traces** (section 4).
@@ -145,7 +145,8 @@ older, unsupported V8 and brings tokio and its op layer into the worker.
 | — | **Type checking** at deploy time (`deploy(code, { check: true })`, cached by content hash), never per run: TypeScript's checker running *inside an isolane isolate* (tsc is plain JS; a large heap budget, nothing else enabled), so a checker bug or DoS on hostile input stays sandboxed. Checked against generated `.d.ts` for exactly the host functions (from their schemas) plus the WinterTC globals; failures are `ERR_TYPE_CHECK` with file:line:col diagnostics. Evaluate the native TypeScript 7 compiler (tsgo) as a separate sandboxed process once its embedding API settles | planned |
 | — | WPT subset with tracked pass rates: now the WPT gate (`test/wpt/run.mjs`, see "WPT gate" below), which replaced `soak/wpt.mjs` and its 95% floor | done |
 | — | Turn `web` on by default: **not yet**. With the snapshot, a web isolate costs ~0.55 ms more than a plain one (isolate 0.29 → 0.59 ms, context 0.12 → 0.37 ms; all V8 deserialization, `configure` is 0.01 ms), over the 0.3 ms bar set for flipping the default; first use costs nothing. Revisit with an embedded snapshot or an isolate pool | deferred |
-| — | Fair CPU for idle timers: a stateful isolate's `setInterval` runs between evals (each batch budgeted like an eval, but unbounded in count); per-tenant CPU accounting should cover it | planned |
+| — | Fair CPU for work between evals: timers, `MessagePort` tasks, and continuations of unawaited host calls share `limits.backgroundMs` (default 1 s per minute; CPU time on Linux, wall time elsewhere; each host-call continuation charged at least 0.25 ms); past it the isolate is retired, with `onLimit` and `ERR_LIMIT` on its next eval. Counted in `usage().cpuMs`; usage reports coalesced to one frame per 250 ms; timer batches run in 10 ms slices so evals aren't held behind a storm. Covers the security review's findings (a host-call loop after the eval, 10,000 `setInterval`s) | done |
+| — | Next for background work: a tenant-wide budget across its isolates (today it's per isolate, so 100 isolates may use 100× the budget), a `background` breakdown in `usage()`, and pausing rather than retiring as an option | planned |
 | — | `structuredClone` `transfer`, transferable streams, `MessageChannel`/`MessagePort`: Deno's 13_message_port.js over in-isolate ports in runtime/core.js (each message a task), and V8 serializer transfer in web/clone.rs (a transferred buffer's backing store moves to a new ArrayBuffer). Fixed WPT bugs `message-channel` and `structured-clone-edge` | done |
 | — | Error a `DecompressionStream`'s readable right after the output on trailing data (`op_compression_check`, patches/deno-compression-errors.patch). Fixed WPT bug `decompression-trailing` | done |
 | — | Streams backed by native resources (Deno's `op_readable_stream_resource_*`, `internals.readableStreamForRid`): not needed; fetch bodies are byte streams pulled from the broker in JS | dropped |

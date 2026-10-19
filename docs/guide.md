@@ -99,7 +99,9 @@ the isolate ends.
 `location`.
 
 Timers advance a frozen clock when they fire. A one-shot `run()` drops
-timers still pending when it returns; a stateful isolate keeps them.
+timers still pending when it returns; a stateful isolate keeps them, and
+runs them between evals within `limits.backgroundMs` (see
+[Limits](#limits)).
 
 Cost: web isolates are created from a startup snapshot that each worker
 builds the first time it needs one (about 30 ms, once), so every API is
@@ -360,6 +362,7 @@ await acme.run(app.code, {
 | `cpuMs` | none | isolate, per eval (Linux) |
 | `heapBytes` | 128 MiB | isolate |
 | `timers` | 10,000 | isolate (a `RangeError` in the guest) |
+| `backgroundMs` | 1 s per minute | isolate, work between evals (retires the isolate) |
 | `logBytes` / `logLineBytes` | 1 MiB / 16 KiB | isolate |
 | `codeBytes` / `resultBytes` | 16 MiB each | isolate, per eval |
 | `decompressedBytes` | 128 MiB | isolate, per decompression call |
@@ -368,6 +371,21 @@ await acme.run(app.code, {
 | `workerMemoryBytes` | 2 GiB | tenant (Linux; covers ArrayBuffer and WebAssembly memory a heap limit doesn't) |
 | `idleMs` | 30 s | tenant (an idle worker exits) |
 | `tenants` | 1,000 | runtime (evicts the least recently used idle tenant) |
+
+**Work between evals.** After an eval returns, a stateful isolate can
+keep working: timers and `MessagePort` tasks it left, and continuations
+of host calls it didn't await (`fetch`, `for (;;) await f()`). Each batch
+of it runs under `timeoutMs` and `cpuMs` like an eval, and all of it
+shares `backgroundMs`: a budget per minute, as CPU time on Linux and wall
+time elsewhere, that refills continuously and starts full. Each host-call
+continuation is charged at least 0.25 ms, for the host's side of the
+call. When it runs out, the isolate stops (its timers never fire again),
+`onLimit` fires with `limit: 'backgroundMs'`, its next eval fails with
+`ERR_LIMIT`, and later ones with `ERR_ISOLATE_RETIRED`. The work is
+counted in the tenant's `usage().cpuMs` like an eval's. Timers run in
+slices of 10 ms, so an isolate's own evals and host replies aren't held
+up behind a timer storm, and each isolate has its own thread, so a storm
+doesn't slow the tenant's other isolates beyond sharing the CPU.
 
 Isolate limits can be set at every level; tenant limits at the runtime and
 in `tenants(name)`; `tenants` on the runtime only. Hitting any limit fails
