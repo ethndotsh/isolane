@@ -285,18 +285,27 @@ export function fetchBroker(policy: FetchPolicy, denied: DenialReporter = () => 
     } catch {
       throw new TypeError(`fetch: invalid URL ${JSON.stringify(meta.url.slice(0, 200))}`);
     }
-    let method = meta.method.toUpperCase();
-    if (!methods.has(method)) {
+    // The policy matches methods case-insensitively; the request keeps the
+    // guest's spelling (Fetch normalizes only the standard methods, which
+    // Request already did, so a custom "TacO" is sent as "TacO").
+    let method = meta.method;
+    if (!methods.has(method.toUpperCase())) {
       denied('fetch', url.href, `method ${method} is not allowed`);
       throw new TypeError(`fetch: method ${method} is not allowed`);
     }
+    // Keyed by lowercase name (for the checks below); sent with the
+    // spelling the guest first used, as Fetch combines same-name headers.
     const headers: Record<string, string> = {};
+    const spelling: Record<string, string> = {};
     for (const [k, v] of meta.headers) {
       const name = k.toLowerCase();
       if (DROPPED_HEADERS.has(name)) continue;
       headers[name] = name in headers ? `${headers[name]}, ${v}` : v;
+      spelling[name] ??= k;
     }
     headers['accept-encoding'] ??= 'identity';
+    // Fetch's user agent sends one; servers and WPT expect it.
+    headers['user-agent'] ??= 'isolane';
 
     // The timeout covers the whole fetch, body included.
     const abort = new AbortController();
@@ -316,7 +325,8 @@ export function fetchBroker(policy: FetchPolicy, denied: DenialReporter = () => 
         urlList.push(url.href);
         let res: http.IncomingMessage;
         try {
-          res = await send(url, method, headers, body, abort.signal);
+          const spelled = Object.fromEntries(Object.entries(headers).map(([name, v]) => [spelling[name] ?? name, v]));
+          res = await send(url, method, spelled, body, abort.signal);
         } catch (err) {
           throw new Error(`fetch to ${url.origin} failed: ${(err as Error).message}`);
         }
@@ -326,7 +336,10 @@ export function fetchBroker(policy: FetchPolicy, denied: DenialReporter = () => 
           res.destroy();
           if (meta.redirect === 'error') throw new TypeError('fetch: the response redirected, and redirect is "error"');
           if (hop >= maxRedirects) throw new TypeError(`fetch: more than ${maxRedirects} redirects`);
-          const next = new URL(location, url);
+          // Node gives header values as Latin-1 (one char per byte); a
+          // Location's raw bytes past ASCII are percent-encoded as bytes
+          // before parsing, so UTF-8 (and invalid bytes) survive as sent.
+          const next = new URL(location.replace(/[\x80-\xff]/g, (c) => `%${c.charCodeAt(0).toString(16).toUpperCase()}`), url);
           if (status === 303 ? method !== 'GET' && method !== 'HEAD' : (status === 301 || status === 302) && method === 'POST') {
             method = 'GET';
             body = undefined;
@@ -373,7 +386,15 @@ export function fetchBroker(policy: FetchPolicy, denied: DenialReporter = () => 
           wake(f);
         });
         const pairs: [string, string][] = [];
-        for (let i = 0; i < res.rawHeaders.length; i += 2) pairs.push([res.rawHeaders[i].toLowerCase(), res.rawHeaders[i + 1]]);
+        for (let i = 0; i < res.rawHeaders.length; i += 2) {
+          // Fetch: a header value with a NUL is a network error (Node's
+          // parser already refuses CR and LF, but lets NUL through).
+          if (res.rawHeaders[i + 1].includes('\0')) {
+            res.destroy();
+            throw new Error('a response header contains a NUL byte');
+          }
+          pairs.push([res.rawHeaders[i].toLowerCase(), res.rawHeaders[i + 1]]);
+        }
         return { status, statusText: res.statusMessage ?? '', url: url.href, urlList, redirected: hop > 0, headers: pairs };
       }
     } catch (err) {
