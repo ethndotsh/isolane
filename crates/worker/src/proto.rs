@@ -19,6 +19,16 @@ pub enum In {
         timeout_ms: Option<u64>,
         #[serde(default)]
         host_functions: Vec<String>,
+        #[serde(default)]
+        clock: crate::clock::Mode,
+        /// Seeds the isolate's entropy (Math.random, hash seeds).
+        random_seed: Option<u64>,
+        /// eval and new Function.
+        #[serde(default)]
+        allow_code_generation: bool,
+        /// Trusted setup run in the context before guest code (the
+        /// supervisor's fetch/fs wrappers).
+        prelude: Option<String>,
     },
     Eval {
         vm: u64,

@@ -26,6 +26,36 @@ pub struct VmConfig {
     pub heap_bytes: Option<u64>,
     pub timeout: Option<Duration>,
     pub host_functions: Vec<String>,
+    pub clock: crate::clock::Mode,
+    pub random_seed: Option<u64>,
+    pub allow_code_generation: bool,
+    pub prelude: Option<String>,
+}
+
+// ---- seeded entropy ----
+
+thread_local! {
+    /// SplitMix64 state for a VM created with a random seed. V8 draws its
+    /// entropy on the thread that creates or first uses the isolate, which
+    /// is the VM's own thread.
+    static SEED: Cell<Option<u64>> = const { Cell::new(None) };
+}
+
+/// Fill `buf` from this thread's seeded stream, if it has one.
+pub fn seeded_entropy(buf: &mut [u8]) -> bool {
+    SEED.with(|seed| {
+        let Some(mut state) = seed.get() else { return false };
+        for chunk in buf.chunks_mut(8) {
+            state = state.wrapping_add(0x9e37_79b9_7f4a_7c15);
+            let mut z = state;
+            z = (z ^ (z >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+            z = (z ^ (z >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+            z ^= z >> 31;
+            chunk.copy_from_slice(&z.to_le_bytes()[..chunk.len()]);
+        }
+        seed.set(Some(state));
+        true
+    })
 }
 
 pub enum VmMsg {
@@ -203,17 +233,17 @@ unsafe extern "C" fn deny_wasm(_: v8::Local<v8::Context>, _: v8::Local<v8::Strin
 /// a shared-memory timer from.
 const REMOVED_GLOBALS: &[&str] = &["WebAssembly", "SharedArrayBuffer", "Atomics"];
 
-fn new_context(isolate: &mut v8::Isolate, host_functions: &[String]) -> v8::Global<v8::Context> {
+fn new_context(isolate: &mut v8::Isolate, config: &VmConfig) -> Result<v8::Global<v8::Context>, String> {
     v8::scope!(let scope, isolate);
     let context = v8::Context::new(scope, Default::default());
-    context.set_allow_generation_from_strings(false);
+    context.set_allow_generation_from_strings(config.allow_code_generation);
     let scope = &mut v8::ContextScope::new(scope, context);
     let global = context.global(scope);
     for name in REMOVED_GLOBALS {
         let key = v8::String::new(scope, name).unwrap();
         global.delete(scope, key.into());
     }
-    for name in host_functions {
+    for name in &config.host_functions {
         let key = v8::String::new(scope, name).unwrap();
         let func = v8::Function::builder(host_function)
             .data(key.into())
@@ -221,7 +251,17 @@ fn new_context(isolate: &mut v8::Isolate, host_functions: &[String]) -> v8::Glob
             .expect("build host function");
         global.set(scope, key.into(), func.into());
     }
-    v8::Global::new(scope, context)
+    if let Some(prelude) = &config.prelude {
+        v8::tc_scope!(let tc, scope);
+        let ran = v8::String::new(tc, prelude)
+            .and_then(|src| v8::Script::compile(tc, src, None))
+            .and_then(|script| script.run(tc));
+        if ran.is_none() {
+            let msg = tc.exception().map(|e| describe(tc, e)).unwrap_or_else(|| "unknown error".into());
+            return Err(format!("vm setup failed: {msg}"));
+        }
+    }
+    Ok(v8::Global::new(scope, context))
 }
 
 // ---- evaluation ----
@@ -357,6 +397,8 @@ fn send_result(out: &Output, req: u64, result: Result<String, Failure>) {
 }
 
 fn vm_main(id: u64, config: VmConfig, rx: Receiver<VmMsg>, out: Output) {
+    crate::clock::set_mode(config.clock);
+    SEED.with(|seed| seed.set(config.random_seed));
     let mut params = v8::CreateParams::default();
     if let Some(max) = config.heap_bytes {
         params = params.heap_limits(0, max as usize);
@@ -376,11 +418,19 @@ fn vm_main(id: u64, config: VmConfig, rx: Receiver<VmMsg>, out: Output) {
         next_call: Cell::new(1),
         pending: RefCell::new(HashMap::new()),
     }));
-    let context = new_context(&mut isolate, &config.host_functions);
-
     let mut backlog: VecDeque<VmMsg> = VecDeque::new();
-    // Set once the VM can't safely run again (it hit its heap limit).
+    // Set once the VM can't safely run again (it hit its heap limit, or its
+    // setup failed: then it keeps a bare context and refuses every eval).
     let mut retired: Option<String> = None;
+    let context = match new_context(&mut isolate, &config) {
+        Ok(context) => context,
+        Err(cause) => {
+            retired = Some(cause);
+            v8::scope!(let scope, &mut isolate);
+            let bare = v8::Context::new(scope, Default::default());
+            v8::Global::new(scope, bare)
+        }
+    };
 
     loop {
         let msg = match backlog.pop_front() {

@@ -4,9 +4,11 @@
 
 import { resolve as resolvePath } from 'node:path';
 
+import { capabilities, type FsPolicy, type NetworkPolicy } from './capabilities.js';
 import { WorkerProcess, meetsStrict, type IsolationInfo, type WorkerExit, type WorkerMessage } from './worker.js';
 
 export type { IsolationInfo, LockdownLevel } from './worker.js';
+export type { FsPolicy, NetworkPolicy } from './capabilities.js';
 
 /**
  * Why an eval failed:
@@ -71,6 +73,63 @@ export interface EvalOptions {
   memoryLimitBytes?: number;
   /** Functions installed as guest globals, by name. */
   hostFunctions?: Record<string, HostFunction>;
+  /**
+   * The wall clock guest code sees (`Date`, `Intl`'s default "now").
+   * - `'frozen'` (default): moves only when an eval starts and when a host
+   *   call returns, so guest code can't time itself (Cloudflare Workers'
+   *   rule; denies side-channel attacks a timer).
+   * - `'realtime'`: the real clock.
+   * - `{ fixedMs }`: always this time (ms since the epoch), for
+   *   reproducible runs.
+   */
+  clock?: 'frozen' | 'realtime' | { fixedMs: number };
+  /**
+   * Seed `Math.random` (and V8's internal hash seeds) for reproducible
+   * runs: an integer from 0 to 2^53 - 1. Default: fresh OS randomness for
+   * every VM. A seeded VM's hash seeds are predictable to its own code.
+   */
+  randomSeed?: number;
+  /** Allow `eval` and `new Function`. Default false. WebAssembly stays off. */
+  allowCodeGeneration?: boolean;
+  /**
+   * Give guest code `fetch` (with `Response` and `Headers`), brokered by
+   * this process under the policy. Default: no network.
+   */
+  network?: NetworkPolicy;
+  /**
+   * Give guest code an `fs` object (promise-based: readFile, writeFile,
+   * readdir, stat, exists, mkdir, rm) over a host directory, brokered by
+   * this process under the policy. Default: no files.
+   */
+  fs?: FsPolicy;
+}
+
+type ClockSpec = { mode: 'frozen' } | { mode: 'realtime' } | { mode: 'fixed'; fixedMs: number };
+
+interface VmSetup {
+  clock: ClockSpec;
+  hostFunctions: Record<string, HostFunction>;
+  prelude?: string;
+}
+
+/** Validate a VM's options and build what its worker needs. Throws on bad options. */
+function vmSetup(opts: EvalOptions): VmSetup {
+  const clock = clockSpec(opts.clock);
+  if (opts.randomSeed !== undefined && !(Number.isSafeInteger(opts.randomSeed) && opts.randomSeed >= 0)) {
+    throw new TypeError('isolane: randomSeed must be an integer from 0 to 2^53 - 1');
+  }
+  const user = { ...(opts.hostFunctions ?? {}) };
+  const caps = capabilities(opts, user);
+  return { clock, hostFunctions: { ...user, ...caps.hostFunctions }, prelude: caps.prelude };
+}
+
+function clockSpec(clock: EvalOptions['clock']): ClockSpec {
+  if (clock === undefined || clock === 'frozen') return { mode: 'frozen' };
+  if (clock === 'realtime') return { mode: 'realtime' };
+  if (typeof clock === 'object' && clock !== null && Number.isFinite(clock.fixedMs)) {
+    return { mode: 'fixed', fixedMs: clock.fixedMs };
+  }
+  throw new TypeError(`isolane: clock must be 'frozen', 'realtime', or { fixedMs }`);
 }
 
 export interface SecurityEvent {
@@ -157,8 +216,8 @@ class TenantWorker {
     return this.#proc.pid;
   }
 
-  createVm(vm: number, opts: EvalOptions): void {
-    this.#hostFunctions.set(vm, { ...(opts.hostFunctions ?? {}) });
+  createVm(vm: number, opts: EvalOptions, setup: VmSetup): void {
+    this.#hostFunctions.set(vm, setup.hostFunctions);
     this.#timeouts.set(vm, opts.timeoutMs);
     this.#vmCount++;
     this.#touch();
@@ -167,7 +226,11 @@ class TenantWorker {
       vm,
       timeoutMs: opts.timeoutMs,
       heapBytes: opts.memoryLimitBytes,
-      hostFunctions: Object.keys(opts.hostFunctions ?? {}),
+      hostFunctions: Object.keys(setup.hostFunctions),
+      clock: setup.clock,
+      randomSeed: opts.randomSeed,
+      allowCodeGeneration: opts.allowCodeGeneration === true,
+      prelude: setup.prelude,
     });
   }
 
@@ -348,9 +411,10 @@ export class LanePool {
     if (typeof options?.tenant !== 'string' || options.tenant === '') {
       throw new TypeError('isolane: options.tenant is required');
     }
+    const setup = vmSetup(options);
     const worker = this.#workerFor(options.tenant);
     const id = this.#nextVm++;
-    worker.createVm(id, options);
+    worker.createVm(id, options, setup);
     return new LaneVm(worker, id, () => this.#nextReq++);
   }
 

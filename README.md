@@ -25,6 +25,37 @@ await vm.eval('getUser(42).then((u) => u.plan)');
 vm.dispose();
 ```
 
+### What guest code can reach
+
+By default, only ECMAScript. There is no network, no files, no `eval`, no
+WebAssembly, no shared memory, and a clock that doesn't move while guest
+code runs. Each VM can opt in to more:
+
+| Option | Default | |
+|---|---|---|
+| `clock` | `'frozen'` | `'frozen'` moves only when an eval starts and when a host call returns (no timers for side channels). `'realtime'`, or `{ fixedMs }` for reproducible runs. |
+| `randomSeed` | none (OS randomness) | Seeds `Math.random` for reproducible runs. |
+| `allowCodeGeneration` | `false` | Allows `eval` and `new Function`. |
+| `network` | none | `fetch`, limited by a policy: `{ allow: ['api.example.com', '*.example.org'] }` or a function; methods, size, time, and request-count limits. Private and link-local addresses (cloud metadata) are refused, checked on the address actually connected to, and every redirect is re-checked. |
+| `fs` | none | A promise-based `fs` (readFile, writeFile, readdir, stat, exists, mkdir, rm) confined to `{ root }`, read-only unless `write: true`. Symlinks out of the root are refused, and errors never reveal host paths. |
+
+```js
+await pool.run(`
+  const r = await fetch('https://api.example.com/plans');
+  await fs.writeFile('/plans.json', await r.text());
+`, {
+  tenant: 'acme',
+  network: { allow: ['api.example.com'], maxRequests: 10 },
+  fs: { root: '/srv/tenants/acme', write: true },
+});
+```
+
+Network and file access are brokered: the worker still can't open a socket
+or a file. `fetch` and `fs` are host calls that this library checks against
+the policy and performs on the guest's behalf.
+
+### Isolation
+
 Each tenant gets its own worker process. Inside it, each VM is its own V8
 isolate, built with the V8 sandbox enabled. Workers lock themselves down
 before running guest code: Landlock and seccomp on Linux. In strict mode the

@@ -3,6 +3,7 @@
 import { test, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { chmodSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { createServer } from 'node:http';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { LanePool, LaneError } from '../dist/index.js';
@@ -185,6 +186,60 @@ test('the clock moves forward at I/O', async () => {
   await new Promise((r) => setTimeout(r, 50));
   assert.ok((await vm.eval('Date.now()')) - t0 >= 40);
   vm.dispose();
+});
+
+test('clock: realtime and fixed', async () => {
+  const elapsed = await pool.run('const t0 = Date.now(); let x = 0; for (let i = 0; i < 3e7; i++) x += i; Date.now() - t0', {
+    ...T,
+    clock: 'realtime',
+  });
+  assert.ok(elapsed > 0, `realtime clock didn't move over a busy loop (${elapsed}ms)`);
+  const hostFunctions = { wait: () => new Promise((r) => setTimeout(r, 20)) };
+  const vm = pool.createVm({ ...T, clock: { fixedMs: 1e12 }, hostFunctions });
+  assert.equal(await vm.eval('Date.now()'), 1e12);
+  assert.equal(await vm.eval('wait().then(() => new Date().toISOString())'), new Date(1e12).toISOString());
+  vm.dispose();
+  assert.throws(() => pool.createVm({ ...T, clock: 'sometimes' }), TypeError);
+});
+
+test('randomSeed makes Math.random reproducible', async () => {
+  const draw = '[Math.random(), Math.random(), Math.random()]';
+  const a = await pool.run(draw, { ...T, randomSeed: 7 });
+  const b = await pool.run(draw, { ...T, randomSeed: 7 });
+  const c = await pool.run(draw, { ...T, randomSeed: 8 });
+  const d = await pool.run(draw, T);
+  const e = await pool.run(draw, T);
+  assert.deepEqual(a, b);
+  assert.notDeepEqual(a, c);
+  assert.notDeepEqual(d, e);
+  assert.throws(() => pool.createVm({ ...T, randomSeed: -1 }), TypeError);
+});
+
+test('allowCodeGeneration opts in to eval and new Function', async () => {
+  const opts = { ...T, allowCodeGeneration: true };
+  assert.equal(await pool.run('eval("1 + 1") + new Function("return 2")()', opts), 4);
+  assert.equal(await pool.run('typeof WebAssembly', opts), 'undefined');
+});
+
+test('network and fs policies reach the guest through the worker', async () => {
+  const server = createServer((req, res) => res.end(JSON.stringify({ path: req.url })));
+  await new Promise((r) => server.listen(0, '127.0.0.1', r));
+  const dir = mkdtempSync(join(tmpdir(), 'isolane-root-'));
+  writeFileSync(join(dir, 'a.txt'), 'from disk');
+  try {
+    const url = `http://localhost:${server.address().port}/hi`;
+    const network = { allow: ['localhost'], allowPrivateNetworks: true };
+    assert.deepEqual(await pool.run(`fetch('${url}').then((r) => r.json())`, { ...T, network }), { path: '/hi' });
+    assert.equal(await pool.run(`fs.readFile('/a.txt', 'utf8')`, { ...T, fs: { root: dir } }), 'from disk');
+    assert.deepEqual(
+      await pool.run('[typeof fetch, typeof fs, typeof __isolane_fetch, typeof __isolane_fs]', { ...T, network, fs: { root: dir } }),
+      ['function', 'object', 'undefined', 'undefined'],
+    );
+    await assert.rejects(pool.run(`fetch('${url}')`, { ...T, network: { allow: ['localhost'] } }), /no public address/);
+    await assert.rejects(pool.run(`fs.writeFile('/b.txt', 'x')`, { ...T, fs: { root: dir } }), /read-only/);
+  } finally {
+    server.close();
+  }
 });
 
 test('host functions: sync, async, and errors', async () => {

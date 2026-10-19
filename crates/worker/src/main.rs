@@ -37,7 +37,7 @@ unsafe extern "C" {
 }
 
 /// V8 flags for untrusted code.
-/// - no `eval`/`new Function` (also refused per context)
+/// - no `eval`/`new Function` by default (each context opts in or not)
 /// - no `SharedArrayBuffer` constructor (and the global is deleted)
 /// - no Temporal: its clock is frozen like Date's (see `clock`), but it also
 ///   exposes the host time zone and hasn't been audited yet
@@ -47,9 +47,13 @@ const V8_FLAGS: &str = "--disallow-code-generation-from-strings \
 
 /// V8's seed for Math.random and its hash tables. Without an entropy
 /// source, V8 on Linux reads /dev/urandom per isolate, which the lockdown
-/// forbids, and then falls back to seeding from the clock.
+/// forbids, and then falls back to seeding from the clock. A VM created with
+/// a random seed gets a deterministic stream instead (see `vm::seeded_entropy`).
 #[cfg(target_os = "linux")]
 fn entropy(buf: &mut [u8]) -> bool {
+    if vm::seeded_entropy(buf) {
+        return true;
+    }
     let mut filled = 0;
     while filled < buf.len() {
         let rest = &mut buf[filled..];
@@ -65,8 +69,14 @@ fn entropy(buf: &mut [u8]) -> bool {
     true
 }
 
+/// Elsewhere V8 seeds from the OS itself (arc4random on macOS), so a seed
+/// can only take effect through an entropy source.
+#[cfg(not(target_os = "linux"))]
+fn entropy(buf: &mut [u8]) -> bool {
+    vm::seeded_entropy(buf)
+}
+
 fn init_v8() {
-    #[cfg(target_os = "linux")]
     v8::V8::set_entropy_source(entropy);
     v8::V8::set_flags_from_string(V8_FLAGS);
     // Background threads for GC and compilation. Each tenant has its own
@@ -149,12 +159,25 @@ fn serve(lock_down: bool) -> ExitCode {
             }
         };
         match msg {
-            In::Create { vm, heap_bytes, timeout_ms, host_functions } => {
+            In::Create {
+                vm,
+                heap_bytes,
+                timeout_ms,
+                host_functions,
+                clock,
+                random_seed,
+                allow_code_generation,
+                prelude,
+            } => {
                 let (tx, rx) = mpsc::channel();
                 let config = VmConfig {
                     heap_bytes,
                     timeout: timeout_ms.map(Duration::from_millis),
                     host_functions,
+                    clock,
+                    random_seed,
+                    allow_code_generation,
+                    prelude,
                 };
                 vm::spawn(vm, config, rx, out.clone());
                 vms.insert(vm, tx);
