@@ -54,6 +54,8 @@ See [docs/design.md](docs/design.md) for the threat model.
 | `time` | `'frozen'` | A clock that only moves at I/O, the real clock, or a fixed time |
 | `random` | OS | Seeded randomness, for reproducible runs |
 
+`web` passes 98.7% of the applicable web-platform-tests; see the [guide](docs/guide.md#web-platform-conformance).
+
 ```js
 await acme.run(
   `const r = await fetch('https://api.example.com/plans');

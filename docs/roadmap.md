@@ -84,13 +84,13 @@ older, unsupported V8 and brings tokio and its op layer into the worker.
 | 1 | primordials, webidl, URL/URLSearchParams (`url` crate), TextEncoder/Decoder (`encoding_rs`), atob/btoa, Event/EventTarget/CustomEvent/ErrorEvent, AbortController/AbortSignal, DOMException/QuotaExceededError, structuredClone (V8 ValueSerializer), performance (frozen-clock semantics), queueMicrotask, reportError, `self`, `navigator.userAgent`, `crypto.getRandomValues`/`randomUUID` — behind `webPlatform: true` | done (WPT 97.3%, below) |
 | 2 | Timers + an event loop in the VM thread (`setTimeout`, `setInterval`, `clearTimeout`, `clearInterval`, `AbortSignal.timeout`), Streams (ReadableStream incl. byte streams/BYOB, WritableStream, TransformStream, queuing strategies), Blob/File/FileReader, `URL.createObjectURL`, TextEncoderStream/TextDecoderStream, CompressionStream/DecompressionStream (gzip, deflate, deflate-raw via `flate2`'s pure-Rust backend; brotli via the pure-Rust `brotli` crate), structuredClone of Blob/File | done (WPT 97.2% over the phase 1 + 2 subset, below) |
 | 3 | Spec `fetch`/`Request`/`Response`/`Headers`/`FormData`: Deno's 20–23 (vendored) plus our own `fetch()` (`runtime/fetch.js`, adapted from Deno's 26_fetch.js) over the network broker; response bodies stream (byte streams pulled from the broker), request bodies are buffered; redirect modes (follow/manual/error; the broker follows, re-checking each hop); abort cancels the broker's request; `data:` and `blob:` URLs; `fetch` without a network policy rejects with a TypeError | done (WPT below) |
-| — | Streamed request bodies (upload a `ReadableStream` as it's produced; today it's read to the end first, within `maxRequestBytes`) | planned |
-| — | A base URL option (Deno's `--location`): `new Request('/x')`, `Response.redirect('/x')` and relative `fetch` URLs throw today, as in a worker without one | idea |
+| — | Streamed request bodies (upload a `ReadableStream` as it's produced; today it's read to the end first, within `maxRequestBytes`). WPT bug `request-streaming` (2 subtests) | planned |
+| — | A base URL option (Deno's `--location`): `web: { baseUrl }`, see API v2 | done |
 | — | Header values Node's HTTP client refuses (control bytes 0x01–0x08, 0x0B–0x1F, 0x7F, which Fetch allows) fail the fetch; would need our own HTTP/1.1 client in the supervisor | idea |
 | — | Browser-only Fetch rules are not applied (forbidden request/response headers like `Set-Cookie`, method overrides, `only-if-cached`): server runtimes (Deno, workerd) don't either | by design |
-| — | WPT fetch tests needing WPT's Python handlers (`.py`): run WPT's server (wptserve) in the soak job to count them | planned |
+| — | WPT fetch tests needing WPT's Python handlers (`.py`): WPT's server (wptserve) serves the WPT gate (see "WPT gate" below) | done |
 | 4 | `crypto.subtle` (Deno's ext/crypto Rust, MIT) | planned |
-| — | V8 startup snapshot of the runtime JS (avoid compiling ~15k lines per VM) | planned |
+| — | V8 startup snapshot of the runtime JS (avoid compiling ~15k lines per VM). Also makes eager globals free: WPT bug `lazy-globals` (1 subtest) | planned |
 | — | ES modules for guest code (`export default { fetch }` handlers) | planned |
 | — | **TypeScript guest code** (`lang: 'ts'`, `.ts` deployments): type stripping, not checking, done in the worker with `oxc` (pure Rust), so untrusted source is parsed only inside the locked-down worker. Erasable syntax only (like TypeScript's `erasableSyntaxOnly`: no enum/namespace/parameter properties, which get a clear error; a `transform` mode later). Types are blanked to whitespace, so line:column in guest stack traces match the TypeScript source with no source maps. Pairs with generated `.d.ts` for host APIs so developers can type-check against the exact host API at deploy time | planned (after API v2 and WPT) |
 | — | **Multi-file programs**: deployments upload an in-memory file tree (`files: { path: source }`, `entry`); the worker resolves imports with `oxc_resolver` over a virtual filesystem (package.json exports/imports and conditions — `workerd`/`worker`/`browser`/`import`/`default` — tsconfig paths, extension probing), compiles each module with V8's native ES module API (resolve → strip/transform with oxc → compile → link), with dynamic `import()`, `import.meta.url` as the virtual path, and JSON modules. All parsing, resolving, and transforming of untrusted input stays in the locked-down worker, and resolution can't leave the uploaded tree. New limits: `modules`, `moduleBytes`. Packages work if uploaded; `node:*` only with the Node compat layer | planned |
@@ -98,11 +98,11 @@ older, unsupported V8 and brings tokio and its op layer into the worker.
 | — | Optional deploy-time bundling with Rolldown (Rust, on oxc) for large dependency trees, plus V8 code cache per deployment | idea |
 | — | TypeScript **transform mode** (`ts: { mode: 'transform' }`) via `oxc_transformer`: enums and const enums (inlined within a file), namespaces (partial: no cross-block merging, no exported `var`/`let`), legacy decorators + metadata, JSX/TSX; per-file (`isolatedModules`) semantics. Positions shift, so the worker maps guest stack traces back through the source map before reporting `err.guest.stack`. Strip mode stays the default. Verify parameter properties and standard decorators before documenting them | planned |
 | — | **Type checking** at deploy time (`deploy(code, { check: true })`, cached by content hash), never per run: TypeScript's checker running *inside an isolane isolate* (tsc is plain JS; a large heap budget, nothing else enabled), so a checker bug or DoS on hostile input stays sandboxed. Checked against generated `.d.ts` for exactly the host functions (from their schemas) plus the WinterTC globals; failures are `ERR_TYPE_CHECK` with file:line:col diagnostics. Evaluate the native TypeScript 7 compiler (tsgo) as a separate sandboxed process once its embedding API settles | planned |
-| — | WPT subset with tracked pass rates (`soak/wpt.mjs`, weekly soak job with a 95% floor, lowered from 97% when the fetch directories joined: their remaining failures are mostly the soak's environment, see below); Deno's and workerd's expectation files as a baseline | done (runner); expectations planned |
+| — | WPT subset with tracked pass rates: now the WPT gate (`test/wpt/run.mjs`, see "WPT gate" below), which replaced `soak/wpt.mjs` and its 95% floor | done |
 | — | Turn `webPlatform` on by default once the startup snapshot lands (today: +0.8 ms per isolate, +1–1.6 ms on first use of an API) | planned |
 | — | Fair CPU for idle timers: a stateful isolate's `setInterval` runs between evals (each batch budgeted like an eval, but unbounded in count); per-tenant CPU accounting should cover it | planned |
-| — | `structuredClone` `transfer`, transferable streams, `MessageChannel`/`MessagePort` | planned |
-| — | Error a `DecompressionStream`'s readable immediately on trailing data (needs the transform controller in the op) | planned |
+| — | `structuredClone` `transfer`, transferable streams, `MessageChannel`/`MessagePort`. WPT bug `message-channel` (11 subtests) | planned |
+| — | Error a `DecompressionStream`'s readable immediately on trailing data (needs the transform controller in the op). WPT bug `decompression-trailing` (1 file) | planned |
 | — | Streams backed by native resources (Deno's `op_readable_stream_resource_*`, `internals.readableStreamForRid`): not needed; fetch bodies are byte streams pulled from the broker in JS | dropped |
 
 Timer semantics (phase 2): timers live in the isolate's thread. Scheduling
@@ -184,10 +184,58 @@ randomUUID 100%. Remaining failures, by cause:
   global object"); decide which global interface to model.
 - `Event.timeStamp` is always 0 (Deno's behaviour too); `structuredClone`'s
   `transfer` option isn't supported yet.
-| — | WPT expectations file (every allowed failure listed with a reason: by-design / browser-only / environment / bug) and per-test gating in the soak: a new failure or an unexpected pass fails the job; track "unexplained failures" (goal 0) instead of the overall rate (95.9% at phase 3) | planned |
-| — | Run WPT's own server (wptserve) in the WPT soak so tests that need its Python handlers run (~100 subtests) | planned |
-| — | Optional `web: { baseUrl }` (like Deno's `--location`) so relative Request/fetch URLs resolve and `location` exists (~140 WPT subtests). Decided: opt-in | planned (shape lands with API v2) |
-| — | Fix or upstream the `url` crate's lag on newest URL-spec edge cases (url 94.9%) | planned |
+
+### WPT gate
+
+`test/wpt/run.mjs` runs the pinned WPT subset (commit c47791d: the old
+soak runner's directories plus fetch/api/basic, fetch/api/abort,
+fetch/api/redirect, and fetch/data-urls; 349 files) served by WPT's own
+server, wptserve (Python 3, localhost, HTTP only), so `.py` handlers and `.sub.js` substitutions work.
+Each test gets a fresh isolate with `web: { baseUrl }` set to the test's
+URL and a `fetch` policy for localhost (`privateNetworks: true`). Every
+subtest that doesn't pass is listed in `test/wpt/expectations.json` with a
+reason in one of four categories (by-design, browser-only, environment,
+bug); the run fails on an unexpected failure or pass, a changed harness
+status, a worker crash, a stale entry, or an unclassified one. It runs in
+CI after the end-to-end tests (sandboxed worker, strict mode) and in the
+weekly soak. `--static` (plain files, no Python) stays for quick local runs
+and doesn't gate.
+
+At the gate's introduction (dev build): 17,622 / 18,432 subtests pass
+(95.6%), **98.7% of the 17,848 that apply** (all but by-design and
+browser-only). Expected failures: by-design 101, browser-only 483,
+environment 49, bug 177. Under wptserve, the fixes below took the run from
+17,284 to 17,622 passing subtests:
+
+- An empty binary attachment (an empty request body) crashed the worker:
+  the frame went out as text with a `bin` field, a protocol violation.
+- A fetch body read ahead nothing, so a network error mid-body never
+  settled `reader.closed`; bodies now read ahead 64 KiB.
+- An aborted body read threw a TypeError instead of the abort reason (the
+  vendored code checks `core.BadResourcePrototype`, which was missing).
+- `data:` URLs refused non-GET methods, kept the fragment, and returned a
+  body for HEAD; `blob:` URLs didn't ignore the fragment, sent an invalid
+  MIME type as `Content-Type`, and had no origin (`blob:null/...`; now the
+  base URL's).
+- The broker upper-cased custom methods and lower-cased header names (the
+  guest's spelling is now sent), sent no `User-Agent`, mangled non-ASCII
+  `Location` bytes, and let a NUL in a response header through (now a
+  network error, as in Fetch).
+
+| Phase | Item | Status |
+|---|---|---|
+| — | WPT expectations file (every allowed failure listed with a reason: by-design / browser-only / environment / bug) and per-subtest gating in CI and the soak; `--update` rewrites it from a run, keeping reasons | done |
+| — | Run WPT's own server (wptserve) for the gate so tests that need its Python handlers run | done |
+| — | Optional `web: { baseUrl }` (like Deno's `--location`) so relative Request/fetch URLs resolve and `location` exists | done |
+| — | Fix or upstream the `url` crate's lag on newest URL-spec edge cases: WPT bug `url-crate` (112 subtests) | planned |
+| — | Compression conformance: smaller output for tiny repetitive inputs, detect truncated deflate input. WPT bug `compression-format` (4) | planned |
+| — | Encoding conformance: EUC-JP state after a fatal streaming error (`encoding_rs`). WPT bug `encoding-edge` (1) | planned |
+| — | Event attributes: `Event.timeStamp`, `isTrusted` as an own unforgeable attribute. WPT bug `event-attrs` (3) | planned |
+| — | Fetch `integrity` (Subresource Integrity) checks. WPT bug `sri` (3) | planned |
+| — | Request attributes: `destination`, `isReloadNavigation`, `isHistoryNavigation`, `duplex` and its validation, refusing credentials in the URL. WPT bug `request-attrs` (11) | planned |
+| — | Body conformance (vendored classes): BYOB readers on non-stream bodies, `Object.prototype.then` injection, UTF-16 JSON, an empty `FormData` as text. WPT bug `body-edge` (11) | planned |
+| — | Streams conformance (vendored): synchronous write algorithm on enqueue, enqueue after a detached BYOB buffer, byobRequest after a patched `then`, transformer cancel race. WPT bug `streams-edge` (4) | planned |
+| — | Structured clone: keep a resizable `ArrayBuffer`'s `maxByteLength`, refuse out-of-bounds views. WPT bug `structured-clone-edge` (14) | planned |
 | — | test262 run (catch regressions from removed globals and flags) | planned |
 | — | List isolane on unjs/runtime-compat | idea |
 | — | Node compatibility layer | later (see "Later milestone: npm and Node compatibility") |

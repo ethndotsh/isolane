@@ -144,6 +144,46 @@ host calls that your process checks against the policy and carries out on
 the guest's behalf. A refusal throws in the guest (a `TypeError` for
 `fetch`) and emits `onPolicyDenial`.
 
+## Web platform conformance
+
+`web` is checked against a pinned subset of the
+[web-platform-tests](https://web-platform-tests.org) (WPT): URL, encoding,
+DOM events and abort, streams, compression, FileAPI, structured clone,
+timers, and fetch, about 18,400 subtests. **98.7% of the subtests that
+apply pass** (95.6% of all of them).
+
+Every subtest that doesn't pass is listed in `test/wpt/expectations.json`
+with a reason, in one of four categories:
+
+| Category | Subtests | What it means |
+|---|---|---|
+| by-design | 101 | isolane's choices: no SharedArrayBuffer, no WebAssembly unless allowed, a global that isn't a `WorkerGlobalScope`, tentative APIs |
+| browser-only | 483 | rules for browsers that server runtimes (Deno, workerd) don't apply either: CORS and origins, forbidden headers, referrers, the HTTP cache, `XMLHttpRequest`, the Cache API |
+| environment | 49 | the test setup or Node's HTTP client: no TLS or HTTP/2 in the test server, no WPT proxy, header bytes Node refuses |
+| bug | 177 | real gaps, each a row in the roadmap: mostly the `url` crate lagging the newest URL spec (112), then structured clone, `MessageChannel`, `Request` attributes, and body and streams edge cases |
+
+The applicable rate leaves out by-design and browser-only failures; bugs
+and environment failures count against it.
+
+The run is a gate, in CI after the end-to-end tests (the sandboxed worker,
+strict mode): it fails on a subtest that newly fails or newly passes, a
+changed harness status, a worker crash, or a listed entry that's stale or
+has no classified reason.
+
+```sh
+node test/wpt/run.mjs              # clone WPT at the pinned commit, run, gate
+node test/wpt/run.mjs --update     # rewrite the expectations, keeping reasons
+node test/wpt/run.mjs --static     # no Python: plain files, report only
+```
+
+It needs Python 3: WPT's own server (wptserve, on localhost, HTTP only)
+serves the tests, so its handlers and substitutions work. Each test runs in
+a fresh isolate with `web: { baseUrl }` set to the test's URL and a `fetch`
+policy for localhost. `--filter <substr>` runs some files, `--report` and
+`--summary` write JSON and Markdown, and `ISOLANE_WPT_DIR` sets where the
+checkout is cached. New entries from `--update` are "unclassified" until
+someone gives them a reason.
+
 ## Host functions
 
 A bare function is async in the guest, with unchecked arguments, and gets

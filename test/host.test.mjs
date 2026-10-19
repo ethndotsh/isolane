@@ -50,6 +50,8 @@ test('bytes cross host calls as bytes, both ways', async () => {
   assert.deepEqual(seen, [[true, [1, 2], [3, 4], { n: 1 }]]);
   assert.equal(await pool.run('big().then((b) => b.length + b[100])', { ...T, host }), (3 << 20) + 1);
   assert.deepEqual(await pool.run('[...whole(new Uint8Array([9, 8]))]', { ...T, host }), [9, 8]);
+  // Empty byte arguments still travel as bytes (an empty request body, from WPT).
+  assert.deepEqual(await pool.run('Promise.all([whole(new Uint8Array(0)), whole(new ArrayBuffer(0))]).then((r) => r.map((b) => b.length))', { ...T, host }), [0, 0]);
   // Arguments past the frame limit throw in the guest instead of breaking the protocol.
   // (synchronously, like any argument that can't be serialized).
   assert.match(

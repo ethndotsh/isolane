@@ -55,6 +55,7 @@ const {
 } = core.loadExtScript("ext:deno_fetch/23_response.js");
 const abortSignal = core.loadExtScript("ext:deno_web/03_abort_signal.js");
 const { forgivingBase64Decode } = core.loadExtScript("ext:deno_web/00_infra.js");
+const { parseMimeType } = core.loadExtScript("ext:deno_web/01_mimesniff.js");
 
 // https://fetch.spec.whatwg.org/#bad-port, as in Deno's 26_fetch.js.
 const BAD_PORTS = {
@@ -90,9 +91,14 @@ function cancel(id) {
   PromisePrototypeCatch(PromisePrototypeThen(transport("cancel", id)), () => {});
 }
 
-/** A byte stream over the broker's body reads, pulled as the guest reads.
- * Aborting the fetch's signal errors it with the abort reason (as Deno's
- * resource-backed body streams do) and cancels the broker's request. */
+/** A byte stream over the broker's body reads. It reads ahead up to
+ * BODY_READ_AHEAD bytes even when the guest isn't reading, as a browser's
+ * network layer does, so a network error mid-body errors the stream (and
+ * `reader.closed` rejects) without waiting for a read; backpressure stops it
+ * there. Aborting the fetch's signal errors it with the abort reason (as
+ * Deno's resource-backed body streams do) and cancels the broker's request. */
+const BODY_READ_AHEAD = 64 * 1024;
+
 function bodyStream(id, terminator) {
   let controller;
   const stream = new ReadableStream({
@@ -112,7 +118,7 @@ function bodyStream(id, terminator) {
     cancel() {
       cancel(id);
     },
-  });
+  }, { __proto__: null, highWaterMark: BODY_READ_AHEAD });
   terminator[abortSignal.add](() => {
     cancel(id);
     try {
@@ -143,8 +149,9 @@ function percentDecode(input) {
 /** https://fetch.spec.whatwg.org/#data-url-processor (the MIME type is
  * passed through as written, without the spec's full parsing). */
 function fetchDataUrl(url, req) {
-  if (req.method !== "GET") return networkError("data: URLs only support GET");
-  const href = url.href;
+  // Any method: a data: URL's response doesn't depend on it. The fragment
+  // isn't part of the data.
+  const href = url.hash === "" ? url.href : StringPrototypeSlice(url.href, 0, url.href.length - url.hash.length);
   const comma = StringPrototypeIndexOf(href, ",");
   if (comma === -1) return networkError("invalid data: URL");
   let mime = StringPrototypeTrim(StringPrototypeSlice(href, 5, comma));
@@ -166,7 +173,8 @@ function fetchDataUrl(url, req) {
     headerList: [["content-type", mime]],
     status: 200,
     statusMessage: "OK",
-    body: new InnerBody({ body: bytes, consumed: false }),
+    // Main fetch drops the body of a HEAD response.
+    body: req.method === "HEAD" ? null : new InnerBody({ body: bytes, consumed: false }),
     type: "basic",
     url() {
       return this.urlList[this.urlList.length - 1] ?? null;
@@ -189,7 +197,8 @@ async function mainFetch(req, terminator) {
     return {
       headerList: [
         ["content-length", String(req.blobUrlEntry.size)],
-        ["content-type", req.blobUrlEntry.type],
+        // The blob's type, if it's a valid MIME type; otherwise none.
+        ["content-type", parseMimeType(req.blobUrlEntry.type) === null ? "" : req.blobUrlEntry.type],
       ],
       status: 200,
       statusMessage: "OK",

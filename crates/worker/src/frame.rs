@@ -74,12 +74,15 @@ impl<W: Write> Writer<W> {
     }
 
     /// Write one frame with `attached` bytes after its JSON (a binary frame;
-    /// a plain JSON frame when there are none). Callers check `fits` first.
+    /// a plain JSON frame when nothing is attached). An attachment may be
+    /// empty and still needs a binary frame: the JSON lists it, and the
+    /// supervisor refuses a listed attachment in a plain frame. Callers check
+    /// `fits` first.
     pub fn send_with_bytes(&self, msg: &impl serde::Serialize, attached: &[&[u8]]) {
         let json = serde_json::to_vec(msg).expect("protocol messages serialize");
         let bytes: usize = attached.iter().map(|b| b.len()).sum();
         let mut w = self.inner.lock().unwrap_or_else(|e| e.into_inner());
-        let ok = if bytes == 0 {
+        let ok = if attached.is_empty() {
             w.write_all(&(json.len() as u32).to_le_bytes()).and_then(|_| w.write_all(&json))
         } else {
             let total = BINARY_HEADER + json.len() + bytes;
