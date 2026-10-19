@@ -124,10 +124,6 @@
     "structured-clone-edge": {
       "category": "bug",
       "reason": "structuredClone doesn't keep a resizable ArrayBuffer's maxByteLength or reject out-of-bounds views (roadmap: structured clone)."
-    },
-    "mime-empty-quoted-param": {
-      "category": "bug",
-      "reason": "Deno's vendored MIME parser (01_mimesniff.js) drops a parameter whose quoted value is empty (`a=\"\"`); the MIME Sniffing standard keeps it (roadmap: MIME parser)."
     }
   },
   "files": {
@@ -1461,12 +1457,6 @@
         "Attempt to inject undefined via Object.prototype.then.": "FAIL",
         "Attempt to inject 8.2 via Object.prototype.then.": "FAIL",
         "intercepting arraybuffer to text conversion via Object.prototype.then should not be possible": "FAIL"
-      }
-    },
-    "fetch/data-urls/processing.any.js": {
-      "why": "mime-empty-quoted-param",
-      "subtests": {
-        "\"data:text/plain;a=\\\",\\\",X\"": "FAIL"
       }
     },
     "hr-time/idlharness.any.js": {

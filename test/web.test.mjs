@@ -640,6 +640,17 @@ test('fetch: data: and blob: URLs', async () => {
     })()`),
     ['hi', 'text/plain', 'a b', 'text/plain;charset=US-ASCII', 'from a blob', 'x/y'],
   );
+  // Fetch's data: URL processor: MIME parameters as the MIME Sniffing
+  // standard serializes them (an empty quoted value is kept), and invalid
+  // base64 is a network error.
+  assert.deepEqual(
+    await run(`(async () => {
+      const r = await fetch('data:text/plain;a="";B=c,X');
+      const bad = await fetch('data:;base64,%', { method: 'POST' }).then(() => 'ok', (e) => e.name);
+      return [r.headers.get('content-type'), await r.text(), bad];
+    })()`),
+    ['text/plain;a="";b=c', 'X', 'TypeError'],
+  );
 });
 
 test('without web, a fetch policy still gives the minimal fetch', async () => {

@@ -20,6 +20,7 @@ pub use snapshot::{external_references, snapshot};
 mod clone;
 mod compression;
 mod encoding;
+mod fetch;
 pub mod timers;
 mod url;
 
@@ -395,6 +396,8 @@ fn native_fns() -> Natives {
         "timerNow" => timers::timer_now,
         "timerState" => timers::timer_state,
         "setTimerRunner" => timers::set_timer_runner,
+        "dataUrl" => fetch::data_url,
+        "digest" => fetch::digest,
         "log" => log,
     )
 }

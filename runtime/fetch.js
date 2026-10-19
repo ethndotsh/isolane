@@ -18,22 +18,13 @@ const { core, primordials } = __bootstrap;
 const {
   ArrayPrototypePush,
   ArrayPrototypeSlice,
-  NumberParseInt,
   ObjectPrototypeIsPrototypeOf,
   Promise,
   PromisePrototypeCatch,
   PromisePrototypeThen,
-  RegExpPrototypeExec,
   SafeArrayIterator,
-  StringFromCharCode,
-  StringPrototypeCharCodeAt,
-  StringPrototypeIndexOf,
-  StringPrototypeSlice,
-  StringPrototypeReplace,
   TypedArrayPrototypeGetSymbolToStringTag,
-  TypedArrayPrototypeSlice,
   TypeError,
-  Uint8Array,
 } = primordials;
 
 const webidl = core.loadExtScript("ext:deno_webidl/00_webidl.js");
@@ -55,8 +46,7 @@ const {
   toInnerResponse,
 } = core.loadExtScript("ext:deno_fetch/23_response.js");
 const abortSignal = core.loadExtScript("ext:deno_web/03_abort_signal.js");
-const { forgivingBase64Decode } = core.loadExtScript("ext:deno_web/00_infra.js");
-const { parseMimeType, serializeMimeType } = core.loadExtScript("ext:deno_web/01_mimesniff.js");
+const { parseMimeType } = core.loadExtScript("ext:deno_web/01_mimesniff.js");
 
 // https://fetch.spec.whatwg.org/#bad-port, as in Deno's 26_fetch.js.
 const BAD_PORTS = {
@@ -131,52 +121,13 @@ function bodyStream(id, terminator) {
   return stream;
 }
 
-const isHexDigit = (b) => (b >= 0x30 && b <= 0x39) || (b >= 0x41 && b <= 0x46) || (b >= 0x61 && b <= 0x66);
-const hexValue = (b) => (b <= 0x39 ? b - 0x30 : (b | 0x20) - 0x57);
-
-/** https://url.spec.whatwg.org/#string-percent-decode: UTF-8 encode the
- * string, then percent-decode the bytes. Returns exactly the decoded bytes. */
-function percentDecode(input) {
-  const bytes = core.encode(input);
-  const out = new Uint8Array(bytes.length);
-  let n = 0;
-  for (let i = 0; i < bytes.length; i++) {
-    const b = bytes[i];
-    if (b === 0x25 && i + 2 < bytes.length && isHexDigit(bytes[i + 1]) && isHexDigit(bytes[i + 2])) {
-      out[n++] = hexValue(bytes[i + 1]) * 16 + hexValue(bytes[i + 2]);
-      i += 2;
-    } else {
-      out[n++] = b;
-    }
-  }
-  return TypedArrayPrototypeSlice(out, 0, n);
-}
-
-/** https://fetch.spec.whatwg.org/#data-url-processor */
+/** https://fetch.spec.whatwg.org/#data-url-processor, natively (Servo's
+ * data-url crate, as in Deno's fetch). Any method: a data: URL's response
+ * doesn't depend on it. */
 function fetchDataUrl(url, req) {
-  // Any method: a data: URL's response doesn't depend on it. The fragment
-  // isn't part of the data.
-  const href = url.hash === "" ? url.href : StringPrototypeSlice(url.href, 0, url.href.length - url.hash.length);
-  const comma = StringPrototypeIndexOf(href, ",");
-  if (comma === -1) return networkError("invalid data: URL");
-  // Strip leading and trailing ASCII whitespace.
-  let mime = StringPrototypeReplace(StringPrototypeSlice(href, 5, comma), /^[\t\n\f\r ]+|[\t\n\f\r ]+$/g, "");
-  let bytes = percentDecode(StringPrototypeSlice(href, comma + 1));
-  // ";", then any spaces, then "base64" (ASCII case-insensitive), at the end.
-  const base64 = RegExpPrototypeExec(/;[ ]*base64$/i, mime);
-  if (base64 !== null) {
-    mime = StringPrototypeSlice(mime, 0, base64.index);
-    let text = "";
-    for (let i = 0; i < bytes.length; i++) text += StringFromCharCode(bytes[i]);
-    try {
-      bytes = forgivingBase64Decode(text);
-    } catch {
-      return networkError("invalid data: URL");
-    }
-  }
-  if (mime[0] === ";") mime = "text/plain" + mime;
-  const parsed = parseMimeType(mime);
-  const contentType = parsed === null ? "text/plain;charset=US-ASCII" : serializeMimeType(parsed);
+  const processed = core.dataUrl(url.href);
+  if (processed === null) return networkError("invalid data: URL");
+  const { 0: contentType, 1: bytes } = processed;
   processUrlList(req.urlList, req.urlListProcessed);
   return {
     headerList: [["content-type", contentType]],

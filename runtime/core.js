@@ -469,6 +469,10 @@
     // Not part of deno_core: randomness for crypto in runtime/globals.js.
     getRandomValues: native.getRandomValues,
     randomUUID: native.randomUUID,
+    // Not part of deno_core: for runtime/fetch.js, the data: URL processor
+    // and Subresource Integrity's digests.
+    dataUrl: native.dataUrl,
+    digest: native.digest,
   });
 
   bootstrap = ObjectFreeze({
