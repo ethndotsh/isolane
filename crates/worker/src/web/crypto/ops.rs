@@ -50,6 +50,7 @@ use super::shared::V8RawKeyData;
 use super::IsolaneRng;
 
 #[derive(Debug, thiserror::Error, deno_error::JsError)]
+#[allow(clippy::upper_case_acronyms, reason = "Deno's names")]
 pub enum CryptoError {
   #[class(inherit)]
   #[error(transparent)]
@@ -638,7 +639,7 @@ pub fn op_crypto_derive_bits(
             );
 
             // raw serialized x-coordinate of the computed point
-            Ok(shared_secret.raw_secret_bytes().to_vec().into())
+            Ok(shared_secret.raw_secret_bytes().to_vec())
           }
           CryptoNamedCurve::P384 => {
             let secret_key = p384::SecretKey::from_pkcs8_der(&args.key.data)
@@ -671,7 +672,7 @@ pub fn op_crypto_derive_bits(
             );
 
             // raw serialized x-coordinate of the computed point
-            Ok(shared_secret.raw_secret_bytes().to_vec().into())
+            Ok(shared_secret.raw_secret_bytes().to_vec())
           }
           CryptoNamedCurve::P521 => {
             let secret_key = p521::SecretKey::from_pkcs8_der(&args.key.data)
@@ -704,7 +705,7 @@ pub fn op_crypto_derive_bits(
             );
 
             // raw serialized x-coordinate of the computed point
-            Ok(shared_secret.raw_secret_bytes().to_vec().into())
+            Ok(shared_secret.raw_secret_bytes().to_vec())
           }
         }
       }
@@ -829,9 +830,9 @@ pub fn op_crypto_wrap_key(
       }
 
       let wrapped_key = match key.len() {
-        16 => KekAes128::new(key.into()).wrap_vec(&data),
-        24 => KekAes192::new(key.into()).wrap_vec(&data),
-        32 => KekAes256::new(key.into()).wrap_vec(&data),
+        16 => KekAes128::new(key.into()).wrap_vec(data),
+        24 => KekAes192::new(key.into()).wrap_vec(data),
+        32 => KekAes256::new(key.into()).wrap_vec(data),
         _ => return Err(CryptoError::InvalidKeyLength),
       }
       .map_err(|_| CryptoError::EncryptionError)?;
@@ -856,9 +857,9 @@ pub fn op_crypto_unwrap_key(
       }
 
       let unwrapped_key = match key.len() {
-        16 => KekAes128::new(key.into()).unwrap_vec(&data),
-        24 => KekAes192::new(key.into()).unwrap_vec(&data),
-        32 => KekAes256::new(key.into()).unwrap_vec(&data),
+        16 => KekAes128::new(key.into()).unwrap_vec(data),
+        24 => KekAes192::new(key.into()).unwrap_vec(data),
+        32 => KekAes256::new(key.into()).unwrap_vec(data),
         _ => return Err(CryptoError::InvalidKeyLength),
       }
       .map_err(|_| CryptoError::DecryptionError)?;

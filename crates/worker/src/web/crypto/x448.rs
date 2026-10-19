@@ -96,11 +96,9 @@ pub fn op_crypto_export_spki_x448(
     },
     subject_public_key: BitString::from_bytes(pubkey)?,
   };
-  Ok(
-    key_info
+  key_info
       .to_der()
-      .map_err(|_| X448Error::FailedExport)?,
-  )
+      .map_err(|_| X448Error::FailedExport)
 }
 
 pub fn op_crypto_export_pkcs8_x448(

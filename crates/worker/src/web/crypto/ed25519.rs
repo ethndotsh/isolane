@@ -154,11 +154,9 @@ pub fn op_crypto_export_spki_ed25519(
     },
     subject_public_key: BitString::from_bytes(pubkey)?,
   };
-  Ok(
-    key_info
+  key_info
       .to_der()
-      .map_err(|_| Ed25519Error::FailedExport)?,
-  )
+      .map_err(|_| Ed25519Error::FailedExport)
 }
 
 pub fn op_crypto_export_pkcs8_ed25519(

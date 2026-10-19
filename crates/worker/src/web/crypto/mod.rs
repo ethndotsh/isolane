@@ -343,7 +343,9 @@ fn keypair_or_throw(scope: &mut v8::PinScope, args: Args, f: fn(&mut [u8], &mut 
 
 /// ECDH over X25519 or X448: (k, u, secret out) → whether the result is
 /// the identity (all zero), which the JS rejects.
-fn derive_bits_curve<E: JsErrorClass>(scope: &mut v8::PinScope, args: Args, mut rv: Rv, f: fn(&[u8], &[u8], &mut [u8]) -> Result<bool, E>) {
+type DeriveCurve<E> = fn(&[u8], &[u8], &mut [u8]) -> Result<bool, E>;
+
+fn derive_bits_curve<E: JsErrorClass>(scope: &mut v8::PinScope, args: Args, mut rv: Rv, f: DeriveCurve<E>) {
     let k = arg!(buf_arg(scope, &args, 0));
     let u = arg!(buf_arg(scope, &args, 1));
     let mut secret = arg!(out_arg(scope, &args, 2));

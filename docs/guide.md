@@ -79,7 +79,12 @@ over isolane's own native code:
 - `structuredClone` (with `transfer` for ArrayBuffers, ports, and
   streams), `MessageChannel`, `MessagePort`, `MessageEvent`,
   `queueMicrotask`, `reportError`, `performance`
-- `crypto.getRandomValues`, `crypto.randomUUID`
+- `crypto.getRandomValues`, `crypto.randomUUID`, and `crypto.subtle` (Web
+  Crypto: SHA-1, SHA-2, and SHA-3 digests; HMAC; AES-GCM, -CBC, -CTR, and
+  -KW; RSA-OAEP, RSA-PSS, and RSASSA-PKCS1-v1_5; ECDSA and ECDH on P-256,
+  P-384, and P-521; Ed25519, X25519, and X448; PBKDF2 and HKDF). Keys and
+  nonces come from the isolate's randomness, so `random.seed` reproduces
+  them too.
 - timers: `setTimeout`, `setInterval`
 - streams: `ReadableStream`, `WritableStream`, `TransformStream`
 - `Blob`, `File`, `FileReader`, `CompressionStream`, `DecompressionStream`
@@ -108,8 +113,9 @@ snapshot before a tenant claims them.
   `performance.now()` move only when an eval starts and when a host call
   returns, so guest code can't time itself. `'real'` is the real clock;
   `{ fixedMs }` is a fixed instant, for reproducible runs.
-- `random: { seed }` seeds `Math.random`, `crypto`'s randomness, and V8's
-  hash seeds, for reproducible runs. Default: OS randomness per isolate.
+- `random: { seed }` seeds `Math.random`, `crypto`'s randomness (keys
+  `crypto.subtle` generates included), and V8's hash seeds, for
+  reproducible runs. Default: OS randomness per isolate.
 
 ### `fetch`
 
@@ -200,16 +206,17 @@ the guest's behalf. A refusal throws in the guest (a `TypeError` for
 `web` is checked against a pinned subset of the
 [web-platform-tests](https://web-platform-tests.org) (WPT): URL, encoding,
 DOM events and abort, streams, compression, FileAPI, structured clone,
-timers, and fetch, about 18,600 subtests. **99.0% of the subtests that
-apply pass** (95.9% of all of them).
+timers, fetch, and Web Crypto, about 53,800 subtests. **99.6% of the
+subtests that apply pass** (85.1% of all of them; most of the rest are
+Web Crypto algorithms from drafts beyond the standard).
 
 Every subtest that doesn't pass is listed in `test/wpt/expectations.json`
 with a reason, in one of four categories:
 
 | Category | Subtests | What it means |
 |---|---|---|
-| by-design | 103 | isolane's choices: no SharedArrayBuffer, no WebAssembly unless allowed, a global that isn't a `WorkerGlobalScope`, tentative APIs |
-| browser-only | 484 | rules for browsers that server runtimes (Deno, workerd) don't apply either: CORS and origins, forbidden headers, referrers, the HTTP cache, `XMLHttpRequest`, the Cache API, canvas |
+| by-design | 7,341 | isolane's choices: no SharedArrayBuffer, no WebAssembly unless allowed, a global that isn't a `WorkerGlobalScope`, tentative APIs, and Web Crypto algorithms from WICG drafts (7,238: Modern Algorithms such as ML-KEM, ML-DSA, and ChaCha20-Poly1305, and Ed448), which are on the roadmap |
+| browser-only | 487 | rules for browsers that server runtimes (Deno, workerd) don't apply either: CORS and origins, forbidden headers, referrers, the HTTP cache, `XMLHttpRequest`, the Cache API, canvas, secure contexts |
 | environment | 49 | the test setup or Node's HTTP client: no TLS or HTTP/2 in the test server, no WPT proxy, header bytes Node refuses |
 | bug | 125 | real gaps, each a row in the roadmap: mostly the `url` crate lagging the newest URL spec (112), then a patched `Object.prototype.then` seeing body reads, `Event` attributes, and a few streams and encoding edge cases |
 
@@ -365,6 +372,13 @@ lifts it.
   slow its own hash tables down, within its time limits).
 - **On macOS**, the per-worker memory cap and CPU-time budgets aren't
   enforced, and there's no seccomp or Landlock: strict mode refuses it.
+- **Web Crypto runs on the isolate's thread**, as guest CPU time. Long
+  derivations stop at the isolate's limits (PBKDF2 checks as it goes), but
+  RSA key generation can't be interrupted, so RSA keys are capped at 4,096
+  bits. RSA is the `rsa` crate's, which isn't constant-time
+  ([RUSTSEC-2023-0071](https://rustsec.org/advisories/RUSTSEC-2023-0071)):
+  a remote observer timing many RSA decryptions or signatures with one key
+  could learn it.
 - **Everything is UTC.** Guests can't see the host's time zone, and can't
   choose another one as the default (they can still format for any zone
   with `Intl`).
