@@ -243,6 +243,45 @@ policy for localhost. `--filter <substr>` runs some files, `--report` and
 checkout is cached. New entries from `--update` are "unclassified" until
 someone gives them a reason.
 
+## ECMAScript conformance (test262)
+
+The engine, as isolane configures it (SharedArrayBuffer and Atomics
+removed, Temporal off, the frozen clock, no code generation unless `eval`
+allows it), is checked against [test262](https://github.com/tc39/test262):
+`built-ins`, `language`, `annexB`, and `intl402`, about 50,000 tests, each
+run in non-strict and strict mode unless its flags say otherwise, for about
+100,400 runs. It's pinned to the commit V8's own sources pin, so V8's list
+of its known failures applies as is. **98.8% of the runs that apply pass**
+(80.1% of all of them; most of the rest are Temporal and module tests).
+
+Every run that doesn't pass is listed in `test/test262/expectations.json`
+with a reason, or covered by a skip rule there (by feature, by flag, or, for
+development builds only, by path):
+
+| Category | Runs | What it means |
+|---|---|---|
+| by-design | 17,380 | isolane's choices: no Temporal until it's audited (13,378), no ES modules yet (2,792; they come with deployments), no SharedArrayBuffer or Atomics (1,210) |
+| draft | 1,662 | stage-3 proposals, from test262's own list |
+| v8 | 455 | V8's own: failures V8's test262 status lists for d8 too (291), and joint iteration (`Iterator.zip`), which V8 15.2 ships only behind a flag (164) |
+| environment | about 490 | host hooks isolane doesn't give a guest: `$262.createRealm` (a second realm), `$262.evalScript`, `$262.IsHTMLDDA`; and, in development builds only, 8 runs whose huge ArrayBuffer lengths kill a worker without the V8 sandbox |
+| bug | 0 | |
+
+The applicable rate leaves out by-design and draft. Each run is a fresh
+isolate with `eval: true` (test262 evals throughout) and everything else at
+its default; `$262.detachArrayBuffer` is `ArrayBuffer.prototype.transfer`.
+Like the WPT run, it's a gate in CI (strict mode, the sandboxed worker): a
+run that newly fails or newly passes, an unlisted worker crash, or a stale or
+unclassified entry fails it.
+
+```sh
+node test/test262/run.mjs            # clone test262 at the pinned commit, run, gate
+node test/test262/run.mjs --update   # rewrite the expectations, keeping reasons
+```
+
+`--filter <substr>` runs some tests, `--report` and `--summary` write JSON
+and Markdown, and `ISOLANE_TEST262_DIR` sets where the checkout is cached.
+It takes about 15 s on 8 cores.
+
 ## Host functions
 
 A bare function is async in the guest, with unchecked arguments, and gets

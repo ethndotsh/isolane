@@ -32,7 +32,7 @@ Agreed October 2026:
    - ~~`connect()` as the Sockets API~~ done: see section 2, and the Postgres test authenticates with SCRAM-SHA-256 (postgres.js on `crypto.subtle`);
    - the web snapshot built into the binary and a pool of pre-created web isolates, so `web` can default to on;
    - fair CPU accounting for timers;
-   - test262;
+   - test262 (done: a CI gate, section 3);
    - delete the old prelude.
 3. **Errors and stack traces** (section 4).
 4. **Research deployments before building them.** The pieces are wanted:
@@ -289,7 +289,8 @@ in `patches/deno-*.patch`, applied by `scripts/vendor-deno.sh`.
 | — | Structured clone: keep a resizable `ArrayBuffer`'s `maxByteLength`, refuse out-of-bounds views (the global is now 13_message_port.js's, straight to V8's serializer), non-transferable platform objects in a transfer list are DataCloneErrors. Fixed WPT bug `structured-clone-edge` | done |
 | — | Blob from a detached buffer is empty (patches/deno-blob-detached-buffers.patch) | done |
 | — | A port never closed keeps its queue until the isolate ends (no GC of ports): free entangled pairs when both MessagePort objects are collected | idea |
-| — | test262 run (catch regressions from removed globals and flags) | planned |
+| — | test262 gate (`test/test262/run.mjs`, CI and the weekly soak): `built-ins`, `language`, `annexB`, `intl402` at the test262 commit V8's DEPS pins (so V8's test262.status applies), non-strict and strict, a fresh isolate per run with `eval: true`. At its introduction (dev build): 80,419 of 100,405 runs pass, **98.8% of the 81,363 that apply**; expected: by-design 17,380 (Temporal, modules, shared memory), draft 1,662 (stage-3 proposals), v8 455 (V8's own known failures, joint iteration behind a flag), environment 489, bug 0. isolane's own changes (removed globals, flags, frozen clock) broke nothing. The run found: `$262.detachArrayBuffer` on an already detached buffer must not throw (fixed in the harness), and development builds (no V8 sandbox) lose the worker on a multi-PiB `new ArrayBuffer` (dev-only skip; the sandbox refuses the length first) | done |
+| — | test262, next: run module tests once ES modules land (`no-modules`, 2,792 runs, plus `import()`); Temporal's 13,378 once it's audited and on; `$262.createRealm` (375) and `$262.evalScript` (36) if isolane ever gets a host hook for a second context or a second Script; move `TEST262_COMMIT` with each V8 bump (the runner warns when V8's DEPS disagrees) | planned |
 | — | List isolane on unjs/runtime-compat | idea |
 | — | Node compatibility layer | later (see "Later milestone: npm and Node compatibility") |
 
