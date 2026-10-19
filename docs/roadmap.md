@@ -101,10 +101,9 @@ Agreed October 2026:
 | UDP sockets | idea |
 | KV / cache / queue capabilities as policies (Workers-style bindings) | idea |
 | Cloudflare Workers parity, beyond WinterTC (ignoring Node compat and npm). Done: the isolate-per-request model, frozen time, limits, policy-checked `fetch`. Coming with deployments: `export default { fetch, scheduled, queue }` handlers, `ctx.waitUntil`/`passThroughOnException`, Workers-shaped `env` bindings | planned (with deployments) |
-| `WebSocket` client (through the broker, under the `fetch`/`connect` policy) and `WebSocketPair` for handlers that accept WebSockets | planned |
-| Small Workers extras: `crypto.DigestStream`, `crypto.subtle.timingSafeEqual`, `scheduler.wait`, `navigator.hardwareConcurrency` | planned (after `crypto.subtle`) |
+| `WebSocket` client (through the broker, under the `fetch`/`connect` policy) | planned |
 | Durable Objects-style stateful actors (see celld) | idea |
-| Not planned: the Cache API and `HTMLRewriter`. They're Cloudflare-specific, not WinterTC, and an application can provide either through host functions | decided |
+| Not planned: `WebSocketPair`, `crypto.DigestStream`, `crypto.subtle.timingSafeEqual`, `scheduler.wait` (Workers-only, for porting Workers as-is). Also not planned: the Cache API and `HTMLRewriter`. They're Cloudflare-specific, not WinterTC, and an application can provide either through host functions | decided |
 
 ## 3. WinterTC compatibility
 
