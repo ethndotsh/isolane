@@ -357,7 +357,10 @@ test('bytes cross host calls as bytes, both ways', async () => {
 test('oversized results and error messages fail the eval, not the worker', async () => {
   const events = [];
   const rt = new Runtime({ strict: process.env.ISOLANE_STRICT === '1', onSecurityEvent: (e) => events.push(e) });
-  await assert.rejects(rt.run('"x".repeat(70 << 20)', T), code('ERR_NOT_SERIALIZABLE'));
+  // The resultBytes limit (16 MiB by default) catches it first...
+  await assert.rejects(rt.run('"x".repeat(70 << 20)', T), (e) => e.code === 'ERR_RESOURCE_LIMIT' && e.limit === 'resultBytes');
+  // ...and past it, the 64 MiB frame cap still fails the eval, not the worker.
+  await assert.rejects(rt.run('"x".repeat(70 << 20)', { ...T, limits: { resultBytes: 128 << 20 } }), code('ERR_NOT_SERIALIZABLE'));
   const err = await rt.run('throw new Error("y".repeat(70 << 20))', T).catch((e) => e);
   assert.equal(err.code, 'ERR_GUEST_EXCEPTION');
   assert.ok(err.guest.message.length < 70 << 10);
