@@ -75,11 +75,13 @@ function message() {
   if (rand() < 0.7) m.ok = rand() < 0.8 ? rand() < 0.5 : weird();
   // `value` is JSON text (or absent); sometimes not valid JSON.
   if (rand() < 0.6) m.value = rand() < 0.7 ? values() : weird();
-  if (rand() < 0.4) m.code = pick(['ERR_TIMEOUT', 'ERR_GUEST_EXCEPTION', 'ERR_NOPE', weird()]);
+  if (rand() < 0.4) m.code = pick(['ERR_LIMIT', 'ERR_GUEST_EXCEPTION', 'ERR_SHIM', 'ERR_NOPE', weird()]);
+  if (rand() < 0.2) m.shim = pick([{ phase: 'after', index: 0 }, { phase: 'before', index: 7 }, { phase: 'constructor', index: 0 }, weird()]);
+  if (rand() < 0.2) m.limit = pick(['timeoutMs', 'heapBytes', 'nope', weird()]);
   if (rand() < 0.4) m.message = weird();
   if (t === 'hostCall') {
     m.call = rand() < 0.7 ? Math.floor(rand() * 5) : weird();
-    m.name = pick(['echo', 'missing', 'constructor', '__proto__', 'toString', weird()]);
+    m.fn = pick([0, 0, 1, -1, 1.5, '0', 2 ** 32, weird()]);
     m.args = rand() < 0.7 ? [weird(), 1] : weird();
   }
   if (rand() < 0.2) m[pick(['extra', '__proto__', 'constructor'])] = weird();
@@ -123,7 +125,7 @@ function binStep() {
   if (corrupt === 'non-null' && bin.length) args[bin[0][0]] = weird() ?? 1;
   const binField = corrupt === 'not-array' ? weird() : corrupt === 'empty-bin' ? [] : bin;
   const t = corrupt === 'other-type' ? pick(['result', 'log', 'usage', 'ready']) : 'hostCall';
-  const binmsg = { t, vm: '$vm', call: Math.floor(rand() * 5), name: 'echo', args, bin: binField, req: '$req', ok: true, value: 'null' };
+  const binmsg = { t, vm: '$vm', call: Math.floor(rand() * 5), fn: 0, args, bin: binField, req: '$req', ok: true, value: 'null' };
   const bytes = Buffer.from(Array.from({ length: total }, () => Math.floor(rand() * 256)));
   const step = { binmsg, tag: corrupt === 'bad-tag' ? pick([1, 2, 0x7a, 0xff]) : 0, bytes: bytes.toString('base64') };
   if (corrupt === 'json-overrun') step.jsonLen = 0xffffff;
@@ -132,7 +134,7 @@ function binStep() {
 
 function plan() {
   const ready = rand() < 0.9
-    ? { t: 'ready', v8: 'fake', sandboxSecure: true, lockdown: { landlock: 'full', seccomp: 'full' } }
+    ? { t: 'ready', protocol: rand() < 0.95 ? 2 : pick([1, 3, '2', weird()]), v8: 'fake', sandboxSecure: true, lockdown: { landlock: 'full', seccomp: 'full' } }
     : message();
   const steps = Array.from({ length: 1 + Math.floor(rand() * 4) }, () => {
     const r = rand();
@@ -151,8 +153,12 @@ for (let i = 0; i < iterations; i++) {
   const p = plan();
   if (process.env.FUZZ_TRACE) process.stderr.write(`case ${i} seed ${caseSeed} ${JSON.stringify(p)}\n`);
   const events = [];
-  const pool = new Runtime({ workerPath: fakeWorker(p, i), onSecurityEvent: (e) => events.push(e), idleTimeoutMs: 1000 });
-  const vm = pool.createIsolate({ tenant: 't', timeoutMs: 2000, hostFunctions: { echo: (x) => x } });
+  const pool = new Runtime({
+    workerPath: fakeWorker(p, i),
+    hooks: { onSecurityEvent: (e) => events.push(e) },
+    defaults: { limits: { idleMs: 1000 } },
+  });
+  const vm = pool.tenant('t').isolate({ limits: { timeoutMs: 2000 }, host: { echo: (x) => x } });
   let outcome;
   try {
     const v = await withTimeout(vm.eval('1'), 8000);
@@ -169,12 +175,12 @@ for (let i = 0; i < iterations; i++) {
       failures.push({ kind: 'non-IsolaneError rejection', seed: caseSeed, plan: p, error: String(e?.stack ?? e) });
     }
   }
-  if (events.some((e) => e.kind === 'protocol-violation')) {
-    const pid = pool._workerPid('t');
+  if (events.some((e) => e.kind === 'protocol')) {
+    const pid = pool.diagnostics.workerPid('t');
     if (pid !== undefined) failures.push({ kind: 'violating worker still registered', seed: caseSeed, plan: p });
   }
   outcomes[outcome] = (outcomes[outcome] ?? 0) + 1;
-  vm.dispose();
+  vm.close();
   pool.close();
 }
 } catch (e) {

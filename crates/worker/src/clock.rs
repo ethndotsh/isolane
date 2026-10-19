@@ -4,7 +4,7 @@
 //!   when a host function's reply arrives (Cloudflare Workers' rule). Guest
 //!   code can't time itself, which, with SharedArrayBuffer and Atomics gone,
 //!   leaves it no high-resolution timer for side channels.
-//! - Realtime: the real clock.
+//! - Real: the real clock.
 //! - Fixed: one instant, forever (reproducible runs).
 //! Each VM runs on its own thread, so the state is thread-local. Threads that
 //! never set a clock (V8's background threads) see real time.
@@ -19,13 +19,13 @@ use serde::Deserialize;
 pub enum Mode {
     #[default]
     Frozen,
-    Realtime,
+    Real,
     #[serde(rename_all = "camelCase")]
     Fixed { fixed_ms: f64 },
 }
 
 thread_local! {
-    static MODE: Cell<Mode> = const { Cell::new(Mode::Realtime) };
+    static MODE: Cell<Mode> = const { Cell::new(Mode::Real) };
     static NOW: Cell<Option<f64>> = const { Cell::new(None) };
     // The monotonic clock behind `performance` (web platform): when the VM
     // started, its wall-clock time then, and (frozen mode) the elapsed time
@@ -75,7 +75,7 @@ pub fn advance() {
 pub fn performance_now() -> Duration {
     match MODE.with(|m| m.get()) {
         Mode::Frozen => ELAPSED.with(|e| e.get()),
-        Mode::Realtime => START.with(|s| s.get()).map(|s| s.elapsed()).unwrap_or_default(),
+        Mode::Real => START.with(|s| s.get()).map(|s| s.elapsed()).unwrap_or_default(),
         Mode::Fixed { .. } => Duration::ZERO,
     }
 }

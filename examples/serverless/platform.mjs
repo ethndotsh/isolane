@@ -23,12 +23,13 @@ const PORT = Number(process.env.PORT ?? 8787);
 const HOST_CALL_TIMEOUT_MS = 5000;
 
 const runtime = new Runtime({
-  defaults: { timeoutMs: 2000, memoryLimitBytes: 64 << 20 },
-  workerMemoryLimitBytes: 512 << 20,
-  onSecurityEvent: (e) => console.warn(`[security] ${e.kind} in ${e.tenant}: ${e.detail ?? e.signal ?? ''}`),
+  // ISOLANE_STRICT=0 for a development worker on a host without full isolation.
+  strict: process.env.ISOLANE_STRICT !== '0',
+  defaults: { limits: { timeoutMs: 2000, heapBytes: 64 << 20, workerMemoryBytes: 512 << 20 } },
+  hooks: { onSecurityEvent: (e) => console.warn(`[security] ${e.kind} in ${e.tenant}: ${e.detail}`) },
 });
 
-/** app name → { code, hostFunctions, network, socket } */
+/** app name → { code, host, fetch, socket, log } */
 const apps = new Map();
 
 // ---- deployers ----
@@ -69,8 +70,8 @@ wss.on('connection', (socket) => {
       apps.set(m.app, {
         code: m.code,
         socket,
-        hostFunctions: Object.fromEntries(names.map((n) => [n, remote(n)])),
-        network: Array.isArray(m.network) ? { allow: m.network.filter((h) => typeof h === 'string') } : undefined,
+        host: Object.fromEntries(names.map((n) => [n, remote(n)])),
+        fetch: Array.isArray(m.network) ? { hosts: m.network.filter((h) => typeof h === 'string') } : undefined,
         log: (e) => send({ t: 'log', level: e.level, message: e.message }),
       });
       return send({ t: 'deployed', app: m.app, url: `http://localhost:${PORT}/${m.app}/` });
@@ -97,12 +98,20 @@ wss.on('connection', (socket) => {
 // ---- invocations ----
 
 // Guest code defines `async function handle(request)` and returns
-// `{ status?, headers?, body? }` (body: a string or any JSON value).
-const INVOKE = `(async () => {
-  const r = await handle(request);
-  if (r === null || typeof r !== 'object') return { status: 200, body: r };
-  return r;
-})()`;
+// `{ status?, headers?, body? }` (body: a string or any JSON value). The
+// platform's own code calls it: a shim, run after the app's code as its
+// own script (so the app's line numbers in errors are its own). A handler
+// that throws gets a 500, as on a real platform.
+const INVOKE = {
+  filename: 'platform:invoke.js',
+  code: `try {
+    const r = await handle(request);
+    return r !== null && typeof r === 'object' ? r : { status: 200, body: r };
+  } catch (e) {
+    console.error(\`handle threw: \${e?.stack ?? e}\`);
+    return { status: 500, body: { error: 'ERR_GUEST_EXCEPTION', message: String(e?.message ?? e) } };
+  }`,
+};
 
 const server = createServer(async (req, res) => {
   const url = new URL(req.url, `http://${req.headers.host}`);
@@ -126,11 +135,12 @@ const server = createServer(async (req, res) => {
 
   const started = performance.now();
   try {
-    const out = await runtime.tenant(appName).run(`${app.code}\n;${INVOKE}`, {
+    const out = await runtime.tenant(appName).run(app.code, {
       globals: { request },
-      hostFunctions: app.hostFunctions,
-      network: app.network,
-      onLog: app.log,
+      host: app.host,
+      fetch: app.fetch,
+      hooks: { onLog: app.log },
+      shims: { after: INVOKE },
     });
     const body = typeof out.body === 'string' ? out.body : JSON.stringify(out.body ?? null);
     res.writeHead(Number.isInteger(out.status) ? out.status : 200, {

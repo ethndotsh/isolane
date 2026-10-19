@@ -68,13 +68,12 @@ export async function validate<S extends StandardSchemaV1>(
   return result.issues ? { ok: false, issues: result.issues } : { ok: true, value: result.value as StandardSchemaV1.InferOutput<S> };
 }
 
-/** An eval's result, checked against `schema`: `ERR_INVALID_RESULT` if it doesn't match. */
-export async function checkResult(schema: StandardSchemaV1, value: unknown, tenant: string): Promise<unknown> {
+/** An eval's result, checked against `schema`: `ERR_INVALID_RETURN` if it doesn't match. */
+export async function checkReturn(schema: StandardSchemaV1, value: unknown, tenant: string): Promise<unknown> {
   const r = await validate(schema, value);
   if (r.ok) return r.value;
-  const err = new IsolaneError('ERR_INVALID_RESULT', `isolane: the result doesn't match its schema: ${describeIssues(r.issues)}`, {
+  throw new IsolaneError('ERR_INVALID_RETURN', `isolane: the result doesn't match its schema: ${describeIssues(r.issues)}`, {
     tenant,
+    issues: r.issues,
   });
-  (err as { issues?: unknown }).issues = r.issues;
-  throw err;
 }

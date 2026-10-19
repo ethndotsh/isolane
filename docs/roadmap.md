@@ -201,7 +201,7 @@ randomUUID 100%. Remaining failures, by cause:
 | `using` on runtime and isolates | done |
 | Error taxonomy: one `IsolaneError` with `code`, `kind` (guest / limit / usage / infrastructure), `retryable`, `tenant`, and `guest` (name, message, stack); spec-shaped errors inside the guest (every fetch failure a `TypeError`; fs errors with Node-style `code`; host-function errors keep their class and `code`) | done |
 | Codes: `ERR_ISOLATE_RETIRED`, `ERR_ISOLATE_DISPOSED`, `ERR_WORKER_UNRESPONSIVE`, `ERR_ISOLATION_UNAVAILABLE`, `ERR_INVALID_OPTION`, `ERR_RUNTIME_CLOSED` added. Policy denials and host-function failures surface inside the guest (as above), not as host-side codes | done |
-| `onPolicyDenied` event (audit log of refused fetch/connect/fs calls per tenant) | idea |
+| `onPolicyDenial` event (audit log of refused fetch/connect/fs calls per tenant) | done (API v2 hooks) |
 | Resolve the worker binary automatically (per-platform optional package) instead of `ISOLANE_WORKER` | planned (with packaging) |
 | Standard Schema (Zod, Valibot, ArkType, ...) for host functions (`hostFunction({ args, result, fn })`: guest arguments validated before `fn` runs, results validated before they reach the guest, parameter types inferred) and for eval results (`run`/`eval` `{ result }`, typed; `ERR_INVALID_RESULT`) | done |
 | Standard Schema everywhere else a user defines a shape: deployment entrypoint inputs/outputs and `env`, `globals`, host-function errors, `sockets`/`fetch` message bodies where useful; generate guest-side `.d.ts` from host-function schemas (via JSON Schema) so guest code type-checks against its host API | planned |
@@ -247,18 +247,25 @@ Deliberately late, so it can be done properly once the core is settled.
 
 ### API v2 (from `docs/api-review.md`)
 
+Landed in October 2026; the review's "Status" section lists the
+differences.
+
 | Item | Status |
 |---|---|
-| One layered config (`defaults` → `tenants(name)` → call), grouped by meaning, no shorthands | planned |
-| Uniform naming (units as suffixes, capabilities named for guest APIs, one word per idea; full rename table in the review) | planned |
-| Host functions: one definition form (`hostFunction({ args, returns, handler, sync })`), namespaces, a call context (`tenant`, isolate, `signal`, `log`) | planned |
-| One hook system: `before*`/`after*` interceptors and `on*` events at every level, plus `runtime.on()`; host calls, evals, logs, limits, policy denials, security events, worker lifecycle | planned |
-| `Tenant` handle owns tenant operations (`usage`, `resetUsage`, `release`, `isolate()`); `close()` everywhere | planned |
-| One `ERR_LIMIT` code with `err.limit` for every limit | planned |
-| Split `index.ts` (config, host, worker pool, runtime) and `vm.rs` (watchdog, mailbox, host calls, console, eval); one per-isolate state record; one config-resolution pipeline | planned |
-| Protocol: version field checked at `ready`; `create` grouped like the public config | planned |
+| One layered config (`defaults` → `tenants(name)` → call), grouped by meaning, no shorthands; `ERR_INVALID_CONFIG` names the field (and the new name for an old one) | done |
+| Uniform naming (units as suffixes, capabilities named for guest APIs, one word per idea; full rename table in the review) | done |
+| Host functions: one definition form (`hostFunction({ args, returns, handler, sync })`), namespaces (frozen in the guest), a call context (`tenant`, `isolate`, `signal`, `log`) | done |
+| One hook system: `before*`/`after*` interceptors and `on*` events at every level, plus `runtime.on()`; host calls, evals, logs, limits, policy denials, security events, worker lifecycle | done |
+| `onWorker` `recycle` events (once workers are recycled) | planned |
+| Hooks over the brokers (`fetch`/`connect`/`fs` as host calls under `beforeHostCall`), beyond `onPolicyDenial` | idea |
+| `Tenant` handle owns tenant operations (`run`, `isolate()`, `usage`, `resetUsage`, `release`, `stop`); `close()` everywhere; internals behind `runtime.diagnostics` | done |
+| One `ERR_LIMIT` code with `err.limit` for every limit | done |
+| Split `index.ts` (config, host, hooks, worker pool, runtime) and `vm.rs` (watchdog, mailbox, host calls, console, context, eval); one per-isolate state record; one config-resolution pipeline | done |
+| Protocol: version field checked at `ready`; `create` grouped like the public config; host calls name functions by index | done |
+| `web: { baseUrl }`: relative URLs in `fetch` and `new Request` resolve against it, and a read-only `location` exists (Deno's `getLocationHref`). WPT runs with each test's URL as the base (96.4%, from 95.9%) | done |
+| `shims`: the embedder's JS in the isolate, `setup` once and `before`/`after` each eval, each its own script (exact guest line numbers), compiled by isolane (works with `eval` off), layered like the config, `ERR_SHIM` for their failures; the serverless example invokes `handle()` with one | done |
 | Delete the minimal fetch/base64/UTF-8 prelude once the web platform is always on | planned |
-| Split the end-to-end tests by area | planned |
+| Split the end-to-end tests by area | done |
 
 ## 5. Performance
 

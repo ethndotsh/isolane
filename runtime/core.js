@@ -366,9 +366,10 @@
       markNotSerializable: native.markNotSerializable,
       MessagePortPrototype: ObjectFreeze(ObjectCreate(null)),
     }),
-    // No document location: relative URLs in Request/Response.redirect throw,
-    // as in a worker without a base URL.
-    "ext:deno_web/12_location.js": ObjectFreeze({ getLocationHref: () => undefined }),
+    // The location is the isolate's base URL (`web.baseUrl`), if it has one:
+    // relative URLs in Request/Response.redirect resolve against it, and
+    // throw without one, as in a worker without a base URL.
+    "ext:deno_web/12_location.js": ObjectFreeze({ getLocationHref: () => native.baseUrl }),
     // Deno.HttpClient doesn't exist here, so no RequestInit.client is valid.
     "ext:deno_fetch/22_http_client.js": ObjectFreeze({ HttpClientPrototype: ObjectFreeze(ObjectCreate(null)) }),
   };
@@ -399,6 +400,7 @@
     ops,
     loadExtScript,
     build: ObjectFreeze({ __proto__: null, os: "isolane", arch: "", target: "" }),
+    baseUrl: native.baseUrl,
     isAnyArrayBuffer: native.isAnyArrayBuffer,
     isArrayBuffer: native.isArrayBuffer,
     isArrayBufferView: native.isArrayBufferView,

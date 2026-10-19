@@ -19,10 +19,9 @@ use std::io::BufReader;
 use std::process::ExitCode;
 use std::sync::mpsc::{self, Sender};
 use std::sync::Arc;
-use std::time::Duration;
 
 use frame::{read_frame, Writer};
-use proto::{fail, ErrorCode, In, Out};
+use proto::{fail, limit, ErrorCode, In, Out};
 use vm::{VmConfig, VmMsg};
 
 unsafe extern "C" {
@@ -207,6 +206,7 @@ fn serve(lock_down: bool, memory_limit: Option<u64>) -> ExitCode {
 
     let out = Arc::new(Writer::new(std::io::stdout()));
     out.send(&Out::Ready {
+        protocol: proto::PROTOCOL_VERSION,
         v8: v8::V8::get_version(),
         sandbox_secure: sandbox_secure(),
         lockdown: lockdown::Report { landlock, seccomp },
@@ -244,36 +244,9 @@ fn serve(lock_down: bool, memory_limit: Option<u64>) -> ExitCode {
             return ExitCode::from(4);
         }
         match msg {
-            In::Create {
-                vm,
-                heap_bytes,
-                timeout_ms,
-                cpu_time_limit_ms,
-                host_functions,
-                sync_host_functions,
-                clock,
-                random_seed,
-                allow_code_generation,
-                allow_web_assembly,
-                web_platform,
-                limits,
-                prelude,
-            } => {
+            In::Create { vm, limits, time, random, eval, wasm, web, base_url, functions, prelude, shims } => {
                 let (tx, rx) = mpsc::channel();
-                let config = VmConfig {
-                    heap_bytes,
-                    timeout: timeout_ms.map(Duration::from_millis),
-                    cpu_limit: cpu_time_limit_ms.map(Duration::from_millis),
-                    host_functions,
-                    sync_host_functions,
-                    clock,
-                    random_seed,
-                    allow_code_generation,
-                    allow_web_assembly,
-                    web_platform,
-                    limits,
-                    prelude,
-                };
+                let config = VmConfig { limits, time, seed: random.seed, eval, wasm, web, base_url, functions, prelude, shims };
                 match vm::spawn(vm, config, rx, out.clone()) {
                     Ok(()) => {
                         vms.insert(vm, tx);
@@ -281,20 +254,31 @@ fn serve(lock_down: bool, memory_limit: Option<u64>) -> ExitCode {
                     // Out of threads or memory: this VM's evals fail, the
                     // worker carries on.
                     Err(e) => {
-                        failed.insert(vm, format!("vm could not start: {e}"));
+                        failed.insert(vm, format!("the isolate could not start: {e}"));
                     }
                 }
             }
             In::Eval { vm, req, code, last } => {
+                let refuse = |f: proto::Failure| {
+                    out.send(&Out::Result {
+                        req,
+                        ok: false,
+                        value: None,
+                        code: Some(f.code),
+                        message: Some(&f.message),
+                        guest: None,
+                        limit: f.limit,
+                        shim: None,
+                        usage: Default::default(),
+                    })
+                };
                 if let Some(cause) = failed.get(&vm) {
-                    let f = fail(ErrorCode::MemoryLimit, cause.clone());
-                    out.send(&Out::Result { req, ok: false, value: None, code: Some(f.code), message: Some(&f.message), guest: None, usage: Default::default() });
+                    refuse(limit("workerMemoryBytes", cause.clone()));
                     continue;
                 }
                 let sent = vms.get(&vm).map(|tx| tx.send(VmMsg::Eval { req, code, last }).is_ok());
                 if sent != Some(true) {
-                    let f = fail(ErrorCode::IsolateDisposed, "vm has been disposed");
-                    out.send(&Out::Result { req, ok: false, value: None, code: Some(f.code), message: Some(&f.message), guest: None, usage: Default::default() });
+                    refuse(fail(ErrorCode::IsolateClosed, "the isolate has been closed"));
                 }
             }
             In::HostReply { vm, call, ok, value, error, error_name, error_code, bin } => {

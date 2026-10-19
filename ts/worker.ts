@@ -9,6 +9,9 @@ import type { Readable, Writable } from 'node:stream';
 import type { PathSegment } from './binary.js';
 import type { GuestErrorInfo } from './errors.js';
 
+/** The protocol version this library speaks; a worker reporting another is refused. */
+export const PROTOCOL_VERSION = 2;
+
 /** Largest frame accepted from a worker (matches the worker's own cap). */
 export const MAX_FRAME = 64 << 20;
 
@@ -34,11 +37,11 @@ export interface IsolationInfo {
 }
 
 export type WorkerMessage =
-  | ({ t: 'ready' } & IsolationInfo)
+  | ({ t: 'ready'; protocol: number } & IsolationInfo)
   | ({ t: 'result'; req: number; ok: true; value: unknown } & WorkerUsage)
-  | ({ t: 'result'; req: number; ok: false; code: string; message: string; guest?: GuestErrorInfo } & WorkerUsage)
+  | ({ t: 'result'; req: number; ok: false; code: string; message: string; guest?: GuestErrorInfo; limit?: string; shim?: { phase: 'setup' | 'before' | 'after'; index: number } } & WorkerUsage)
   | ({ t: 'usage'; vm: number } & WorkerUsage)
-  | { t: 'hostCall'; vm: number; call: number; name: string; args: unknown[] }
+  | { t: 'hostCall'; vm: number; call: number; fn: number; args: unknown[] }
   | { t: 'log'; vm: number; level: LogLevel; message: string };
 
 /** What an eval or continuation cost, as the worker reports it. */
@@ -65,6 +68,16 @@ export const OOM_EXIT_CODE = 6;
 const isUint = (v: unknown): v is number => typeof v === 'number' && Number.isSafeInteger(v) && v >= 0;
 
 const optString = (v: unknown) => (typeof v === 'string' ? v : undefined);
+
+const SHIM_PHASES = new Set(['setup', 'before', 'after']);
+
+function parseShimRef(raw: unknown): { phase: 'setup' | 'before' | 'after'; index: number } | undefined {
+  if (raw === null || typeof raw !== 'object') return undefined;
+  const r = raw as Record<string, unknown>;
+  return typeof r.phase === 'string' && SHIM_PHASES.has(r.phase) && isUint(r.index)
+    ? { phase: r.phase as 'setup' | 'before' | 'after', index: r.index }
+    : undefined;
+}
 
 function parseGuestError(raw: unknown): GuestErrorInfo | undefined {
   if (raw === null || typeof raw !== 'object') return undefined;
@@ -112,26 +125,47 @@ export function parseWorkerMessage(raw: unknown, bytes?: Buffer): WorkerMessage 
     case 'ready': {
       const l = m.lockdown as Record<string, unknown> | null;
       const level = (v: unknown): v is LockdownLevel => v === 'full' || v === 'partial' || v === 'none';
-      return typeof m.v8 === 'string' &&
+      // Workers before protocol 2 didn't say: treat that as 1 (so they're
+      // refused as incompatible, not as hostile).
+      const protocol = m.protocol === undefined ? 1 : m.protocol;
+      return isUint(protocol) &&
+        typeof m.v8 === 'string' &&
         typeof m.sandboxSecure === 'boolean' &&
         l !== null &&
         typeof l === 'object' &&
         level(l.landlock) &&
         level(l.seccomp)
-        ? { t: 'ready', v8: m.v8, sandboxSecure: m.sandboxSecure, lockdown: { landlock: l.landlock, seccomp: l.seccomp } }
+        ? {
+            t: 'ready',
+            protocol,
+            v8: m.v8,
+            sandboxSecure: m.sandboxSecure,
+            lockdown: { landlock: l.landlock, seccomp: l.seccomp },
+          }
         : null;
     }
     case 'result':
       if (!isUint(m.req) || typeof m.ok !== 'boolean') return null;
       if (m.ok) return { t: 'result', req: m.req, ok: true, value: m.value ?? null, ...parseUsage(m) };
       if (typeof m.code !== 'string' || typeof m.message !== 'string') return null;
-      return { t: 'result', req: m.req, ok: false, code: m.code, message: m.message, guest: parseGuestError(m.guest), ...parseUsage(m) };
+      if (m.limit !== undefined && typeof m.limit !== 'string') return null;
+      return {
+        t: 'result',
+        req: m.req,
+        ok: false,
+        code: m.code,
+        message: m.message,
+        guest: parseGuestError(m.guest),
+        limit: m.limit as string | undefined,
+        shim: parseShimRef(m.shim),
+        ...parseUsage(m),
+      };
     case 'usage':
       return isUint(m.vm) ? { t: 'usage', vm: m.vm, ...parseUsage(m) } : null;
     case 'hostCall': {
-      if (!(isUint(m.vm) && isUint(m.call) && typeof m.name === 'string' && Array.isArray(m.args))) return null;
+      if (!(isUint(m.vm) && isUint(m.call) && isUint(m.fn) && Array.isArray(m.args))) return null;
       const args = bytes === undefined ? m.args : attachArgs(m.args, m.bin, bytes);
-      return args ? { t: 'hostCall', vm: m.vm, call: m.call, name: m.name, args } : null;
+      return args ? { t: 'hostCall', vm: m.vm, call: m.call, fn: m.fn, args } : null;
     }
     case 'log':
       return isUint(m.vm) && typeof m.level === 'string' && LOG_LEVELS.has(m.level) && typeof m.message === 'string'
@@ -146,7 +180,7 @@ export interface WorkerExit {
   code: number | null;
   signal: NodeJS.Signals | null;
   /** Why the supervisor considers the worker gone. */
-  reason: 'exited' | 'protocol-violation' | 'insufficient-isolation' | 'ready-timeout' | 'unresponsive' | 'killed';
+  reason: 'exited' | 'protocol-violation' | 'incompatible' | 'insufficient-isolation' | 'ready-timeout' | 'unresponsive' | 'killed';
   detail?: string;
 }
 
@@ -267,11 +301,17 @@ export class WorkerProcess {
         }
         if (!msg) return this.#fail('protocol-violation', 'malformed message');
         if (msg.t === 'ready') {
+          if (!isReady && msg.protocol !== PROTOCOL_VERSION) {
+            return this.#fail(
+              'incompatible',
+              `the worker speaks protocol ${msg.protocol}, this library ${PROTOCOL_VERSION}: install a matching isolane-worker (${workerPath})`,
+            );
+          }
           // ISOLANE_DEV_INSECURE=1 admits a dev build of the worker (no V8
           // sandbox), outside strict mode only, for local development.
           const devInsecure = !strict && process.env.ISOLANE_DEV_INSECURE === '1';
           if (isReady || (!msg.sandboxSecure && !devInsecure)) return this.#fail('protocol-violation', 'unexpected ready');
-          const { t: _, ...info } = msg;
+          const { t: _, protocol: __, ...info } = msg;
           if (strict && !meetsStrict(info)) {
             return this.#fail(
               'insufficient-isolation',
@@ -332,7 +372,7 @@ export class WorkerProcess {
     return json + attached + (attached > 0 ? BINARY_HEADER : 0) <= MAX_FRAME;
   }
 
-  kill(reason: 'killed' | 'unresponsive' = 'killed', detail = 'killed by supervisor'): void {
+  kill(reason: 'killed' | 'unresponsive' = 'killed', detail = 'stopped by the supervisor'): void {
     this.#fail(reason, detail);
   }
 }

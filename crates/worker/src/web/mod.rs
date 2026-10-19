@@ -401,7 +401,7 @@ fn call<'s>(
 
 /// Install the web platform globals in the current context, before any
 /// guest code runs.
-pub fn install(scope: &mut v8::PinScope, global: v8::Local<v8::Object>) -> Result<(), String> {
+pub fn install(scope: &mut v8::PinScope, global: v8::Local<v8::Object>, base_url: Option<&str>) -> Result<(), String> {
     v8::tc_scope!(let tc, scope);
     let failed = |tc: &mut v8::PinnedRef<v8::TryCatch<v8::HandleScope>>, step: &str| {
         let msg = tc.exception().map(|e| e.to_rust_string_lossy(tc)).unwrap_or_else(|| "unknown error".into());
@@ -426,7 +426,14 @@ pub fn install(scope: &mut v8::PinScope, global: v8::Local<v8::Object>) -> Resul
         return Err("web platform setup failed: no primordials".into());
     };
 
-    let native = native_object(tc).into();
+    let native = native_object(tc);
+    if let Some(url) = base_url {
+        // The supervisor checked it's an absolute http(s) URL.
+        let key = v8::String::new(tc, "baseUrl").unwrap();
+        let value = v8::String::new(tc, url).unwrap();
+        native.set(tc, key.into(), value.into());
+    }
+    let native = native.into();
     let ops = ops_object(tc).into();
     let Some(core) = run_script(tc, "isolane:core.js", CORE) else {
         return Err(failed(tc, "core.js"));

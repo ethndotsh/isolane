@@ -21,6 +21,9 @@ node deployer.mjs                                          # terminal 2
 curl 'http://localhost:8787/hello/?id=1'                   # terminal 3
 ```
 
+With a development worker on a host without full isolation (macOS, say),
+start the platform with `ISOLANE_STRICT=0 ISOLANE_DEV_INSECURE=1`.
+
 This is a demo, not a product: deployers aren't authenticated, apps live only
 as long as their deployer's connection, and a request's guest code is
 re-compiled every time (a real platform would keep warm isolates).
