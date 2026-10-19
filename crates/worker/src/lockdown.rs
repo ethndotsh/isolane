@@ -73,6 +73,8 @@ mod linux {
         libc::SYS_futex,
         libc::SYS_sched_yield,
         libc::SYS_sched_getaffinity,
+        libc::SYS_sched_getparam,
+        libc::SYS_sched_getscheduler,
         libc::SYS_clock_gettime,
         libc::SYS_clock_nanosleep,
         libc::SYS_nanosleep,

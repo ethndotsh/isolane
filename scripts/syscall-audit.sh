@@ -20,6 +20,7 @@ python3 - "$out" <<'PY'
 import collections, glob, os, re, sys
 root = sys.argv[1]
 counts = collections.Counter()
+detail = collections.Counter()
 line_re = re.compile(r'^(\d\d:\d\d:\d\d\.\d+) (?:<\.\.\. )?([a-z0-9_]+)[( ]')
 for proc in glob.glob(os.path.join(root, '*/')):
     events = []
@@ -33,9 +34,16 @@ for proc in glob.glob(os.path.join(root, '*/')):
     ready = next((i for i, (_, name, line) in enumerate(events) if name == 'write' and line.split(' ', 1)[1].startswith('write(1,')), None)
     if ready is None:
         continue
-    for _, name, _ in events[ready + 1:]:
+    for _, name, line in events[ready + 1:]:
         if name not in ('exited', 'killed', 'resumed'):
             counts[name] += 1
+        if name in ('openat', 'open', 'ioctl', 'fstat', 'newfstatat', 'statx'):
+            call = line.split(' ', 1)[1].strip()
+            detail[re.sub(r'0x[0-9a-f]+', '0x…', call.split(') = ')[0])[:120]] += 1
 for name, n in sorted(counts.items(), key=lambda kv: -kv[1]):
     print(f'{n:9d} {name}')
+print()
+print('file and ioctl calls after ready:')
+for call, n in detail.most_common(30):
+    print(f'{n:9d} {call}')
 PY
