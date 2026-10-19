@@ -53,7 +53,7 @@ impl Default for Limits {
 /// The longest budget a deadline is computed from (about 24.8 days, the
 /// supervisor's maximum): Instant + Duration panics on overflow, which
 /// would abort the worker.
-const MAX_BUDGET_MS: u64 = (1 << 31) - 1;
+pub const MAX_BUDGET_MS: u64 = (1 << 31) - 1;
 
 impl Limits {
     pub fn timeout(&self) -> Option<Duration> {

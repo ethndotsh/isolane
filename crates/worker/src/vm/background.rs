@@ -49,7 +49,7 @@ pub(super) struct Batch {
 
 impl Background {
     pub(super) fn new(budget_ms: Option<u64>, clock: Option<CpuClock>) -> Background {
-        let budget = budget_ms.map(Duration::from_millis);
+        let budget = budget_ms.map(|ms| Duration::from_millis(ms.min(crate::limits::MAX_BUDGET_MS)));
         let now = Instant::now();
         Background { budget, left: budget.unwrap_or_default(), refilled: now, clock, unreported: None, reported: now }
     }

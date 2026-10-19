@@ -194,6 +194,7 @@ test('limits out of the range the worker can hold are config errors, not worker 
     { heapBytes: 2 ** 50 },
     { timeoutMs: 2 ** 53 - 1 },
     { cpuMs: 2 ** 53 - 1 },
+    { backgroundMs: 2 ** 31 },
     { decompressedBytes: 1.5 },
   ]) {
     assert.equal(await code(limits), 'ERR_INVALID_CONFIG', JSON.stringify(limits));

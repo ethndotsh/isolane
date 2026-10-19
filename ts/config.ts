@@ -104,6 +104,7 @@ const MAXIMUM: Record<string, number> = {
   timers: 2 ** 32 - 1,
   timeoutMs: 2 ** 31 - 1,
   cpuMs: 2 ** 31 - 1,
+  backgroundMs: 2 ** 31 - 1,
   idleMs: 2 ** 31 - 1,
   heapBytes: 4 * 1024 ** 3,
 };

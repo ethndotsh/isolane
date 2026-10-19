@@ -311,10 +311,14 @@ export class TenantWorker {
         const start = Math.max(Date.now(), state.busyUntil);
         state.busyUntil = start + timeoutMs;
         const limit = start - Date.now() + unresponsiveAfterMs(timeoutMs);
-        pending.timer = setTimeout(
-          () => this.#proc.kill('unresponsive', `no reply to an eval ${limit}ms after it was sent (limits.timeoutMs ${timeoutMs})`),
-          limit,
-        );
+        // setTimeout takes at most 2^31 - 1 ms (a longer one fires at once);
+        // a deadline past that (over 24 days) is no deadline.
+        if (limit <= 2 ** 31 - 1) {
+          pending.timer = setTimeout(
+            () => this.#proc.kill('unresponsive', `no reply to an eval ${limit}ms after it was sent (limits.timeoutMs ${timeoutMs})`),
+            limit,
+          );
+        }
       }
       this.#requests.set(req, pending);
       this.#touch();

@@ -394,7 +394,7 @@ doesn't slow the tenant's other isolates beyond sharing the CPU.
 
 Isolate limits can be set at every level; tenant limits at the runtime and
 in `tenants(name)`; `tenants` on the runtime only. Each is an integer of at
-least 1, and durations (`timeoutMs`, `cpuMs`, `idleMs`, and the policies'
+least 1, and durations (`timeoutMs`, `cpuMs`, `backgroundMs`, `idleMs`, and the policies'
 `*Ms` limits) are at most 2^31 - 1 ms, `timers` at most 2^32 - 1, and
 `heapBytes` at most 4 GiB (V8's largest heap); anything else is
 `ERR_INVALID_CONFIG`. Hitting any limit fails
