@@ -46,7 +46,7 @@ safety posture, installable with `npm install`:
 | Quarantine tenants after security events (`quarantineMs`, default 60 s; `releaseQuarantine`) | done | |
 | Tenant trust levels (group or isolate by plan) | planned | |
 | CPU-time budgets per eval (`cpuTimeLimitMs`, `ERR_CPU_LIMIT`; VM thread's CPU clock, Linux) | done | |
-| Per-tenant CPU accounting (cumulative, for billing and fairness) | planned | |
+| Per-tenant usage (`runtime.usage(tenant)`: evals, failures, CPU ms, host calls, log bytes, peak memory, security events; `resetUsage`) | done | CPU on Linux only |
 | rlimits: CORE=0 (no tenant data in core dumps), FSIZE=0 | done | NPROC is per user (would cap other workers' threads); seccomp already forbids process creation |
 | Opportunistic cgroups v2 and namespaces | planned | |
 | macOS: Seatbelt profile (sandbox_init) | planned | |
@@ -158,7 +158,8 @@ Measured against isolated-vm (Linux x64 under Rosetta; re-measure natively):
 | Stress soak: VM floods, tenant floods, crash churn, VM/eval leaks, noisy neighbours, memory bombs | done (weekly; first results pending) |
 | Per-tenant VM cap (and graceful refusal) | planned (sized from soak results) |
 | Worker recycling: max lifetime / max requests | planned |
-| Metrics hooks (per tenant: evals, CPU, memory, host calls, security events) | planned |
+| Metrics: per-tenant totals via `runtime.usage()` | done |
+| Metrics hooks: per-eval callback / OpenTelemetry export | planned |
 
 ## 7. Packaging and platforms (P4)
 

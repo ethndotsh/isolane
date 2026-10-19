@@ -15,7 +15,7 @@ use std::time::{Duration, Instant};
 use serde_json::value::RawValue;
 
 use crate::frame::Writer;
-use crate::proto::{fail, ErrorCode, Failure, GuestError, Out};
+use crate::proto::{fail, ErrorCode, Failure, GuestError, Out, Usage};
 
 pub type Output = Arc<Writer<Stdout>>;
 
@@ -732,18 +732,18 @@ fn eval(
 fn refuse_all(rx: &Receiver<VmMsg>, out: &Output, cause: String) {
     while let Ok(msg) = rx.recv() {
         match msg {
-            VmMsg::Eval { req, .. } => send_result(out, req, Err(fail(ErrorCode::MemoryLimit, cause.clone()))),
+            VmMsg::Eval { req, .. } => send_result(out, req, Err(fail(ErrorCode::MemoryLimit, cause.clone())), Usage::default()),
             VmMsg::HostReply { .. } => {}
             VmMsg::Dispose => return,
         }
     }
 }
 
-fn send_result(out: &Output, req: u64, result: Result<String, Failure>) {
+fn send_result(out: &Output, req: u64, result: Result<String, Failure>, usage: Usage) {
     match result {
         Ok(json) => {
             let value = RawValue::from_string(json).expect("V8 produced JSON");
-            out.send(&Out::Result { req, ok: true, value: Some(&value), code: None, message: None, guest: None });
+            out.send(&Out::Result { req, ok: true, value: Some(&value), code: None, message: None, guest: None, usage });
         }
         Err(f) => out.send(&Out::Result {
             req,
@@ -752,7 +752,18 @@ fn send_result(out: &Output, req: u64, result: Result<String, Failure>) {
             code: Some(f.code),
             message: Some(&f.message),
             guest: f.guest.as_ref(),
+            usage,
         }),
+    }
+}
+
+/// CPU since `start` (on `clock`) and the isolate's memory now.
+fn usage(isolate: &mut v8::Isolate, clock: Option<CpuClock>, start: Duration) -> Usage {
+    let heap = isolate.get_heap_statistics();
+    Usage {
+        cpu_us: clock.map(|c| c.now().saturating_sub(start).as_micros() as u64),
+        heap_bytes: Some(heap.used_heap_size() as u64),
+        external_bytes: Some(heap.external_memory() as u64),
     }
 }
 
@@ -768,6 +779,7 @@ fn vm_main(id: u64, config: VmConfig, rx: Receiver<VmMsg>, out: Output) {
     isolate.set_allow_wasm_code_generation_callback(if config.allow_web_assembly { allow_wasm } else { deny_wasm });
     isolate.set_oom_error_handler(out_of_memory);
 
+    let cpu_clock = CpuClock::current();
     let handle = isolate.thread_safe_handle();
     let watchdog = match Watchdog::start(handle.clone()) {
         Ok(w) => w,
@@ -806,9 +818,10 @@ fn vm_main(id: u64, config: VmConfig, rx: Receiver<VmMsg>, out: Output) {
             VmMsg::Dispose => break,
             VmMsg::Eval { req, code } => {
                 if let Some(cause) = &retired {
-                    send_result(&out, req, Err(fail(ErrorCode::IsolateRetired, cause.clone())));
+                    send_result(&out, req, Err(fail(ErrorCode::IsolateRetired, cause.clone())), Usage::default());
                     continue;
                 }
+                let cpu_start = cpu_clock.map(|c| c.now()).unwrap_or_default();
                 let deadline = watchdog.arm(config.timeout, config.cpu_limit);
                 bridge.deadline.set(deadline);
                 bridge.timed_out.set(false);
@@ -840,7 +853,8 @@ fn vm_main(id: u64, config: VmConfig, rx: Receiver<VmMsg>, out: Output) {
                 } else {
                     result
                 };
-                send_result(&out, req, result);
+                let spent = usage(&mut isolate, cpu_clock, cpu_start);
+                send_result(&out, req, result, spent);
             }
             VmMsg::HostReply { call, reply } => {
                 // A reply after its eval finished: the continuation it wakes
@@ -848,6 +862,7 @@ fn vm_main(id: u64, config: VmConfig, rx: Receiver<VmMsg>, out: Output) {
                 if retired.is_some() {
                     continue;
                 }
+                let cpu_start = cpu_clock.map(|c| c.now()).unwrap_or_default();
                 bridge.deadline.set(watchdog.arm(config.timeout, config.cpu_limit));
                 bridge.timed_out.set(false);
                 {
@@ -866,6 +881,8 @@ fn vm_main(id: u64, config: VmConfig, rx: Receiver<VmMsg>, out: Output) {
                 if oom.hit.load(Ordering::SeqCst) {
                     retired = Some("vm was terminated by an earlier continuation (heap limit); create a new one".into());
                 }
+                let spent = usage(&mut isolate, cpu_clock, cpu_start);
+                out.send(&Out::Usage { vm: id, usage: spent });
             }
         }
     }

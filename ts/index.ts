@@ -16,6 +16,7 @@ import {
   type WorkerExit,
   type WorkerHandlers,
   type WorkerMessage,
+  type WorkerUsage,
 } from './worker.js';
 
 export type { IsolationInfo, LockdownLevel, LogLevel } from './worker.js';
@@ -41,6 +42,34 @@ export interface SyncHostFunction {
   sync: true;
   fn: HostFunction;
 }
+
+/**
+ * What a tenant has used, cumulatively, since the runtime started (or its
+ * last `resetUsage`). Survives worker restarts. CPU time is measured on
+ * Linux only (0 elsewhere).
+ */
+export interface TenantUsage {
+  evals: number;
+  /** Evals that failed, for any reason. */
+  failures: number;
+  /** CPU time on the tenant's isolate threads, evals and continuations. */
+  cpuMs: number;
+  hostCalls: number;
+  logBytes: number;
+  /** The largest V8 heap (plus external memory) any of its isolates reported. */
+  peakMemoryBytes: number;
+  securityEvents: number;
+}
+
+const emptyUsage = (): TenantUsage => ({
+  evals: 0,
+  failures: 0,
+  cpuMs: 0,
+  hostCalls: 0,
+  logBytes: 0,
+  peakMemoryBytes: 0,
+  securityEvents: 0,
+});
 
 /** A line of guest console output. */
 export interface LogEntry {
@@ -304,6 +333,7 @@ class TenantWorker {
   #idleTimer: NodeJS.Timeout | undefined;
   #onGone: (exit: WorkerExit) => void;
   #idleTimeoutMs: number;
+  #usage: TenantUsage;
 
   constructor(
     tenant: string,
@@ -312,9 +342,11 @@ class TenantWorker {
     strict: boolean,
     memoryLimitBytes: number | undefined,
     onGone: (worker: TenantWorker, exit: WorkerExit) => void,
+    usage: TenantUsage,
     spare?: SpareWorker,
   ) {
     this.tenant = tenant;
+    this.#usage = usage;
     this.#idleTimeoutMs = idleTimeoutMs;
     this.#onGone = (exit) => onGone(this, exit);
     const handlers: WorkerHandlers = {
@@ -409,8 +441,21 @@ class TenantWorker {
     }
   }
 
+  #count(u: WorkerUsage): void {
+    if (u.cpuUs !== undefined) this.#usage.cpuMs += u.cpuUs / 1000;
+    const memory = (u.heapBytes ?? 0) + (u.externalBytes ?? 0);
+    if (memory > this.#usage.peakMemoryBytes) this.#usage.peakMemoryBytes = memory;
+  }
+
   #onMessage(msg: Exclude<WorkerMessage, { t: 'ready' }>): void {
+    if (msg.t === 'usage') {
+      this.#count(msg);
+      return;
+    }
     if (msg.t === 'result') {
+      this.#usage.evals++;
+      if (!msg.ok) this.#usage.failures++;
+      this.#count(msg);
       const pending = this.#requests.get(msg.req);
       if (!pending) return;
       this.#requests.delete(msg.req);
@@ -424,6 +469,7 @@ class TenantWorker {
       return;
     }
     if (msg.t === 'log') {
+      this.#usage.logBytes += msg.message.length;
       const log = this.#loggers.get(msg.vm);
       try {
         log?.({ tenant: this.tenant, level: msg.level, message: msg.message });
@@ -433,6 +479,7 @@ class TenantWorker {
       return;
     }
     // hostCall
+    this.#usage.hostCalls++;
     const reply = (ok: boolean, value?: string, err?: unknown) => {
       const frame: Record<string, unknown> = { t: 'hostReply', vm: msg.vm, call: msg.call, ok };
       if (value !== undefined) frame.value = value; // JSON text; absent = undefined
@@ -530,6 +577,7 @@ export class Runtime {
   #defaults: IsolateOptions | undefined;
   #quarantineMs: number | null;
   #quarantined = new Map<string, number>();
+  #usage = new Map<string, TenantUsage>();
   #prewarm: number;
   #spares: SpareWorker[] = [];
   #spareFailures = 0;
@@ -661,6 +709,22 @@ export class Runtime {
     this.close();
   }
 
+  /** What a tenant has used so far (a copy). */
+  usage(tenant: string): TenantUsage {
+    return { ...(this.#usage.get(tenant) ?? emptyUsage()) };
+  }
+
+  /** Start a tenant's usage from zero (e.g. at a billing period). */
+  resetUsage(tenant: string): void {
+    this.#usage.delete(tenant);
+  }
+
+  #usageOf(tenant: string): TenantUsage {
+    let u = this.#usage.get(tenant);
+    if (!u) this.#usage.set(tenant, (u = emptyUsage()));
+    return u;
+  }
+
   /** Lift a tenant's quarantine early. */
   releaseQuarantine(tenant: string): void {
     this.#quarantined.delete(tenant);
@@ -676,6 +740,7 @@ export class Runtime {
         // A clean exit only happens when stdin closes; anything else from a
         // worker that ran guest code is treated as a possible exploit.
         if (exit.reason === 'protocol-violation' || exit.reason === 'unresponsive' || exit.signal || exit.code !== 0) {
+          this.#usageOf(tenant).securityEvents++;
           const quarantinedUntil = this.#quarantineMs === null ? undefined : Date.now() + this.#quarantineMs;
           if (quarantinedUntil !== undefined) this.#quarantined.set(tenant, quarantinedUntil);
           this.#onSecurityEvent?.({
@@ -692,7 +757,7 @@ export class Runtime {
             detail: exit.detail,
           });
         }
-      }, this.#takeSpare());
+      }, this.#usageOf(tenant), this.#takeSpare());
       this.#workers.set(tenant, w);
     }
     return w;

@@ -462,6 +462,22 @@ test('prewarmed workers still give each tenant its own process', async () => {
   assert.throws(() => new Runtime({ prewarm: -1 }), code('ERR_INVALID_OPTION'));
 });
 
+test('usage is accounted per tenant', async () => {
+  const rt = new Runtime({ strict: process.env.ISOLANE_STRICT === '1' });
+  const tenant = rt.tenant('billed', { hostFunctions: { two: () => 2 } });
+  await tenant.run('let x = 0; for (let i = 0; i < 1e6; i++) x += i; two()');
+  await tenant.run('console.log("hello"); new Array(1e5).fill(1).length');
+  await tenant.run('throw new Error("x")').catch(() => {});
+  const u = rt.usage('billed');
+  assert.deepEqual([u.evals, u.failures, u.hostCalls, u.logBytes, u.securityEvents], [3, 1, 1, 5, 0]);
+  assert.ok(u.peakMemoryBytes > 100_000, `peak ${u.peakMemoryBytes}`);
+  if (process.platform === 'linux') assert.ok(u.cpuMs > 0);
+  rt.resetUsage('billed');
+  assert.equal(rt.usage('billed').evals, 0);
+  assert.equal(rt.usage('nobody').evals, 0);
+  rt.close();
+});
+
 test('workers get an empty environment', { skip: process.platform !== 'linux' }, async () => {
   process.env.ISOLANE_TEST_SECRET = 'leak';
   try {

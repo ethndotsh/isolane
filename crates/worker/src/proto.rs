@@ -116,6 +116,21 @@ pub fn fail(code: ErrorCode, message: impl Into<String>) -> Failure {
     }
 }
 
+/// What an eval (or continuation) cost.
+#[derive(Clone, Copy, Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Usage {
+    /// CPU time on the VM's thread, in microseconds (Linux).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cpu_us: Option<u64>,
+    /// The isolate's V8 heap in use afterwards, and memory V8 accounts
+    /// outside it (ArrayBuffers, WebAssembly).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub heap_bytes: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub external_bytes: Option<u64>,
+}
+
 /// Worker → supervisor.
 #[derive(Serialize)]
 #[serde(tag = "t", rename_all = "camelCase")]
@@ -137,6 +152,15 @@ pub enum Out<'a> {
         message: Option<&'a str>,
         #[serde(skip_serializing_if = "Option::is_none")]
         guest: Option<&'a GuestError>,
+        #[serde(flatten)]
+        usage: Usage,
+    },
+    /// CPU used by work outside an eval (host-reply continuations).
+    #[serde(rename_all = "camelCase")]
+    Usage {
+        vm: u64,
+        #[serde(flatten)]
+        usage: Usage,
     },
     /// A console call from guest code. One-way: no reply.
     Log {

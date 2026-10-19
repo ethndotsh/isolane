@@ -26,10 +26,26 @@ export interface IsolationInfo {
 
 export type WorkerMessage =
   | ({ t: 'ready' } & IsolationInfo)
-  | { t: 'result'; req: number; ok: true; value: unknown }
-  | { t: 'result'; req: number; ok: false; code: string; message: string; guest?: GuestErrorInfo }
+  | ({ t: 'result'; req: number; ok: true; value: unknown } & WorkerUsage)
+  | ({ t: 'result'; req: number; ok: false; code: string; message: string; guest?: GuestErrorInfo } & WorkerUsage)
+  | ({ t: 'usage'; vm: number } & WorkerUsage)
   | { t: 'hostCall'; vm: number; call: number; name: string; args: unknown[] }
   | { t: 'log'; vm: number; level: LogLevel; message: string };
+
+/** What an eval or continuation cost, as the worker reports it. */
+export interface WorkerUsage {
+  cpuUs?: number;
+  heapBytes?: number;
+  externalBytes?: number;
+}
+
+function parseUsage(m: Record<string, unknown>): WorkerUsage {
+  const u: WorkerUsage = {};
+  if (isUint(m.cpuUs)) u.cpuUs = m.cpuUs;
+  if (isUint(m.heapBytes)) u.heapBytes = m.heapBytes;
+  if (isUint(m.externalBytes)) u.externalBytes = m.externalBytes;
+  return u;
+}
 
 export type LogLevel = 'log' | 'info' | 'debug' | 'warn' | 'error';
 const LOG_LEVELS = new Set<string>(['log', 'info', 'debug', 'warn', 'error']);
@@ -72,9 +88,11 @@ export function parseWorkerMessage(raw: unknown): WorkerMessage | null {
     }
     case 'result':
       if (!isUint(m.req) || typeof m.ok !== 'boolean') return null;
-      if (m.ok) return { t: 'result', req: m.req, ok: true, value: m.value ?? null };
+      if (m.ok) return { t: 'result', req: m.req, ok: true, value: m.value ?? null, ...parseUsage(m) };
       if (typeof m.code !== 'string' || typeof m.message !== 'string') return null;
-      return { t: 'result', req: m.req, ok: false, code: m.code, message: m.message, guest: parseGuestError(m.guest) };
+      return { t: 'result', req: m.req, ok: false, code: m.code, message: m.message, guest: parseGuestError(m.guest), ...parseUsage(m) };
+    case 'usage':
+      return isUint(m.vm) ? { t: 'usage', vm: m.vm, ...parseUsage(m) } : null;
     case 'hostCall':
       return isUint(m.vm) && isUint(m.call) && typeof m.name === 'string' && Array.isArray(m.args)
         ? { t: 'hostCall', vm: m.vm, call: m.call, name: m.name, args: m.args }
