@@ -1,0 +1,38 @@
+Response and Request bodies made from a string or bytes are byte streams, as
+the Fetch standard has them, so BYOB readers work on them; each read gets a
+copy, since enqueueing on a byte stream transfers (detaches) the chunk's
+buffer. (fetch/api/response/response-consume-stream.any.js; Deno has the
+same gap.)
+
+diff --git a/runtime/deno/ext/fetch/22_body.js b/runtime/deno/ext/fetch/22_body.js
+--- a/runtime/deno/ext/fetch/22_body.js
++++ b/runtime/deno/ext/fetch/22_body.js
+@@ -45,6 +45,7 @@ const mimesniff = core.loadExtScript("ext:deno_web/01_mimesniff.js");
+ const { BlobPrototype } = core.loadExtScript("ext:deno_web/09_file.js");
+ const {
+   createProxy,
++  createReadableByteStream,
+   createReadableStream,
+   errorReadableStream,
+   isReadableStreamDisturbed,
+@@ -130,14 +131,17 @@ class InnerBody {
+         // calls `.then` on it directly); the pull algorithm returns undefined,
+         // the synchronous completion sentinel understood by the controller's
+         // pull machinery (see `createReadableStream`).
+-        const stream = createReadableStream(
++        // A byte stream, as Fetch has it (BYOB readers work). Enqueueing
++        // transfers the chunk's buffer, so never the body's own bytes.
++        const stream = createReadableByteStream(
+           noop,
+           (controller) => {
+-            controller.enqueue(chunkToU8(body));
++            const chunk = typeof body === "string" ? core.encode(body) : TypedArrayPrototypeSlice(body);
++            if (TypedArrayPrototypeGetByteLength(chunk) > 0) controller.enqueue(chunk);
+             controller.close();
++            controller.byobRequest?.respond(0);
+           },
+           noopAsync,
+-          0,
+         );
+         if (length !== null) {
+           WeakMapPrototypeSet(staticBodyLength, stream, length);

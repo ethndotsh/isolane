@@ -91,15 +91,19 @@
     },
     "event-attrs": {
       "category": "bug",
-      "reason": "Event.timeStamp is always 0 and isTrusted isn't an own unforgeable attribute (Deno's vendored events, same in Deno) (roadmap: Event attributes)."
+      "reason": "Deno's vendored Event: timeStamp is always 0 (and under isolane's frozen clock performance.now() is often still 0 when an event is made, so these timeStamp > 0 checks couldn't pass reliably anyway), and isTrusted is one accessor on Event.prototype instead of a [LegacyUnforgeable] own property of each event, Deno's deliberate trade for faster event creation."
     },
-    "body-edge": {
+    "empty-formdata": {
       "category": "bug",
-      "reason": "Response/Request body edge cases from Deno's vendored classes: BYOB readers on non-byte bodies, an Object.prototype.then injection, UTF-16 JSON, and an empty FormData serialized as text (roadmap: body conformance)."
+      "reason": "An empty FormData body is the closing boundary alone (Deno's formDataToBlob), so text() isn't empty. Serializing it as nothing, as this test wants, would break fetch/api/body/formdata.any.js, which parses that body back into an empty FormData, while an empty multipart body must still fail to parse (response-consume-empty's \"formData with correct multipart type (error case)\"): the tests can't all pass."
+    },
+    "then-injection": {
+      "category": "bug",
+      "reason": "Reading a body resolves promises with its bytes (a Uint8Array), so a patched Object.prototype.then sees, and can replace, them; the Streams and Fetch standards' internal reads never resolve a promise with an object. Same in Deno; fixing it means reworking how Deno's body and stream code returns results."
     },
     "streams-edge": {
       "category": "bug",
-      "reason": "Streams edge cases from Deno's vendored implementation: enqueue() calling the write algorithm synchronously, enqueue after detaching a BYOB buffer, byobRequest after a patched then(), a transformer.cancel() error race (roadmap: streams conformance)."
+      "reason": "Two Streams edge cases in Deno's vendored implementation (same in Deno): a patched Object.prototype.then runs before a BYOB enqueue() has committed every pending read (the then-injection class, see then-injection), and when transformer.cancel() calls controller.error() during a pending writable.close(), the writable side is still erroring rather than errored when the cancel algorithm settles, so readable.cancel() resolves instead of rejecting."
     }
   },
   "files": {
@@ -989,7 +993,7 @@
       }
     },
     "fetch/api/request/request-consume-empty.any.js": {
-      "why": "body-edge",
+      "why": "empty-formdata",
       "subtests": {
         "Consume empty FormData request body as text": "FAIL"
       }
@@ -1159,22 +1163,13 @@
       }
     },
     "fetch/api/response/response-consume-empty.any.js": {
-      "why": "body-edge",
+      "why": "empty-formdata",
       "subtests": {
         "Consume empty FormData response body as text": "FAIL"
       }
     },
-    "fetch/api/response/response-consume-stream.any.js": {
-      "why": "body-edge",
-      "subtests": {
-        "Read text response's body as readableStream with mode=byob": "FAIL",
-        "Read URLSearchParams response's body as readableStream with mode=byob": "FAIL",
-        "Read array buffer response's body as readableStream with mode=byob": "FAIL",
-        "Reading with offset from Response stream": "FAIL"
-      }
-    },
     "fetch/api/response/response-stream-with-broken-then.any.js": {
-      "why": "body-edge",
+      "why": "then-injection",
       "subtests": {
         "Attempt to inject {done: false, value: bye} via Object.prototype.then.": "FAIL",
         "Attempt to inject value: undefined via Object.prototype.then.": "FAIL",
@@ -1209,12 +1204,6 @@
       "why": "not-worker-scope",
       "subtests": {
         "idl_test setup": "FAIL"
-      }
-    },
-    "streams/piping/general-addition.any.js": {
-      "why": "streams-edge",
-      "subtests": {
-        "enqueue() must not synchronously call write algorithm": "FAIL"
       }
     },
     "streams/readable-byte-streams/non-transferable-buffers.any.js": {

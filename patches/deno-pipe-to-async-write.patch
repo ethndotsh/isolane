@@ -1,0 +1,30 @@
+pipeTo: a chunk the source enqueue()s while the pipe waits is written in a
+microtask, not synchronously inside enqueue() (the Streams standard's
+streams/piping/general-addition.any.js; Deno has the same bug). A shutdown
+that starts in between (an error or an abort) drops it, as it would any
+chunk not yet written.
+
+diff --git a/runtime/deno/ext/web/06_streams.js b/runtime/deno/ext/web/06_streams.js
+--- a/runtime/deno/ext/web/06_streams.js
++++ b/runtime/deno/ext/web/06_streams.js
+@@ -3397,11 +3397,18 @@ function readableStreamPipeTo(
+   /** @type {ReadRequest} */
+   const readRequest = {
+     chunkSteps(chunk) {
+-      writeChunk(chunk);
+       if (pumping) {
++        writeChunk(chunk);
+         syncAdvance = true;
+       } else {
+-        pump();
++        // Delivered by the source's enqueue(): write in a microtask, not
++        // inside enqueue() (streams/piping/general-addition.any.js). A
++        // shutdown started in between (an error or an abort) drops it.
++        queueMicrotask(() => {
++          if (shuttingDown === true) return;
++          writeChunk(chunk);
++          pump();
++        });
+       }
+     },
+     // Source close/error is finalized by the isOrBecomes{Closed,Errored}

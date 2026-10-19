@@ -432,6 +432,27 @@ test('byte streams and BYOB readers', async () => {
 
 // ---- phase 2: Blob, File, FileReader, encoding streams, compression ----
 
+test('Response bodies are byte streams, and pipeTo never writes inside enqueue()', async () => {
+  assert.deepEqual(
+    await run(`(async () => {
+      const bytes = new Uint8Array([1, 2, 3]);
+      const reader = new Response(bytes).body.getReader({ mode: 'byob' });
+      const first = await reader.read(new Uint8Array(2));
+      const second = await reader.read(new Uint8Array(2));
+      const end = await reader.read(new Uint8Array(2));
+      let controller, synchronous = false;
+      new ReadableStream({ start(c) { controller = c; } }, { highWaterMark: 0 })
+        .pipeTo(new WritableStream({ write() { synchronous = true; } }));
+      await Promise.resolve();
+      controller.enqueue('x');
+      const during = synchronous;
+      await new Promise((r) => setTimeout(r, 0));
+      return [[...first.value], [...second.value], end.done, [...bytes], during, synchronous];
+    })()`),
+    [[1, 2], [3], true, [1, 2, 3], false, true],
+  );
+});
+
 test('Blob and File', async () => {
   assert.deepEqual(
     await run(`(async () => {

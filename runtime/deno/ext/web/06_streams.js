@@ -3397,11 +3397,18 @@ function readableStreamPipeTo(
   /** @type {ReadRequest} */
   const readRequest = {
     chunkSteps(chunk) {
-      writeChunk(chunk);
       if (pumping) {
+        writeChunk(chunk);
         syncAdvance = true;
       } else {
-        pump();
+        // Delivered by the source's enqueue(): write in a microtask, not
+        // inside enqueue() (streams/piping/general-addition.any.js). A
+        // shutdown started in between (an error or an abort) drops it.
+        queueMicrotask(() => {
+          if (shuttingDown === true) return;
+          writeChunk(chunk);
+          pump();
+        });
       }
     },
     // Source close/error is finalized by the isOrBecomes{Closed,Errored}

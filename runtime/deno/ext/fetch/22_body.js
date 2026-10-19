@@ -45,6 +45,7 @@ const mimesniff = core.loadExtScript("ext:deno_web/01_mimesniff.js");
 const { BlobPrototype } = core.loadExtScript("ext:deno_web/09_file.js");
 const {
   createProxy,
+  createReadableByteStream,
   createReadableStream,
   errorReadableStream,
   isReadableStreamDisturbed,
@@ -130,14 +131,17 @@ class InnerBody {
         // calls `.then` on it directly); the pull algorithm returns undefined,
         // the synchronous completion sentinel understood by the controller's
         // pull machinery (see `createReadableStream`).
-        const stream = createReadableStream(
+        // A byte stream, as Fetch has it (BYOB readers work). Enqueueing
+        // transfers the chunk's buffer, so never the body's own bytes.
+        const stream = createReadableByteStream(
           noop,
           (controller) => {
-            controller.enqueue(chunkToU8(body));
+            const chunk = typeof body === "string" ? core.encode(body) : TypedArrayPrototypeSlice(body);
+            if (TypedArrayPrototypeGetByteLength(chunk) > 0) controller.enqueue(chunk);
             controller.close();
+            controller.byobRequest?.respond(0);
           },
           noopAsync,
-          0,
         );
         if (length !== null) {
           WeakMapPrototypeSet(staticBodyLength, stream, length);
