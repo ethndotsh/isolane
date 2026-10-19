@@ -429,11 +429,15 @@ doesn't slow the tenant's other isolates beyond sharing the CPU.
 made in fails with `ERR_LIMIT` even if the guest catches it. The worker
 enforces them; the supervisor checks it did, and a worker sending more
 calls (or bytes) in flight than the limits allow is killed as a protocol
-violation. A call stays pending until its function settles, or until an
-eval in its isolate fails with `ERR_LIMIT` (or `ERR_ISOLATE_RETIRED`): then
-every pending call of that isolate is abandoned (its `ctx.signal` aborts,
-its slot is freed, and its promise in the guest never settles), so a
-timed-out eval doesn't leave the isolate unable to call host functions.
+violation. A call stays pending until its function settles, for at most
+the isolate's `timeoutMs` (even when the eval that made it has returned):
+then the guest's promise rejects with a `RangeError` (`code: 'ERR_LIMIT'`),
+`ctx.signal` aborts, and the slot is free again. An eval that fails with
+`ERR_LIMIT` (or `ERR_ISOLATE_RETIRED`) abandons every pending call of its
+isolate at once (their signals abort, and their promises never settle), so
+a timed-out eval doesn't leave the isolate unable to call host functions.
+isolane's own `fetch`, `connect`, and `fs` calls have their own timeouts
+instead.
 
 **Console output and errors** are cut to size inside the worker, before a
 string is copied out of V8: each console line to `logLineBytes` (with

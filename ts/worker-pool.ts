@@ -511,7 +511,12 @@ export class TenantWorker {
       return;
     }
     this.#usage.hostCalls++;
+    let replied = false;
+    let expiry: NodeJS.Timeout | undefined;
     const reply = (ok: boolean, value?: string, err?: unknown, parts: BinaryPart[] = []) => {
+      if (replied) return;
+      replied = true;
+      clearTimeout(expiry);
       if (state?.calls.delete(msg.call)) state.callBytes -= msg.size;
       const frame: Record<string, unknown> = { t: 'hostReply', vm: msg.vm, call: msg.call, ok };
       if (value !== undefined) frame.value = value; // JSON text; absent = undefined
@@ -555,6 +560,21 @@ export class TenantWorker {
     const ctx = new Call(this.tenant, state.id, state.chain);
     state.calls.set(msg.call, ctx);
     state.callBytes += msg.size;
+    // No call of yours waits longer than the isolate's timeoutMs, even one
+    // made by an eval that has returned: past it the guest's promise
+    // rejects, ctx.signal aborts, and the call's slot is free again.
+    // isolane's own brokers have their own timeouts (a socket read may
+    // rightly wait as long as connect.limits.idleMs).
+    if (state.timeoutMs !== null && !entry.internal) {
+      const ms = state.timeoutMs;
+      expiry = setTimeout(() => {
+        const message = `host function ${entry.name} didn't settle within ${ms}ms (limits.timeoutMs)`;
+        ctx.abandon(new IsolaneError('ERR_LIMIT', `isolane: ${message}`, { tenant: this.tenant, limit: 'timeoutMs' }));
+        // As the guest sees a refused call: a RangeError with code ERR_LIMIT.
+        fail(Object.assign(new RangeError(message), { code: 'ERR_LIMIT' }));
+      }, ms);
+      expiry.unref();
+    }
     // The fast path: isolane's own brokers, and functions nothing intercepts.
     if (entry.internal || !state.chain.observesHostCalls) {
       let result: unknown;
