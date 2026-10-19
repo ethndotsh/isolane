@@ -117,7 +117,11 @@ Measured against isolated-vm (Linux x64 under Rosetta; re-measure natively):
 
 | Item | Status |
 |---|---|
-| Wire format: V8 ValueSerializer on both sides (Node's `v8.serialize` speaks it): Map/Set/Date/BigInt/typed arrays/cycles cross intact, binary without base64. Check format-version compatibility between Node's V8 and ours first | planned |
+| Measured (`bench/protocol.mjs`, native macOS, dev build): eval round trip 15.5 µs; a host call ~13 µs sequential (async or sync) but **1.6 µs each when 100 run concurrently**; 1 MiB through a host call 1.8 ms (JSON in Node ≈ 0.57 ms of it). Small calls are latency-bound (pipe hops, event-loop wakeups), not serialization-bound | done |
+| Frame reassembly without repeated copies (1 MiB host call 1.81 → 1.52 ms) | done |
+| Binary frames for byte payloads (fs/fetch/socket bodies, typed arrays) instead of base64 in JSON, plus native base64 in the guest (WinterTC phase 1) | planned |
+| V8 ValueSerializer as the wire format: **deferred**. Our V8 writes format v16; Node 22 and 26 read only up to v15. And the supervisor would parse a compromised worker's output with V8's deserializer, which Chrome never exposes across a trust boundary (browser IPC uses Mojo); JSON.parse is a much smaller parser to trust. Revisit for the supervisor → worker direction only (trusted sender), where it would carry Map/Set/Date/BigInt/typed arrays into the guest | idea |
+| Lower per-call latency: coalesce frame writes per event-loop turn on the supervisor; spin briefly before blocking in the worker | planned |
 | Frame batching (fewer syscalls), fewer copies | planned |
 | Prewarmed worker pool (hide cold start) | planned |
 | Startup snapshot (also cuts per-VM setup once the WinterTC runtime is in) | planned |

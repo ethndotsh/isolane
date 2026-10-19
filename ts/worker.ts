@@ -148,13 +148,37 @@ export class WorkerProcess {
       this.#child.kill('SIGKILL');
     };
 
+    // Chunks of a frame still arriving, joined once it's complete (joining
+    // on every chunk would copy a large frame over and over).
+    let pending: Buffer[] = [];
+    let pendingBytes = 0;
+    let need = 0;
     this.#child.stdout.on('data', (chunk: Buffer) => {
       if (!this.#alive) return;
+      if (need > 0 && pendingBytes + chunk.length < need) {
+        pending.push(chunk);
+        pendingBytes += chunk.length;
+        return;
+      }
+      if (pending.length) {
+        pending.push(chunk);
+        chunk = Buffer.concat(pending, pendingBytes + chunk.length);
+        pending = [];
+        pendingBytes = 0;
+      }
       this.#buf = this.#buf.length ? Buffer.concat([this.#buf, chunk]) : chunk;
+      need = 0;
       while (this.#buf.length >= 4) {
         const len = this.#buf.readUInt32LE(0);
         if (len > MAX_FRAME) return this.#fail('protocol-violation', `frame of ${len} bytes`);
-        if (this.#buf.length < 4 + len) break;
+        if (this.#buf.length < 4 + len) {
+          // Hold the partial frame until all of it is here.
+          need = 4 + len;
+          pending = [this.#buf];
+          pendingBytes = this.#buf.length;
+          this.#buf = Buffer.alloc(0);
+          break;
+        }
         const body = this.#buf.subarray(4, 4 + len);
         this.#buf = this.#buf.subarray(4 + len);
         let msg: WorkerMessage | null;
