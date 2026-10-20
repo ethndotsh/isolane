@@ -107,6 +107,10 @@ code, the worker is treated as potentially compromised.
   one isolate per stateful VM (`tenant.isolate()`) or per one-shot run. Isolates are
   never reused across VMs. Grouping tenants by plan into shared workers
   (Cloudflare's model) is planned, not built.
+  **The tenant is the security boundary, not the isolate.** A tenant's
+  isolates share its worker, so guest code that compromises the worker can
+  reach every isolate's state and call every host function registered for
+  any of them. To keep two isolates apart, give them separate tenants.
 - **Lifecycle:** workers start on a tenant's first request and idle out
   after a configurable period. Recycling after a maximum lifetime or request
   count is planned, not built: until then a worker that is compromised but
