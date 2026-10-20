@@ -26,13 +26,20 @@ returns the tenant's handle:
 | `release()` | Lift a quarantine early |
 | `stop()` | Stop the tenant's worker and its isolates |
 
-`runtime.run(code, { tenant, ... })` is the one-liner. Isolates, tenants'
-workers, and the runtime all `close()`, and work with `using`.
+`runtime.run(code, { tenant, ... })` is the one-liner. Isolates and the
+runtime have `close()` and work with `using` (TypeScript 5.2 or later, or
+Node.js 24); a tenant is a handle, and `stop()` stops its worker.
 
-Besides the configuration, `run` and `eval` take two options for the one
-call: `returns` (a Standard Schema the result must match; it types the
-result) and `filename` (the code's name in stack traces, default
-`<tenant>/eval-<n>.js`, where n counts the isolate's evals from 1).
+Besides the configuration, `run` and `eval` take options for the one call:
+
+- `returns`: a Standard Schema the result must match (`ERR_INVALID_RETURN`
+  otherwise); it types the result.
+- `filename`: the code's name in stack traces. Default
+  `<tenant>/eval-<n>.js`, where n counts the isolate's evals from 1.
+- `signal`: an `AbortSignal`. Aborting it terminates the eval if it is
+  running, or skips it if it is queued; the eval rejects with
+  `ERR_ABORTED`, and its host calls' `ctx.signal` aborts. The isolate stays
+  usable.
 
 Tenant names are yours to choose, not the guest's: the runtime keeps each
 name's usage until `resetUsage()` (a few hundred bytes each), so a platform
@@ -48,6 +55,8 @@ Runtime-only options: `workerPath` (default: the installed
 `@isolane/worker-*` package, or `$ISOLANE_WORKER`), `strict` (default
 `true`), `spares` (workers kept started and ready for new tenants),
 `quarantineMs` (default 60 s), `limits.tenants`, and `hooks`.
+`runtime.diagnostics` exposes internals for tests and diagnostics (the
+tenant's worker process id); it may change between releases.
 
 ## Configuration
 
@@ -214,7 +223,7 @@ aliased to the global `connect` (guest code can't import modules yet).
 ### `fs`
 
 ```js
-fs: { root: '/srv/tenants/acme', write: false, limits: { fileBytes: 10 << 20, writtenBytes: 100 << 20, operations: 16 } }
+fs: { root: '/srv/tenants/acme', write: false, limits: { fileBytes: 10 << 20, writtenBytes: 100 << 20, pendingOperations: 16 } }
 ```
 
 The guest gets a promise-based `fs` (`readFile`, `writeFile`, `readdir`,
@@ -232,7 +241,7 @@ if another process writes to the root. Files need to be readable to be
 `fileBytes` caps each file read or written, `writtenBytes` what the isolate
 writes over its life (`EDQUOT` past it; it doesn't track deletions, so it
 isn't a disk quota: give each tenant its own volume or quota if disk space
-matters), and `operations` how many run at once (`EMFILE` past it), each
+matters), and `pendingOperations` how many run at once (`EMFILE` past it), each
 holding a file handle in your process.
 
 ### `eval`, `wasm`
@@ -422,10 +431,10 @@ await acme.run(app.code, {
 | `codeBytes` / `resultBytes` | 16 MiB each | isolate, per eval (at most a frame, 64 MiB) |
 | `pendingHostCalls` | 1,000 | isolate: async host calls waiting for replies at once |
 | `hostCalls` | 10,000 | isolate, per eval (isolane's own `fetch`, `connect`, and `fs` calls aside) |
-| `hostCallBytes` | 64 MiB | isolate: bytes of host calls waiting for replies at once |
+| `pendingHostCallBytes` | 16 MiB | isolate: bytes of host calls waiting for replies at once (held in your process) |
 | `decompressedBytes` | 128 MiB | isolate, per decompression call (checked as it decodes) |
 | `isolates` | 100 | tenant |
-| `concurrentEvals` | 1,000 | tenant |
+| `pendingEvals` | 1,000 | tenant: evals in flight (running or queued) |
 | `workerMemoryBytes` | 2 GiB | tenant (Linux; covers ArrayBuffer and WebAssembly memory a heap limit doesn't) |
 | `idleMs` | 30 s | tenant (an idle worker exits) |
 | `workerBackgroundMs` | 10 s per minute | tenant: `backgroundMs` for all its isolates together (pauses their background work) |
@@ -467,7 +476,7 @@ new isolate starts on the fresh worker. Code that keeps an isolate for
 long should expect that, and recreate it.
 
 **Host calls.** A call past `pendingHostCalls`, `hostCalls`, or
-`hostCallBytes` throws a `RangeError` in the guest (`code: 'ERR_LIMIT'`,
+`pendingHostCallBytes` throws a `RangeError` in the guest (`code: 'ERR_LIMIT'`,
 `limit` naming it) before it reaches your process, and the eval it was
 made in fails with `ERR_LIMIT` even if the guest catches it. The worker
 enforces them; the supervisor checks it did, and a worker sending more
@@ -481,7 +490,9 @@ then the guest's promise rejects with a `RangeError` (`code: 'ERR_LIMIT'`),
 isolate at once (their signals abort, and their promises never settle), so
 a timed-out eval doesn't leave the isolate unable to call host functions.
 isolane's own `fetch`, `connect`, and `fs` calls have their own timeouts
-instead.
+instead. `hostCalls` counts the calls an eval makes while it runs;
+continuations after it returns count against `backgroundMs`, not the next
+eval's `hostCalls`.
 
 **Console output and errors** are cut to size inside the worker, before a
 string is copied out of V8: each console line to `logLineBytes` (with
@@ -492,15 +503,36 @@ input.
 
 Isolate limits can be set at every level; tenant limits at the runtime and
 in `tenants(name)`; `tenants` on the runtime only. Each is an integer of at
-least 1, and durations (`timeoutMs`, `cpuMs`, `backgroundMs`, `idleMs`, `workerBackgroundMs`, `workerLifetimeMs`, and the policies'
-`*Ms` limits) are at most 2^31 - 1 ms, `timers` at most 2^32 - 1, and
-`heapBytes` at most 4 GiB (V8's largest heap); anything else is
-`ERR_INVALID_CONFIG`. Hitting any limit fails
-with `ERR_LIMIT`, with `err.limit` naming it, and emits `onLimit`. `fetch`,
-`connect`, and `fs` policies carry their own limits. `connect`'s
-`connections` counts a socket from when it starts opening, so opens racing
-each other can't pass it, until the guest closes it or the connection closes
-and the guest has read what was left.
+least 1 (`heapBytes` at least 1 MiB, `workerMemoryBytes` at least 64 MiB).
+Durations (`timeoutMs`, `cpuMs`, `backgroundMs`, `idleMs`,
+`workerBackgroundMs`, `workerLifetimeMs`, and the policies' `*Ms` limits)
+are at most 2^31 - 1 ms, `timers` at most 2^32 - 1, and `heapBytes` at most
+4 GiB; anything else is `ERR_INVALID_CONFIG`. `DEFAULT_LIMITS` and
+`DEFAULT_POLICY_LIMITS` export the defaults.
+
+Reaching a limit emits `onLimit` with the limit's name, and has one of
+three effects:
+
+| Effect | Limits |
+|---|---|
+| The eval fails with `ERR_LIMIT` (`err.limit` names it) | `timeoutMs`, `cpuMs`, `heapBytes`, `backgroundMs`, `codeBytes`, `resultBytes`, `pendingHostCalls`, `hostCalls`, `pendingHostCallBytes`, `isolates`, `pendingEvals`, `workerMemoryBytes`, `tenants` |
+| The guest's operation fails, and the eval continues | `timers` (a `RangeError`), `decompressedBytes` (the stream errors), and the policies' limits, named by their path (`fetch.limits.requests`, `connect.limits.connections`, `fs.limits.writtenBytes`, ...) |
+| Output is cut | `logBytes`, `logLineBytes` |
+
+`onPolicyDenial` is for refused targets (a host not on the list, a private
+address, a path outside the root, a write to a read-only root), not for
+limits. `connect`'s `connections` counts a socket from when it starts
+opening, so opens racing each other can't pass it, until the guest closes
+it or the connection closes and the guest has read what was left.
+
+**Memory in release builds.** Release workers are built with V8's sandbox,
+which requires pointer compression: all of a tenant's isolates share one
+pointer cage of about 4 GiB in its worker process, whatever `heapBytes` ×
+isolates adds up to. ArrayBuffer and WebAssembly memory live outside the
+cage, in the sandbox. Development builds (`dev-prebuilt`) have neither, so
+memory measured on them overstates what a release worker uses; figures
+quoted in these docs come from the Bench workflow, which runs the release
+worker on Linux.
 
 ## Usage
 
@@ -531,9 +563,30 @@ Every failure is an `IsolaneError` with `code`, `kind`, `retryable`, and
 |---|---|
 | `guest` | `ERR_GUEST_EXCEPTION` (see `err.guest`), `ERR_UNSETTLED`, `ERR_NOT_SERIALIZABLE`, `ERR_INVALID_RETURN` |
 | `limit` | `ERR_LIMIT` (see `err.limit`), `ERR_ISOLATE_RETIRED` |
-| `usage` | `ERR_INVALID_CONFIG`, `ERR_ISOLATE_CLOSED`, `ERR_RUNTIME_CLOSED`, `ERR_DENIED`, `ERR_SHIM` |
+| `usage` | `ERR_INVALID_CONFIG`, `ERR_ISOLATE_CLOSED`, `ERR_RUNTIME_CLOSED`, `ERR_ABORTED`, `ERR_DENIED`, `ERR_SHIM` |
 | `security` | `ERR_TENANT_QUARANTINED` |
 | `infrastructure` | `ERR_WORKER_CRASHED`, `ERR_WORKER_UNRESPONSIVE`, `ERR_WORKER_INCOMPATIBLE`, `ERR_ISOLATION_UNAVAILABLE`, `ERR_INTERNAL` |
+
+`ERR_DENIED` is a hook's `deny()`. `ERR_WORKER_CRASHED` and
+`ERR_WORKER_UNRESPONSIVE` are `retryable`, as is `ERR_LIMIT` for
+`workerMemoryBytes` and `ERR_ISOLATE_RETIRED` after a recycle.
+
+### What guest code sees
+
+Failures inside the guest are ordinary JavaScript errors, with a `code`
+where isolane adds one:
+
+| From | Class | `code` and other fields |
+|---|---|---|
+| A host function's arguments failing its `args` schema | `TypeError` | `ERR_INVALID_ARGUMENTS` |
+| A host function's result failing its `returns` schema | `Error` | `ERR_INVALID_RETURN` |
+| A host function that threw | its class (`TypeError`, `RangeError`, `SyntaxError`, else `Error`) | its `code`, if a string; the message only, never its stack |
+| A `beforeHostCall` hook's `deny()` | `Error` | `ERR_DENIED` |
+| A host call past `pendingHostCalls`, `hostCalls`, or `pendingHostCallBytes`, or still pending a second past `timeoutMs` | `RangeError` | `ERR_LIMIT`, and `limit` |
+| `timers` | `RangeError` | |
+| `fetch`: a refused request or a policy limit | `TypeError` | |
+| `connect`: a refused connection or a policy limit | `Error` (the socket's `opened` and `closed` reject) | |
+| `fs` | `Error` | Node's codes: `ENOENT`, `EEXIST`, `ENOTDIR`, `EISDIR`, `ENOTEMPTY`, `ELOOP`, `EACCES`, `EROFS`, `EFBIG` (`fileBytes`), `EDQUOT` (`writtenBytes`), `EMFILE` (`pendingOperations`) |
 
 ### What the guest threw
 
@@ -627,7 +680,7 @@ is a deliberate choice: seccomp already refuses every file open and
 `socket()` call, so Landlock is the second wall, and requiring the newest
 Landlock would refuse most LTS kernels. A worker built without the V8
 sandbox (a development build) is refused as a setup error
-(`ERR_WORKER_CRASHED`, saying so), never treated as a security event.
+(`ERR_ISOLATION_UNAVAILABLE`, saying so), never treated as a security event.
 
 After a security event (a crash, a protocol violation, an unresponsive
 worker), the tenant is quarantined for `quarantineMs`; `tenant.release()`

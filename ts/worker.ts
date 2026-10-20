@@ -268,7 +268,7 @@ export class WorkerProcess {
    */
   constructor(workerPath: string, handlers: WorkerHandlers, strict: boolean, memoryLimitBytes?: number, prepareWeb = false, probe = false) {
     const args = ['--serve'];
-    if (memoryLimitBytes !== undefined) args.push(`--memory-limit=${memoryLimitBytes}`);
+    if (memoryLimitBytes !== undefined) args.push(`--memory-bytes=${memoryLimitBytes}`);
     if (prepareWeb) args.push('--prepare-web');
     // Empty environment and no inherited fds beyond the three pipes: nothing
     // from the application process (secrets in env vars, open sockets) is

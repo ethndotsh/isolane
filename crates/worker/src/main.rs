@@ -507,11 +507,11 @@ fn main() -> ExitCode {
     for arg in &args {
         if arg == "--prepare-web" {
             web_background = true;
-        } else if let Some(n) = arg.strip_prefix("--memory-limit=") {
+        } else if let Some(n) = arg.strip_prefix("--memory-bytes=") {
             match n.parse::<u64>() {
                 Ok(n) => memory_limit = Some(n),
                 Err(_) => {
-                    eprintln!("isolane-worker: bad --memory-limit {n}");
+                    eprintln!("isolane-worker: bad --memory-bytes {n}");
                     return ExitCode::from(2);
                 }
             }
@@ -527,7 +527,7 @@ fn main() -> ExitCode {
         Some("--no-lockdown") => serve(false, memory_limit, web_background),
         Some(other) => {
             eprintln!(
-                "usage: isolane-worker [--serve | --self-check | --no-lockdown] [--memory-limit=BYTES] [--prepare-web] | --make-web-snapshot=FILE (got {other})"
+                "usage: isolane-worker [--serve | --self-check | --no-lockdown] [--memory-bytes=BYTES] [--prepare-web] | --make-web-snapshot=FILE (got {other})"
             );
             ExitCode::from(2)
         }

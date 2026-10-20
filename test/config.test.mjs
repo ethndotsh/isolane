@@ -1,11 +1,11 @@
 // Isolate config: time, randomness, eval, wasm, globals, policies, and layering.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { createServer } from 'node:http';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { Runtime } from '../dist/index.js';
+import { DEFAULT_LIMITS, Runtime } from '../dist/index.js';
 import { pool, T, code, isolate, strict } from './helpers.mjs';
 
 test('the clock is frozen while guest code runs', { skip: process.env.ISOLANE_DEV_INSECURE === '1' && 'the dev build has no clock patch' }, async () => {
@@ -237,4 +237,24 @@ test('config errors name the field, and old names say what to use instead', () =
   assert.deepEqual(message(() => new Runtime({ prewarm: 1 })), ['ERR_INVALID_CONFIG', 'isolane: prewarm is not a Runtime option']);
   assert.deepEqual(message(() => new Runtime({ defaults: { web: { baseUrl: 'ftp://x/' } } })), ['ERR_INVALID_CONFIG', 'isolane: defaults.web.baseUrl must be an absolute http: or https: URL']);
   assert.deepEqual(message(() => new Runtime({ tenants: () => ({ nope: 1 }) }).tenant('x').isolate()), ['ERR_INVALID_CONFIG', 'isolane: tenants("x").nope is not a config field']);
+});
+
+test("the guide's limits table matches DEFAULT_LIMITS", () => {
+  const guide = readFileSync(new URL('../docs/guide.md', import.meta.url), 'utf8');
+  const start = guide.indexOf('| Limit | Default | Scope |');
+  const table = guide.slice(start, guide.indexOf('\n\n', start));
+  const units = { ms: 1, s: 1000, minute: 60_000, hour: 3_600_000, KiB: 1024, MiB: 1024 ** 2, GiB: 1024 ** 3 };
+  const parse = (text) => {
+    if (text === 'none') return null;
+    const m = /^([\d,]+)(?: (ms|s|minute|hour|KiB|MiB|GiB))?/.exec(text);
+    assert.ok(m, `can't read ${JSON.stringify(text)}`);
+    return Number(m[1].replaceAll(',', '')) * (units[m[2]] ?? 1);
+  };
+  const documented = {};
+  for (const [, names, defaults] of table.matchAll(/^\| ((?:`\w+`(?: \/ )?)+) \| ([^|]+) \|/gm)) {
+    const keys = names.split(' / ').map((n) => n.replaceAll('`', ''));
+    const values = defaults.trim().replace(/ each$/, '').split(' / ');
+    keys.forEach((key, i) => (documented[key] = parse((values[i] ?? values[0]).trim())));
+  }
+  assert.deepEqual(documented, { ...DEFAULT_LIMITS });
 });

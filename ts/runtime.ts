@@ -92,7 +92,7 @@ export interface RuntimeOptions {
   /**
    * Keep this many workers started and ready, so a tenant without a worker
    * gets one without waiting for V8 to start (tens of ms). Each spare costs
-   * a process (~27 MB). Default 0.
+   * a process (about 15 MB idle, measured on a development build). Default 0.
    */
   spares?: number;
   /**
@@ -184,7 +184,8 @@ export class Runtime {
   /**
    * Listen for an event from every tenant and isolate: `hostCall`, `eval`
    * (outcomes, after they ran), `log`, `limit`, `policyDenial`,
-   * `securityEvent`, `worker`. Returns a function that unsubscribes.
+   * `securityEvent`, `guestError`, `worker`. Returns a function that
+   * unsubscribes.
    */
   on<K extends keyof RuntimeEvents>(event: K, listener: (e: RuntimeEvents[K]) => void): () => void {
     if (typeof listener !== 'function') throw invalidConfig('listener', 'must be a function');

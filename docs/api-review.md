@@ -6,6 +6,10 @@ accretion and has too many ways to say the same thing. This proposes a
 target ("v2") to move to in one step: we're pre-1.0 with no users, so no
 compatibility shims.
 
+The sections up to "Status" record the review as written: their
+examples show the surface of the time. The Naming rules remain the
+standard for new names.
+
 ## What's wrong with the surface
 
 ### 1. Configuration has five overlapping mechanisms
@@ -275,7 +279,7 @@ differences:
   `ERR_INVALID_CONFIG`: there's no safe default host list or root, so a
   policy is always an object (or `false`).
 - **Tenant limits stay out of the call level.** `isolates`,
-  `concurrentEvals`, `workerMemoryBytes`, and `idleMs` are fixed when the
+  `pendingEvals` (then `concurrentEvals`), `workerMemoryBytes`, and `idleMs` are fixed when the
   tenant's worker starts, so setting them on a call is an
   `ERR_INVALID_CONFIG`; `limits.tenants` is runtime-only.
 - **The minimal prelude stays** (item 6 of the implementation list), with
@@ -309,3 +313,21 @@ Later additions (errors and stack traces, October 2026):
 - **`onGuestError`** (`runtime.on('guestError')`) follows rule 4: the noun
   is `GuestError`, as in `err.guest` and `GuestErrorInfo`; `kind` says
   `exception` or `rejection`, as `SecurityEvent.kind` does.
+
+Later changes (elegance pass, October 2026):
+
+- **One word for "in flight at once": `pending`.** `concurrentEvals` became
+  `pendingEvals`, `hostCallBytes` became `pendingHostCallBytes` (it was
+  read as a per-call cap), and `fs.limits.operations` became
+  `fs.limits.pendingOperations` (it was read as a lifetime total, like
+  `fetch.limits.requests`). `pendingHostCalls` already followed this.
+- **Events discriminate with `kind`:** `WorkerEvent.event` became
+  `WorkerEvent.kind`, as in `SecurityEvent` and `GuestErrorEvent`.
+- **`ERR_DENIED` is `usage`:** `security` is for quarantines, so alerts on
+  it don't fire for a hook refusing a call over quota.
+- **`signal`** is an option of one call, like `filename`; aborting fails
+  the eval with `ERR_ABORTED` (`usage`).
+- **Policy limits are limits:** they emit `onLimit` with their config path
+  (`fetch.limits.requests`); `onPolicyDenial` is only for refused targets.
+- **No rename hints:** names from before v2 were never released, so the
+  "use X instead" messages for them are gone.

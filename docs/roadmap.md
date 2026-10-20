@@ -421,7 +421,7 @@ Deliberately late, so it can be done properly once the core is settled.
 | Node compatibility (`node:buffer`, `events`, `util`, `stream`, `crypto`, `path`, `url`, `assert`, `string_decoder`, `process`): unenv presets (the layer behind Wrangler's `nodejs_compat` and Nitro) and/or workerd's `src/node` (Apache-2.0), with `node:net`/`node:tls` on our `connect` broker and `node:fs` on our `fs` broker; native addons, `child_process`, and real threads stay unsupported, by design | later |
 | Compatibility target: "anything that runs on Cloudflare Workers with nodejs_compat"; publish a tested-packages list | later |
 
-### Elegance pass, October 2026 (decided, to apply)
+### Elegance pass, October 2026 (done)
 
 From the API-surface review (approved by the owner):
 
@@ -442,6 +442,22 @@ From the API-surface review (approved by the owner):
   - fix the doc mismatches (ERR_LIMIT's list, `Tenant.stop` vs `close`, `FetchPolicy.hosts` JSDoc);
   - lower the `pendingHostCallBytes` default and/or add a total per tenant;
   - one table of the error codes the guest sees.
+
+Applied, with the implementation review's items:
+
+| Item | Status |
+|---|---|
+| The renames, `ERR_DENIED` as `usage`, `signal`/`ERR_ABORTED` (a new `abort` message; protocol 4), `onLimit` for policy limits, exit reasons carried on the worker's ready failure | done |
+| `pendingHostCallBytes` default 16 MiB | done |
+| A total of `pendingHostCallBytes` per tenant (100 isolates can still hold 1.6 GiB of call arguments in the supervisor) | planned |
+| The guide: guest-visible error codes, the three effects of a limit, the shared pointer-compression cage, dev-build memory figures, `using`; `engines` is Node.js 22 or later, as CI tests | done |
+| Worker: one module for text capping and JS exceptions (`js.rs`, which never panics on guest-sized text), one for guest bytes (`bytes.rs`; host calls use the checked path), one watchdog guard for every run in the VM loop | done |
+| Supervisor: the brokers in `ts/brokers/`, one host-pattern matcher, policy defaults in `DEFAULT_POLICY_LIMITS`, typed `WorkerCommand`s, `IsolateState.limits`, `admitLog` (which also counts `usage().logBytes` in bytes, not UTF-16 units) | done |
+| Deno's WebCrypto JS owned as `runtime/crypto.js` (it has no upstream any more), replacing five patches | done |
+| A test that checks the guide's limits table against `DEFAULT_LIMITS` | done |
+| A shared gate module for the WPT and test262 runners; one HTTP test server; broker unit tests without the fake web `fetch` | planned |
+| `create` deserialized straight into `VmConfig`, named exit codes, `serve` split up (main.rs) | planned |
+| One `ByteQueue` for the fetch and connect brokers; framing out of `worker.ts`; the guest `fs` wrapper in `runtime/fs.js` | planned |
 
 ### API v2 (from `docs/api-review.md`)
 

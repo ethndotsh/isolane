@@ -8,6 +8,9 @@ the capabilities you grant it.
 > release gate (external review, fuzzing, threat-model sign-off) is tracked
 > in [SECURITY.md](SECURITY.md). No version has been published to npm.
 
+The examples use `using` (TypeScript 5.2 or later, or Node.js 24); with
+plain JavaScript on Node.js 22, call `runtime.close()` instead.
+
 ```js
 import { Runtime } from 'isolane';
 
@@ -159,8 +162,10 @@ await runtime.tenant('acme').run(code, { limits: { timeoutMs: 500 } });
 ```
 
 Every resource has a limit with a default, such as 30 seconds per
-evaluation, 128 MiB of heap, and 100 isolates per tenant. Exceeding a limit
-fails with `ERR_LIMIT`. The [guide](docs/guide.md) lists every limit.
+evaluation, 128 MiB of heap, and 100 isolates per tenant. Exceeding most
+limits fails the evaluation with `ERR_LIMIT`, and every limit reached emits
+`onLimit`. The [guide](docs/guide.md#limits) lists every limit and its
+effect.
 
 ## Hooks
 
