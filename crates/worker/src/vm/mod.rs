@@ -178,6 +178,12 @@ struct OomState {
     hit: AtomicBool,
 }
 
+impl OomState {
+    fn hit(&self) -> bool {
+        self.hit.load(Ordering::SeqCst)
+    }
+}
+
 /// Near the heap limit: terminate instead of letting V8 abort the process,
 /// and grant headroom so the termination can unwind. The VM is retired after.
 unsafe extern "C" fn near_heap_limit(data: *mut c_void, current: usize, _initial: usize) -> usize {
@@ -227,6 +233,68 @@ pub unsafe extern "C" fn out_of_memory(_location: *const std::ffi::c_char, _deta
 pub const OOM_EXIT_CODE: i32 = 6;
 
 // ---- the VM thread ----
+
+/// What running guest code under the watchdog needs: every run (setup, an
+/// eval, idle timers, a host reply's continuation) arms it with a budget,
+/// runs, and disarms it.
+struct Guard<'a> {
+    watchdog: &'a Watchdog,
+    bridge: &'a Bridge,
+    oom: &'a OomState,
+}
+
+impl Guard<'_> {
+    /// Run `f` (given the deadline) under these budgets. Returns what `f`
+    /// returned and which budget, if any, ran out; a pending termination is
+    /// cancelled, so the isolate can run again.
+    fn run<R>(
+        &self,
+        isolate: &mut v8::OwnedIsolate,
+        wall: Option<std::time::Duration>,
+        cpu: Option<std::time::Duration>,
+        f: impl FnOnce(&mut v8::OwnedIsolate, Option<std::time::Instant>) -> R,
+    ) -> (R, Fired) {
+        let deadline = self.watchdog.arm(wall, cpu);
+        self.bridge.deadline.set(deadline);
+        self.bridge.timed_out.set(false);
+        let result = f(isolate, deadline);
+        self.bridge.deadline.set(None);
+        // A sync host call that outlived the deadline counts as the wall clock.
+        let fired = match self.watchdog.disarm() {
+            Fired::No if self.bridge.timed_out.take() => Fired::Wall,
+            fired => fired,
+        };
+        self.bridge.timed_out.set(false);
+        if isolate.is_execution_terminating() || fired != Fired::No || self.oom.hit() {
+            isolate.cancel_terminate_execution();
+        }
+        (result, fired)
+    }
+
+    /// One batch of work between evals (timers, or a host reply's
+    /// continuation), under the background budget. Returns the retirement
+    /// cause and the next eval's failure, if the budget ran out.
+    #[allow(clippy::too_many_arguments)]
+    fn background(
+        &self,
+        isolate: &mut v8::OwnedIsolate,
+        background: &mut Background,
+        cpu_clock: Option<CpuClock>,
+        (timeout, cpu): (Option<std::time::Duration>, Option<std::time::Duration>),
+        floor: std::time::Duration,
+        what: &str,
+        (out, id): (&Output, u64),
+        f: impl FnOnce(&mut v8::OwnedIsolate),
+    ) -> Option<(Failure, Option<Failure>)> {
+        let cpu_start = cpu_clock.map(|c| c.now()).unwrap_or_default();
+        let (wall, cpu_budget) = background.budgets(timeout, cpu);
+        self.bridge.blocked.set(std::time::Duration::ZERO);
+        let batch = background.start(floor);
+        self.run(isolate, wall, cpu_budget, |isolate, _| f(isolate));
+        let spent = usage(isolate, cpu_clock, cpu_start);
+        background.settle(batch.blocked(self.bridge.blocked.take()), spent, self.oom.hit(), out, id, what)
+    }
+}
 
 fn vm_main(id: u64, config: VmConfig, rx: Receiver<VmMsg>, out: Output, stopper: Arc<std::sync::OnceLock<Arc<Watchdog>>>) {
     crate::limits::set(config.limits);
@@ -296,19 +364,15 @@ fn vm_main(id: u64, config: VmConfig, rx: Receiver<VmMsg>, out: Output, stopper:
     // with this).
     let mut retired: Option<Failure> = None;
     let retire = |cause: String| fail(ErrorCode::IsolateRetired, cause);
+    let guard = Guard { watchdog: &watchdog, bridge: &bridge, oom: &oom };
     // Setup runs the embedder's `setup` shims: under the eval budget.
-    bridge.deadline.set(watchdog.arm(timeout, cpu));
-    let created = new_context(&mut isolate, &config, from_snapshot);
-    bridge.deadline.set(None);
-    let fired = watchdog.disarm() != Fired::No || bridge.timed_out.take();
-    if isolate.is_execution_terminating() || fired || oom.hit.load(Ordering::SeqCst) {
-        isolate.cancel_terminate_execution();
-    }
+    let (created, fired) = guard.run(&mut isolate, timeout, cpu, |isolate, _| new_context(isolate, &config, from_snapshot));
+    let fired = fired != Fired::No;
     let (context, shims) = match created {
-        Ok(created) if !fired && !oom.hit.load(Ordering::SeqCst) => created,
+        Ok(created) if !fired && !oom.hit() => created,
         failed => {
             retired = Some(match failed {
-                _ if oom.hit.load(Ordering::SeqCst) => {
+                _ if oom.hit() => {
                     let (which, cause) = memory_limit_hit(&mut isolate, heap_limit);
                     limit(which, format!("the isolate's setup stopped: {cause}"))
                 }
@@ -355,24 +419,11 @@ fn vm_main(id: u64, config: VmConfig, rx: Receiver<VmMsg>, out: Output, stopper:
                 if background.paused(&out, id).is_some() {
                     continue;
                 }
-                let cpu_start = cpu_clock.map(|c| c.now()).unwrap_or_default();
-                let (wall, cpu_budget) = background.budgets(timeout, cpu);
-                bridge.blocked.set(std::time::Duration::ZERO);
-                let batch = background.start(std::time::Duration::ZERO);
-                bridge.deadline.set(watchdog.arm(wall, cpu_budget));
-                bridge.timed_out.set(false);
-                {
-                    v8::scope_with_context!(scope, &mut isolate, &context);
+                let settled = guard.background(&mut isolate, &mut background, cpu_clock, (timeout, cpu), std::time::Duration::ZERO, "timer callback", (&out, id), |isolate| {
+                    v8::scope_with_context!(scope, isolate, &context);
                     run_idle_timers(scope);
-                }
-                bridge.deadline.set(None);
-                let fired = watchdog.disarm() != Fired::No || bridge.timed_out.take();
-                if isolate.is_execution_terminating() || fired || oom.hit.load(Ordering::SeqCst) {
-                    isolate.cancel_terminate_execution();
-                }
-                let spent = usage(&mut isolate, cpu_clock, cpu_start);
-                let heap_hit = oom.hit.load(Ordering::SeqCst);
-                if let Some((r, hit)) = background.settle(batch.blocked(bridge.blocked.take()), spent, heap_hit, &out, id, "timer callback") {
+                });
+                if let Some((r, hit)) = settled {
                     retired = Some(r);
                     background_hit = hit;
                 }
@@ -394,29 +445,20 @@ fn vm_main(id: u64, config: VmConfig, rx: Receiver<VmMsg>, out: Output, stopper:
                     continue;
                 }
                 let cpu_start = cpu_clock.map(|c| c.now()).unwrap_or_default();
-                let deadline = watchdog.arm(timeout, cpu);
-                bridge.deadline.set(deadline);
-                bridge.timed_out.set(false);
                 bridge.in_eval.set(true);
                 bridge.host_calls.set(0);
                 bridge.limit_hit.replace(None);
-                let end = eval(&mut isolate, &context, &shims, &code, filename.as_deref(), &bridge.mailbox, deadline);
-                pump_tasks(&isolate);
+                let (end, fired) = guard.run(&mut isolate, timeout, cpu, |isolate, deadline| {
+                    let end = eval(isolate, &context, &shims, &code, filename.as_deref(), &bridge.mailbox, deadline);
+                    pump_tasks(isolate);
+                    end
+                });
                 bridge.in_eval.set(false);
-                bridge.deadline.set(None);
-                let fired = match watchdog.disarm() {
-                    Fired::No if bridge.timed_out.take() => Fired::Wall,
-                    f => f,
-                };
-                bridge.timed_out.set(false);
-                if isolate.is_execution_terminating() || fired != Fired::No || oom.hit.load(Ordering::SeqCst) {
-                    isolate.cancel_terminate_execution();
-                }
                 let result = match end {
                     EvalEnd::Disposed => break,
                     EvalEnd::Done(r) => r,
                 };
-                let result = if oom.hit.load(Ordering::SeqCst) {
+                let result = if oom.hit() {
                     let (which, cause) = memory_limit_hit(&mut isolate, heap_limit);
                     retired = Some(retire(format!("the isolate was terminated by an earlier eval ({cause}); create a new one")));
                     Err(limit(which, cause))
@@ -456,29 +498,16 @@ fn vm_main(id: u64, config: VmConfig, rx: Receiver<VmMsg>, out: Output, stopper:
                     deferred.push_back((call, reply));
                     continue;
                 }
-                let cpu_start = cpu_clock.map(|c| c.now()).unwrap_or_default();
-                let (wall, cpu_budget) = background.budgets(timeout, cpu);
-                bridge.blocked.set(std::time::Duration::ZERO);
-                let batch = background.start(background::REPLY_COST);
-                bridge.deadline.set(watchdog.arm(wall, cpu_budget));
-                bridge.timed_out.set(false);
-                {
-                    v8::scope_with_context!(scope, &mut isolate, &context);
+                let settled = guard.background(&mut isolate, &mut background, cpu_clock, (timeout, cpu), background::REPLY_COST, "continuation", (&out, id), |isolate| {
+                    v8::scope_with_context!(scope, isolate, &context);
                     apply_host_reply(scope, call, reply);
                     scope.perform_microtask_checkpoint();
                     while pump_tasks(scope) {
                         scope.perform_microtask_checkpoint();
                     }
                     errors::report_rejections(scope);
-                }
-                bridge.deadline.set(None);
-                let fired = watchdog.disarm() != Fired::No || bridge.timed_out.take();
-                if isolate.is_execution_terminating() || fired || oom.hit.load(Ordering::SeqCst) {
-                    isolate.cancel_terminate_execution();
-                }
-                let spent = usage(&mut isolate, cpu_clock, cpu_start);
-                let heap_hit = oom.hit.load(Ordering::SeqCst);
-                if let Some((r, hit)) = background.settle(batch.blocked(bridge.blocked.take()), spent, heap_hit, &out, id, "continuation") {
+                });
+                if let Some((r, hit)) = settled {
                     retired = Some(r);
                     background_hit = hit;
                 }
