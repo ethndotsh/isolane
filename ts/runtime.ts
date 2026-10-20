@@ -131,6 +131,8 @@ export class Runtime {
   #spares: SpareWorker[] = [];
   #spareFailures = 0;
   #workers = new Map<string, TenantWorker>();
+  /** Recycled workers finishing what they run, at most one per tenant. */
+  #draining = new Map<string, TenantWorker>();
   #nextIsolate = 1;
   #nextReq = 1;
   #closed = false;
@@ -226,8 +228,9 @@ export class Runtime {
   /** Stop every worker process. In-flight evals reject with `ERR_RUNTIME_CLOSED`. */
   close(): void {
     this.#closed = true;
-    for (const w of this.#workers.values()) w.stop('ERR_RUNTIME_CLOSED', 'was stopped: the runtime closed');
+    for (const w of [...this.#workers.values(), ...this.#draining.values()]) w.stop('ERR_RUNTIME_CLOSED', 'was stopped: the runtime closed');
     this.#workers.clear();
+    this.#draining.clear();
     for (const s of this.#spares) s.proc.kill();
     this.#spares = [];
   }
@@ -255,10 +258,12 @@ export class Runtime {
 
   /** @internal */
   [STOP](tenant: string): void {
-    const w = this.#workers.get(tenant);
-    if (!w) return;
-    this.#workers.delete(tenant);
-    w.stop('ERR_ISOLATE_CLOSED', 'was stopped');
+    for (const workers of [this.#workers, this.#draining]) {
+      const w = workers.get(tenant);
+      if (!w) continue;
+      workers.delete(tenant);
+      w.stop('ERR_ISOLATE_CLOSED', 'was stopped');
+    }
   }
 
   /** @internal Create an isolate for `tenant` with the call's config. */
@@ -341,7 +346,9 @@ export class Runtime {
 
   /** Make room for one more tenant's worker, evicting the least recently used idle one. */
   #makeRoom(limits: ResolvedLimits, tenant: string, chain: HookChain): void {
-    if (this.#workers.size < limits.tenants) return;
+    // Draining workers are processes too (a recycling tenant's replacement
+    // doesn't need room: its old worker leaves).
+    if (this.#workers.size + this.#draining.size < limits.tenants || this.#draining.has(tenant)) return;
     let lru: TenantWorker | undefined;
     for (const w of this.#workers.values()) if (w.idle && (!lru || w.idleSince < lru.idleSince)) lru = w;
     if (!lru) {
@@ -369,6 +376,7 @@ export class Runtime {
       usage: this.#usageOf(tenant),
       chain,
       onGone: (gone, exit) => this.#gone(tenant, gone, exit, chain),
+      onRecycle: (old) => this.#recycled(tenant, old),
       prepareWeb: web,
       spare: this.#takeSpare(memory),
     });
@@ -376,8 +384,19 @@ export class Runtime {
     return w;
   }
 
+  /** `old` is being recycled: the tenant's next isolate starts a fresh worker. */
+  #recycled(tenant: string, old: TenantWorker): void {
+    if (this.#workers.get(tenant) === old) this.#workers.delete(tenant);
+    // One drains at a time: one recycled before the last one drained
+    // retires that one's isolates now.
+    const before = this.#draining.get(tenant);
+    if (before && before !== old) before.stop('ERR_ISOLATE_RETIRED', 'was recycled twice before it drained; create new isolates');
+    this.#draining.set(tenant, old);
+  }
+
   #gone(tenant: string, gone: TenantWorker, exit: WorkerExit, chain: HookChain): void {
     if (this.#workers.get(tenant) === gone) this.#workers.delete(tenant);
+    if (this.#draining.get(tenant) === gone) this.#draining.delete(tenant);
     // Expected ends: stopped by us, refused (strict, incompatible), or out of memory.
     if (exit.reason === 'killed' || exit.reason === 'insufficient-isolation' || exit.reason === 'incompatible' || isOutOfMemory(exit)) return;
     // A worker exits by itself only when its stdin closes, which the

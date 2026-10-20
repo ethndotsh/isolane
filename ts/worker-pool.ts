@@ -188,10 +188,16 @@ export interface TenantWorkerOptions {
   /** The tenant's hooks (runtime, defaults, tenants(name)), for worker and limit events. */
   chain: HookChain;
   onGone: (worker: TenantWorker, exit: WorkerExit) => void;
+  /** It's being recycled: new isolates should start on a fresh worker. */
+  onRecycle: (worker: TenantWorker) => void;
   /** Its first isolate uses the web platform: build its snapshot right away. */
   prepareWeb: boolean;
   spare?: SpareWorker;
 }
+
+/** How long a recycled worker's stateful isolates have to close (or its
+ * workerLifetimeMs, if shorter) before they're retired. */
+const RECYCLE_DRAIN_MS = 60_000;
 
 /** Longest host-function error message sent to the guest. */
 const ERROR_TEXT_MAX = 64 * 1024;
@@ -224,6 +230,12 @@ export class TenantWorker {
   #onGone: (exit: WorkerExit) => void;
   /** What in-flight evals reject with when the worker is stopped on purpose. */
   #stopped: { code: IsolaneErrorCode; why: string } | undefined;
+  /** Being recycled: it takes no new isolates and stops once idle. */
+  recycling = false;
+  #onRecycle: () => void;
+  #evals = 0;
+  #lifetimeTimer: NodeJS.Timeout | undefined;
+  #drainTimer: NodeJS.Timeout | undefined;
 
   constructor(o: TenantWorkerOptions) {
     this.tenant = o.tenant;
@@ -231,6 +243,12 @@ export class TenantWorker {
     this.#usage = o.usage;
     this.#chain = o.chain;
     this.#onGone = (exit) => o.onGone(this, exit);
+    this.#onRecycle = () => o.onRecycle(this);
+    const lifetime = o.limits.workerLifetimeMs;
+    if (lifetime !== null) {
+      this.#lifetimeTimer = setTimeout(() => this.#recycle(`it reached limits.workerLifetimeMs (${lifetime}ms)`), lifetime);
+      this.#lifetimeTimer.unref();
+    }
     const handlers: WorkerHandlers = {
       onMessage: (msg) => this.#onMessage(msg),
       onExit: (exit) => this.#onExit(exit),
@@ -324,7 +342,15 @@ export class TenantWorker {
   eval(state: IsolateState, req: number, code: string, filename: string, last = false): Promise<unknown> {
     return new Promise((resolve, reject) => {
       if (!this.#proc.alive) {
-        reject(new IsolaneError('ERR_WORKER_CRASHED', `worker for tenant ${this.tenant} is gone`, { tenant: this.tenant }));
+        reject(
+          this.#stopped
+            ? new IsolaneError(this.#stopped.code, `isolane: worker for tenant ${this.tenant} ${this.#stopped.why}`, {
+                tenant: this.tenant,
+                // Retired by a recycle: a new isolate starts on the fresh worker.
+                retryable: this.#stopped.code === 'ERR_ISOLATE_RETIRED' ? true : undefined,
+              })
+            : new IsolaneError('ERR_WORKER_CRASHED', `worker for tenant ${this.tenant} is gone`, { tenant: this.tenant }),
+        );
         return;
       }
       // A frame carries at most 64 MiB: a frame the worker can't take
@@ -368,6 +394,8 @@ export class TenantWorker {
       this.#requests.set(req, pending);
       this.#touch();
       this.#proc.send(last ? { t: 'eval', vm: state.id, req, code, filename, last } : { t: 'eval', vm: state.id, req, code, filename });
+      const most = this.limits.workerEvals;
+      if (most !== null && ++this.#evals >= most) this.#recycle(`it ran limits.workerEvals (${most}) evals`);
     });
   }
 
@@ -393,7 +421,32 @@ export class TenantWorker {
   stop(code: IsolaneErrorCode = 'ERR_ISOLATE_CLOSED', why = 'was stopped'): void {
     this.#stopped ??= { code, why };
     clearTimeout(this.#idleTimer);
+    clearTimeout(this.#lifetimeTimer);
+    clearTimeout(this.#drainTimer);
     this.#proc.kill();
+  }
+
+  /**
+   * Replace this worker: the runtime starts new isolates on a fresh one,
+   * this one stops once what it's running is done, and stateful isolates
+   * still open after the drain period are retired with it.
+   */
+  #recycle(why: string): void {
+    if (this.recycling || this.#stopped || !this.#proc.alive) return;
+    this.recycling = true;
+    clearTimeout(this.#lifetimeTimer);
+    this.#chain.emit('worker', { tenant: this.tenant, event: 'recycle', pid: this.#proc.pid, reason: why });
+    this.#onRecycle();
+    if (this.idle) {
+      this.stop('ERR_ISOLATE_CLOSED', `was recycled: ${why}`);
+      return;
+    }
+    const drainMs = Math.min(RECYCLE_DRAIN_MS, this.limits.workerLifetimeMs ?? RECYCLE_DRAIN_MS);
+    this.#drainTimer = setTimeout(
+      () => this.stop('ERR_ISOLATE_RETIRED', `was recycled (${why}) and its isolates were retired; create new ones`),
+      drainMs,
+    );
+    this.#drainTimer.unref();
   }
 
   /** Nobody waits for these calls any more: abort their signals. */
@@ -407,6 +460,10 @@ export class TenantWorker {
 
   #touch(): void {
     clearTimeout(this.#idleTimer);
+    if (this.recycling && this.idle) {
+      this.stop('ERR_ISOLATE_CLOSED', 'was recycled');
+      return;
+    }
     if (this.idle) {
       this.idleSince = Date.now();
       this.#idleTimer = setTimeout(() => this.stop('ERR_ISOLATE_CLOSED', 'was stopped after being idle'), this.limits.idleMs);
@@ -623,6 +680,8 @@ export class TenantWorker {
 
   #onExit(exit: WorkerExit): void {
     clearTimeout(this.#idleTimer);
+    clearTimeout(this.#lifetimeTimer);
+    clearTimeout(this.#drainTimer);
     const oom = isOutOfMemory(exit);
     const code: IsolaneErrorCode = oom
       ? 'ERR_LIMIT'
@@ -639,8 +698,9 @@ export class TenantWorker {
     const err = new IsolaneError(code, `isolane: worker for tenant ${this.tenant} ${why}`, {
       tenant: this.tenant,
       limit: oom ? 'workerMemoryBytes' : undefined,
-      // A fresh worker has its full memory again.
-      retryable: oom ? true : undefined,
+      // A fresh worker has its full memory again; a new isolate after a
+      // recycle starts on the fresh worker.
+      retryable: oom || code === 'ERR_ISOLATE_RETIRED' ? true : undefined,
     });
     if (oom && this.#requests.size) {
       this.#chain.emit('limit', { tenant: this.tenant, limit: 'workerMemoryBytes', message: err.message });

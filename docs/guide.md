@@ -377,7 +377,7 @@ hooks run.
 | `onLimit` | event | any limit hit |
 | `onPolicyDenial` | event | a `fetch`, `connect`, or `fs` refusal (including a name that resolves only to private addresses) |
 | `onSecurityEvent` | event | a worker crash, protocol violation, or unresponsive worker |
-| `onWorker` | event | a tenant's worker started or exited |
+| `onWorker` | event | a tenant's worker started, is being recycled (`workerLifetimeMs`, `workerEvals`), or exited |
 
 Interceptors run in onion order: `before*` outermost level first, `after*`
 innermost first. `runtime.on(event, fn)` gets the same events and returns an
@@ -429,6 +429,7 @@ await acme.run(app.code, {
 | `workerMemoryBytes` | 2 GiB | tenant (Linux; covers ArrayBuffer and WebAssembly memory a heap limit doesn't) |
 | `idleMs` | 30 s | tenant (an idle worker exits) |
 | `workerBackgroundMs` | 10 s per minute | tenant: `backgroundMs` for all its isolates together (pauses their background work) |
+| `workerLifetimeMs` / `workerEvals` | 1 hour / 100,000 | tenant: recycle its worker after this long, or this many evals |
 | `tenants` | 1,000 | runtime (evicts the least recently used idle tenant) |
 
 **Work between evals.** After an eval returns, a stateful isolate can
@@ -454,6 +455,16 @@ continuations wait until it has refilled, its evals still run, and
 Isolates in the middle of a batch when it runs out finish it (at most a
 10 ms slice each), and what they overdraw is paid back before any
 background work runs again.
+
+**Recycling.** A tenant's worker is replaced after `workerLifetimeMs` or
+`workerEvals`, so a worker that guest code had quietly compromised doesn't
+live on. `onWorker` fires with `event: 'recycle'`, new isolates (every
+`run`) start on a fresh worker, and the old one finishes what it's
+running and exits. Stateful isolates still open on it keep working for up
+to a minute (or `workerLifetimeMs`, if that's shorter); then they're
+retired: their evals fail with `ERR_ISOLATE_RETIRED`, `retryable`, and a
+new isolate starts on the fresh worker. Code that keeps an isolate for
+long should expect that, and recreate it.
 
 **Host calls.** A call past `pendingHostCalls`, `hostCalls`, or
 `hostCallBytes` throws a `RangeError` in the guest (`code: 'ERR_LIMIT'`,
@@ -481,7 +492,7 @@ input.
 
 Isolate limits can be set at every level; tenant limits at the runtime and
 in `tenants(name)`; `tenants` on the runtime only. Each is an integer of at
-least 1, and durations (`timeoutMs`, `cpuMs`, `backgroundMs`, `idleMs`, `workerBackgroundMs`, and the policies'
+least 1, and durations (`timeoutMs`, `cpuMs`, `backgroundMs`, `idleMs`, `workerBackgroundMs`, `workerLifetimeMs`, and the policies'
 `*Ms` limits) are at most 2^31 - 1 ms, `timers` at most 2^32 - 1, and
 `heapBytes` at most 4 GiB (V8's largest heap); anything else is
 `ERR_INVALID_CONFIG`. Hitting any limit fails

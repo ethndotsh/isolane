@@ -2,7 +2,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
-import { Runtime } from '../dist/index.js';
+import { Runtime, DEFAULT_LIMITS } from '../dist/index.js';
 import { pool, code, isolate, strict } from './helpers.mjs';
 
 test('each tenant gets its own worker process', async () => {
@@ -44,6 +44,62 @@ test('usage is accounted per tenant', async () => {
   rt.tenant('billed').resetUsage();
   assert.equal(rt.tenant('billed').usage().evals, 0);
   assert.equal(rt.tenant('nobody').usage().evals, 0);
+  rt.close();
+});
+
+test('recycling: worker defaults', () => {
+  assert.equal(DEFAULT_LIMITS.workerLifetimeMs, 3_600_000);
+  assert.equal(DEFAULT_LIMITS.workerEvals, 100_000);
+  assert.throws(() => new Runtime({ defaults: { limits: { workerEvals: 0 } } }), code('ERR_INVALID_CONFIG'));
+});
+
+test('recycling limits are tenant limits', async () => {
+  await assert.rejects(pool.run('1', { tenant: 'x', limits: { workerLifetimeMs: 10 } }), code('ERR_INVALID_CONFIG'));
+});
+
+test('a worker is recycled after limits.workerEvals evals', async () => {
+  const events = [];
+  const rt = new Runtime({ strict, defaults: { limits: { workerEvals: 3 } }, hooks: { onWorker: (e) => events.push(e) } });
+  const t = rt.tenant('busy');
+  const pids = [];
+  for (let i = 0; i < 4; i++) {
+    assert.equal(await t.run(`${i} + 1`), i + 1);
+    pids.push(rt.diagnostics.workerPid('busy'));
+  }
+  // The third eval reached the limit, and its worker stopped once that
+  // run was done: the fourth ran on a fresh worker.
+  assert.equal(pids[0], pids[1], `${pids}`);
+  assert.equal(pids[2], undefined, `${pids}`);
+  assert.ok(pids[3] && pids[3] !== pids[0], `${pids}`);
+  const recycle = events.find((e) => e.event === 'recycle');
+  assert.ok(recycle, JSON.stringify(events));
+  assert.equal(recycle.pid, pids[0]);
+  assert.match(recycle.reason, /workerEvals/);
+  await new Promise((r) => setTimeout(r, 100));
+  assert.ok(events.some((e) => e.event === 'exit' && e.pid === pids[0]), 'the old worker exited once drained');
+  rt.close();
+});
+
+test('a recycled worker drains: open isolates keep working, then are retired', async () => {
+  const events = [];
+  const rt = new Runtime({ strict, defaults: { limits: { workerLifetimeMs: 400 } }, hooks: { onWorker: (e) => events.push(e) } });
+  const t = rt.tenant('long');
+  const vm = t.isolate();
+  await vm.eval('globalThis.kept = 1');
+  const first = rt.diagnostics.workerPid('long');
+  await new Promise((r) => setTimeout(r, 500)); // past its lifetime
+  assert.ok(events.some((e) => e.event === 'recycle' && e.pid === first), JSON.stringify(events));
+  // New work starts on a fresh worker; the open isolate is still on the old one.
+  assert.equal(await t.run('2'), 2);
+  assert.notEqual(rt.diagnostics.workerPid('long'), first);
+  assert.equal(await vm.eval('kept'), 1);
+  // Its drain period (its lifetime, here) ends: the isolate is retired.
+  await new Promise((r) => setTimeout(r, 400));
+  const err = await vm.eval('kept').catch((e) => e);
+  assert.equal(err.code, 'ERR_ISOLATE_RETIRED', String(err));
+  assert.equal(err.retryable, true);
+  assert.match(err.message, /recycled/);
+  vm.close();
   rt.close();
 });
 

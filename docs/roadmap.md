@@ -127,7 +127,7 @@ first pass's findings:
 | `place_bytes` followed inherited properties on host-reply byte paths | low | Only own properties are followed and set (`create_data_property`), so no path reaches a prototype or runs a setter | done |
 | Crypto inputs: an RSA `publicExponent` became a big integer before its check (16 MiB peaked at ~84 MiB); key data was parsed before the modulus cap; error strings could panic | low | Exponents longer than 3 significant bytes are refused first; RSA and EC key data over 64 KiB is refused before parsing; crypto error messages are cut to 1 KiB and never panic. Open: RSA key generation (up to 4,096 bits) can't be interrupted (accepted in `docs/design.md`); moving long crypto off the VM thread is the row in section 3 | partly done |
 | `globals` could replace built-ins (`Object`, `TextEncoder`) or fail setup on non-writable names | low | ECMAScript names are refused as `ERR_INVALID_CONFIG`, web platform names when the isolate starts; each global is defined, never assigned | done |
-| The review's release gate | — | Now a checklist in `SECURITY.md`. Still open before untrusted production: supervisor-side CPU accounting, the Linux fd and syscall gates passing in CI, the external review and Fuzzilli (P5). Since done: the tenant-wide background budget | open |
+| The review's release gate | — | Now a checklist in `SECURITY.md`. Still open before untrusted production: supervisor-side CPU accounting, the Linux fd and syscall gates passing in CI, the external review and Fuzzilli (P5). Since done: the tenant-wide background budget, worker recycling | open |
 
 A third pass ranked what's left by worst case:
 
@@ -140,6 +140,7 @@ A third pass ranked what's left by worst case:
 | C4 (EXT-02): a writable `fs.root` could race a symlink between the broker resolving a path and opening it | high (conditional) | On Linux every path is walked one component at a time from held directory descriptors, opening `/proc/self/fd/<dir>/<name>` with `O_NOFOLLOW` (an `openat` without a native addon); symlinks are read and re-walked from the root only while they stay inside, and recursive `rm` descends by descriptor. A race test flips a directory and a symlink to outside under concurrent writes and reads (`test/fs-confinement.test.mjs`; it fails on the old code). macOS, development only, still resolves then opens | done (Linux) |
 | C5: a compromised worker can call any host function registered for any isolate of its tenant (they share one worker process) | — | Inherent while a tenant's isolates share a process: the supervisor can't tell which isolate a compromised worker is really calling for. The tenant is the security boundary, not the isolate (now said in `docs/design.md`); code that needs isolates as separate domains should give them separate tenants | decided |
 | C6: a V8 sandbox or kernel zero-day | — | The release gate: Fuzzilli, the external review, and a run of the real Linux worker under them | planned (P5) |
+| EXT-06: worker recycling and the `--jitless` quarantine worker were planned, not built, so a compromised but running worker lived until it idled out | medium | Recycling after `workerLifetimeMs` (1 hour) or `workerEvals` (100,000), with `onWorker` `recycle` events; the `--jitless` worker stays planned (it needs its own snapshot and no WebAssembly) | mostly done |
 | EXT-07: `backgroundMs` was per isolate, so 100 isolates got 100 budgets | medium | `workerBackgroundMs`, one budget per tenant (default 10 s per minute) that pauses rather than retires | done |
 
 ## 2. Guest capabilities (per-VM policies)
@@ -452,7 +453,7 @@ differences.
 | Uniform naming (units as suffixes, capabilities named for guest APIs, one word per idea; full rename table in the review) | done |
 | Host functions: one definition form (`hostFunction({ args, returns, handler, sync })`), namespaces (frozen in the guest), a call context (`tenant`, `isolate`, `signal`, `log`) | done |
 | One hook system: `before*`/`after*` interceptors and `on*` events at every level, plus `runtime.on()`; host calls, evals, logs, limits, policy denials, security events, worker lifecycle | done |
-| `onWorker` `recycle` events (once workers are recycled) | planned |
+| `onWorker` `recycle` events | done |
 | Hooks over the brokers (`fetch`/`connect`/`fs` as host calls under `beforeHostCall`), beyond `onPolicyDenial` | idea |
 | `Tenant` handle owns tenant operations (`run`, `isolate()`, `usage`, `resetUsage`, `release`, `stop`); `close()` everywhere; internals behind `runtime.diagnostics` | done |
 | One `ERR_LIMIT` code with `err.limit` for every limit | done |
@@ -498,10 +499,11 @@ Measured against isolated-vm (Linux x64 under Rosetta; superseded by the CI comp
 |---|---|
 | Stress soak: VM floods, tenant floods, crash churn, VM/eval leaks, noisy neighbours, memory bombs | done (weekly; first results pending) |
 | Unified, configurable limits (`limits` on the runtime, `tenantLimits(tenant)`, and per isolate): timeoutMs (now 30 s by default), cpuTimeMs, heapBytes (now 128 MiB by default), timers, logBytesPerEval, logMessageBytes, codeBytes, resultBytes, decompressedBytes, isolates (100), concurrentEvals, workerMemoryBytes, tenants (LRU eviction of idle tenants); `ERR_RESOURCE_LIMIT` with `err.limit`. Prompted by the first soak, where one tenant's worker crashed between 300 and 400 live isolates | done |
-| More limits: pending host calls per isolate, host calls per eval, host-call payload bytes (after binary frames land), sockets/fetch totals per tenant, worker lifetime / evals per worker (recycling) | planned |
+| More limits: pending host calls per isolate, host calls per eval, host-call payload bytes (after binary frames land), sockets/fetch totals per tenant. (Done since: the host-call limits, and worker lifetime and evals as `workerLifetimeMs` / `workerEvals`.) | planned |
 | One watchdog thread per worker instead of per isolate (halves thread count: each isolate is 2 threads today) | planned |
 | First soak results (Linux x64, 2-core runner): no leaks (3,000 isolate create/dispose cycles 19→21 MB; 20,000 evals in one isolate 20→24 MB, flat); crash churn leaks no fds or zombies; noisy neighbour raises another tenant's p99 from 0.9 to 4.5 ms (same worker: 6 ms); 20 isolates hitting a 64 MB heap limit at once all get ERR_MEMORY_LIMIT and the worker keeps serving; 150 tenants at once: all succeed, 16 MB RSS each, cold start p50 721 ms under that contention | done |
-| Worker recycling: max lifetime / max requests | planned |
+| Worker recycling: `limits.workerLifetimeMs` (default 1 hour) and `limits.workerEvals` (default 100,000), tenant limits. A recycled worker takes no new isolates (the next run starts a fresh worker), finishes what it runs, and exits once idle; stateful isolates still open on it get a minute (or `workerLifetimeMs`, if shorter), then are retired (`ERR_ISOLATE_RETIRED`, `retryable`). At most one drains per tenant | done |
+| A `--jitless` worker for tenants on probation after a quarantine: it needs its own web snapshot (the embedded one is checked against V8's flags) and can't run WebAssembly, so `wasm: true` would need a clear refusal there | planned |
 | Metrics: per-tenant totals via `runtime.usage()` | done |
 | Metrics hooks: per-eval callback / OpenTelemetry export | planned |
 

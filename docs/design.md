@@ -59,7 +59,7 @@ to attempt Spectre-style side channels.
 | Escape to the machine (files, network, other processes) | seccomp allowlist in every worker | Landlock (no filesystem); namespaces where the host allows them (planned) |
 | Side-channel reads (Spectre) | Separate processes per tenant; frozen clocks; no shared memory or threads | Quarantine on crashes |
 | Denial of service | Per-isolate heap limit; CPU and wall-clock budgets via `TerminateExecution` | Per-worker rlimits; worker count caps; cgroups where available (planned) |
-| Persist after compromise | Workers recycled on a schedule (planned: today a worker lives until it idles out, crashes, or is stopped) | Crash = quarantine the tenant + replace the worker |
+| Persist after compromise | Workers recycled after `workerLifetimeMs` (1 hour) or `workerEvals` (100,000) | Crash = quarantine the tenant + replace the worker |
 
 **Trusted:** the isolane library running in the application's Node process,
 and the kernel (minimized by seccomp). **Untrusted:** everything inside a
@@ -113,9 +113,11 @@ code, the worker is treated as potentially compromised.
   reach every isolate's state and call every host function registered for
   any of them. To keep two isolates apart, give them separate tenants.
 - **Lifecycle:** workers start on a tenant's first request and idle out
-  after a configurable period. Recycling after a maximum lifetime or request
-  count is planned, not built: until then a worker that is compromised but
-  keeps running lives until it idles out or is stopped.
+  after a configurable period. They're recycled after `workerLifetimeMs` or
+  `workerEvals`: new isolates start on a fresh worker, and the old one
+  exits once it has finished what it runs, retiring stateful isolates
+  still open on it after a minute. So a worker that is compromised but
+  keeps running lives at most about that long.
 
 ### Request flow
 
@@ -205,14 +207,17 @@ deploying. Development mode warns instead of refusing.
 ### L3: Tenancy, recycling, quarantine
 
 - Process per tenant by default (above).
-- Planned: workers recycled after a maximum lifetime or request count.
+- Workers are recycled after a maximum lifetime or eval count
+  (`workerLifetimeMs`, `workerEvals`; see Lifecycle above).
 - A worker crash (SIGSEGV, a V8 sandbox violation, or a seccomp kill), a
   protocol violation, or an unresponsive worker is treated as a possible
   exploit attempt. The worker is gone (killed if needed), the tenant is
   refused with `ERR_TENANT_QUARANTINED` for `quarantineMs`, and the event is
   surfaced through `onSecurityEvent` with the tenant and what happened, so
   the application can alert or suspend the account. Planned: a `--jitless`
-  quarantine worker instead of refusing, and a hash of the code that ran.
+  quarantine worker instead of refusing (it needs its own web snapshot,
+  since the snapshot is checked against V8's flags, and can't offer
+  WebAssembly), and a hash of the code that ran.
 - What a worker reports about itself is advisory once it has run guest
   code: usage figures (CPU, memory, log bytes), the limit it says was hit,
   and its exit code come from a process that may be compromised. The
@@ -220,7 +225,7 @@ deploying. Development mode warns instead of refusing.
   bytes itself, and kills a worker that breaks the protocol, but billing on
   `usage()` trusts the worker's word. The background budgets
   (`backgroundMs`, `workerBackgroundMs`) are enforced by the worker too,
-  so a compromised worker escapes them.
+  so a compromised worker escapes them; recycling is what still holds.
 
 ### L4: Shipping V8 fixes through npm
 

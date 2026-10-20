@@ -23,7 +23,7 @@ has the details and is kept current.
 | Fuzzilli against the release embedding, an external review sign-off, and a written acceptance of the residual risks | open |
 | `fs` writes confined against symlink races (`openat2`/dirfd), or a rule that `fs.write` never covers code or executables | open |
 | A tenant's isolates aren't separate security domains | decided: the tenant is the boundary (`docs/design.md`) |
-| Recovery after a compromise: worker recycling (max lifetime, max requests), ideally a `--jitless` quarantine worker | open |
+| Recovery after a compromise: worker recycling (max lifetime, max requests), ideally a `--jitless` quarantine worker | partly: recycling after `limits.workerLifetimeMs` / `workerEvals`; the `--jitless` worker is planned |
 | A tenant-wide background CPU budget, or the per-isolate one accepted | done: `limits.workerBackgroundMs` |
 | CPU accounting the worker can't forge, or `usage()` documented as advisory | partly: documented as advisory |
 | `prctl` narrowed; byte limits for `fs`, `connect`, and `fetch`; `x448` and `paste` resolved or accepted | partly: `prctl` narrowed, `fs.limits.writtenBytes` added, `paste` accepted and `x448` pinned (`.cargo/audit.toml`); `connect` bytes and a default for `fetch.limits.requests` open |
