@@ -47,14 +47,17 @@ test('usage is accounted per tenant', async () => {
   rt.close();
 });
 
-test('usage keeps counting after resetUsage, and the supervisor measures worker CPU on Linux', async () => {
+test('usage keeps counting after resetUsage, and the supervisor measures worker CPU on Linux', async (t) => {
   const rt = new Runtime({ strict });
-  const t = rt.tenant('meter');
-  const vm = t.isolate();
+  // Closed even when an assertion fails: an open runtime keeps its worker,
+  // and with it this test file, alive until the worker's lifetime ends.
+  t.after(() => rt.close());
+  const tenant = rt.tenant('meter');
+  const vm = tenant.isolate();
   await vm.eval('1');
-  t.resetUsage();
+  tenant.resetUsage();
   await vm.eval('let x = 0; for (let i = 0; i < 3e7; i++) x += i; x');
-  const u = t.usage();
+  const u = tenant.usage();
   assert.equal(u.evals, 1, 'the live worker counts into the reset usage');
   if (process.platform === 'linux') {
     assert.ok(u.workerCpuMs > 0, `workerCpuMs ${u.workerCpuMs}`);
