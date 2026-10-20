@@ -852,7 +852,7 @@ const server = createServer((req, res) => {
 await new Promise((r) => server.listen(0, '127.0.0.1', r));
 after(() => server.close());
 const base = `http://localhost:${server.address().port}`;
-const NET = { fetch: { hosts: ['localhost'], privateNetworks: true }, limits: { timeoutMs: 5000 } };
+const NET = { fetch: { hosts: ['localhost:*'], privateNetworks: true }, limits: { timeoutMs: 5000 } };
 const fetchRun = (body, opts = {}) => run(`(async () => { ${body} })()`, { ...NET, ...opts });
 
 test('Headers, Request, Response, and FormData follow the spec', async () => {
@@ -1016,7 +1016,7 @@ test('fetch: the fetch policy still decides, and failures are TypeErrors', async
   );
   // A private address without privateNetworks.
   await assert.rejects(
-    run(`fetch('${base}/json')`, { fetch: { hosts: ['localhost'] } }),
+    run(`fetch('${base}/json')`, { fetch: { hosts: ['localhost:*'] } }),
     /no public address/,
   );
 });

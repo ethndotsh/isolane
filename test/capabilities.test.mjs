@@ -135,11 +135,11 @@ const server = createServer((req, res) => {
 await new Promise((r) => server.listen(0, '127.0.0.1', r));
 after(() => server.close());
 const base = `http://localhost:${server.address().port}`;
-const local = { hosts: ['localhost'], privateNetworks: true };
+const local = { hosts: ['localhost:*'], privateNetworks: true };
 
 test('public and non-public addresses', () => {
-  for (const a of ['8.8.8.8', '1.1.1.1', '2606:4700:4700::1111']) assert.equal(isPublicAddress(a), true, a);
-  for (const a of ['127.0.0.1', '10.1.2.3', '172.16.0.1', '192.168.1.1', '169.254.169.254', '100.64.0.1', '0.0.0.0', '::1', '::', 'fd00::1', 'fe80::1', '::ffff:127.0.0.1', '::ffff:7f00:1', '64:ff9b::a9fe:a9fe', 'not-an-ip']) {
+  for (const a of ['8.8.8.8', '1.1.1.1', '2606:4700:4700::1111', '2a00:1450:4001:80e::200e', '2620:fe::fe']) assert.equal(isPublicAddress(a), true, a);
+  for (const a of ['127.0.0.1', '10.1.2.3', '172.16.0.1', '192.168.1.1', '169.254.169.254', '100.64.0.1', '0.0.0.0', '::1', '::', 'fd00::1', 'fe80::1', '::ffff:127.0.0.1', '::ffff:7f00:1', '::ffff:0:7f00:1', '64:ff9b::a9fe:a9fe', '64:ff9b:1::a9fe:a9fe', '2002:7f00:1::', '2002:a9fe:a9fe::', '2001:0:4136:e378:8000:63bf:3fff:fdd2', '2001:2::1', 'fec0::1', '3fff::1', '5f00::1', 'not-an-ip']) {
     assert.equal(isPublicAddress(a), false, a);
   }
 });
@@ -167,6 +167,16 @@ test('fetch: request bodies and headers cross intact, and the broker controls Ho
   assert.equal(Buffer.from(text, 'base64').toString(), 'héllo 🌍');
 });
 
+test('fetch: a bare host allows only its scheme\'s default port', async () => {
+  const port = new URL(base).port;
+  await assert.rejects(guest({ fetch: { hosts: ['localhost'], privateNetworks: true } })(`await fetch('${base}/json')`), /not allowed by the fetch policy/);
+  for (const hosts of [[`localhost:${port}`], ['localhost:*']]) {
+    assert.equal(await guest({ fetch: { hosts, privateNetworks: true } })(`return (await fetch('${base}/json')).status`), 200, hosts[0]);
+  }
+  await assert.rejects(guest({ fetch: { hosts: ['localhost:1'], privateNetworks: true } })(`await fetch('${base}/json')`), /not allowed by the fetch policy/);
+  await assert.rejects(guest({ fetch: { hosts: ['api.example.com'] } })(`await fetch('https://api.example.com:8443/')`), /not allowed by the fetch policy/);
+});
+
 test('fetch: hosts outside the allowlist are refused', async () => {
   const run = guest({ fetch: { hosts: ['api.example.com', '*.example.org'] } });
   await assert.rejects(run(`await fetch('${base}/json')`), /not allowed by the fetch policy/);
@@ -175,7 +185,7 @@ test('fetch: hosts outside the allowlist are refused', async () => {
 });
 
 test('fetch: private addresses are refused unless allowed, even for allowed names', async () => {
-  const run = guest({ fetch: { hosts: ['localhost', '127.0.0.1', '169.254.169.254'] } });
+  const run = guest({ fetch: { hosts: ['localhost:*', '127.0.0.1:*', '169.254.169.254'] } });
   await assert.rejects(run(`await fetch('${base}/json')`), /no public address/);
   await assert.rejects(run(`await fetch('http://127.0.0.1:1/')`), /not a public address/);
   await assert.rejects(run(`await fetch('http://169.254.169.254/latest/meta-data/')`), /not a public address/);
@@ -189,7 +199,7 @@ test('fetch: redirects are followed and re-checked', async () => {
   const kept = await run(`const r = await fetch('${base}/to-echo', { method: 'POST', body: 'x', headers: { authorization: 'secret' } }); return await r.json();`);
   assert.equal(kept.method, 'POST'); // 307 keeps the method
   assert.equal(kept.headers.authorization, 'secret'); // same origin: credentials stay
-  const both = guest({ fetch: { hosts: ['localhost', '127.0.0.1'], privateNetworks: true } });
+  const both = guest({ fetch: { hosts: ['localhost:*', '127.0.0.1:*'], privateNetworks: true } });
   const moved = await both(`const r = await fetch('${base}/to-other-origin', { headers: { authorization: 'secret' } }); return await r.json();`);
   assert.equal(moved.headers.authorization, undefined); // another origin: dropped
 });

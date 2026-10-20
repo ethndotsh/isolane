@@ -375,7 +375,7 @@ async function runOne(run, lane) {
       limits: { timeoutMs: run.meta.timeout === 'long' ? 60_000 : 20_000, heapBytes: 256 << 20 },
       // The methods these tests use (isolane's default allows the common ones).
       fetch: {
-        hosts: ['localhost', '127.0.0.1'],
+        hosts: ['localhost:*', '127.0.0.1:*'],
         privateNetworks: true,
         methods: ['GET', 'HEAD', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS', 'CHICKEN', 'TACO', 'TESTING'],
         // Fetch's own redirect limit (isolane's default policy allows 5).

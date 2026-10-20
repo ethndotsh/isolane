@@ -141,16 +141,23 @@ about 30 ms, once.
 
 ```js
 fetch: {
-  hosts: ['api.example.com', '*.example.org'], // or a function (url, method) => boolean
+  hosts: ['api.example.com', '*.example.org', 'internal.example:8443'], // or a function (url, method) => boolean
   methods: ['GET', 'POST'],
   privateNetworks: false,
   limits: { requests: 100, requestBytes: 10 << 20, responseBytes: 10 << 20, redirects: 5, timeoutMs: 30_000 },
 }
 ```
 
+Only `http:` and `https:` URLs are fetched. A bare host (`api.example.com`,
+`*.example.org`) allows only the scheme's default port, 443 or 80; name
+other ports as `host:port`, `[v6]:port`, or `host:*`.
+
 Private, loopback, and link-local addresses (including cloud metadata at
 169.254.169.254) are refused unless `privateNetworks: true`, checked on the
-address actually connected to, and every redirect hop is re-checked.
+address actually connected to, and every redirect hop is re-checked. So are
+IPv6 addresses that embed or translate to IPv4 ones (IPv4-mapped and
+-translated, NAT64, 6to4, Teredo), since a host with a route for them would
+reach the IPv4 address inside.
 
 ### `connect`
 

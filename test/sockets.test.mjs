@@ -346,7 +346,7 @@ test('a name that resolves only to private addresses is a policy denial', async 
   denials.length = 0;
   const fetched = await runtime.run(`fetch('http://localhost:${echoPort}/').then(() => 'ok', (e) => e.message)`, {
     tenant: 'sockets',
-    fetch: { hosts: ['localhost'] },
+    fetch: { hosts: ['localhost:*'] },
   });
   assert.match(fetched, /no public address/);
   assert.deepEqual(denials.map((d) => [d.api, d.target, d.reason]), [['fetch', `http://localhost:${echoPort}/`, 'not a public address']]);

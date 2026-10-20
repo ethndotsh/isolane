@@ -77,14 +77,14 @@ test('fetch and fs policies reach the guest through the worker', async () => {
   writeFileSync(join(dir, 'a.txt'), 'from disk');
   try {
     const url = `http://localhost:${server.address().port}/hi`;
-    const fetch = { hosts: ['localhost'], privateNetworks: true };
+    const fetch = { hosts: ['localhost:*'], privateNetworks: true };
     assert.deepEqual(await pool.run(`fetch('${url}').then((r) => r.json())`, { ...T, fetch }), { path: '/hi' });
     assert.equal(await pool.run(`fs.readFile('/a.txt', 'utf8')`, { ...T, fs: { root: dir } }), 'from disk');
     assert.deepEqual(
       await pool.run('[typeof fetch, typeof fs, typeof __isolane_fetch, typeof __isolane_fs]', { ...T, fetch, fs: { root: dir } }),
       ['function', 'object', 'undefined', 'undefined'],
     );
-    await assert.rejects(pool.run(`fetch('${url}')`, { ...T, fetch: { hosts: ['localhost'] } }), /no public address/);
+    await assert.rejects(pool.run(`fetch('${url}')`, { ...T, fetch: { hosts: ['localhost:*'] } }), /no public address/);
     await assert.rejects(pool.run(`fs.writeFile('/b.txt', 'x')`, { ...T, fs: { root: dir } }), /read-only/);
   } finally {
     server.close();

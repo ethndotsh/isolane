@@ -98,12 +98,22 @@ for (const [net, prefix] of [
 for (const [net, prefix] of [
   ['::', 96], // unspecified, loopback, IPv4-compatible
   ['::ffff:0:0', 96], // IPv4-mapped
-  ['64:ff9b::', 96], // NAT64
-  ['100::', 64],
-  ['2001:db8::', 32],
-  ['fc00::', 7],
-  ['fe80::', 10],
-  ['ff00::', 8],
+  ['::ffff:0:0:0', 96], // IPv4-translated
+  ['64:ff9b::', 96], // NAT64 (well-known prefix)
+  ['64:ff9b:1::', 48], // NAT64 (local-use)
+  ['100::', 64], // discard-only
+  // Transition and special-purpose space: Teredo (2001::/32), benchmarking,
+  // ORCHID. Teredo and 6to4 addresses embed an IPv4 address, which a host
+  // with a relay route would reach (2002:7f00:1:: is 127.0.0.1).
+  ['2001::', 23],
+  ['2001:db8::', 32], // documentation
+  ['2002::', 16], // 6to4
+  ['3fff::', 20], // documentation
+  ['5f00::', 16], // SRv6 SIDs
+  ['fc00::', 7], // unique local
+  ['fe80::', 10], // link-local
+  ['fec0::', 10], // site-local (deprecated)
+  ['ff00::', 8], // multicast
 ] as const) {
   NON_PUBLIC_V6.addSubnet(net, prefix, 'ipv6');
 }
@@ -135,9 +145,16 @@ function pinnedLookup(allowPrivate: boolean, refused: () => void) {
   };
 }
 
-function hostAllowed(patterns: readonly string[], host: string): boolean {
+/** `host` and `*.host` allow the scheme's default port (443 or 80) only;
+ * `host:port`, `[v6]:port`, and `host:*` name others. */
+function hostAllowed(patterns: readonly string[], host: string, port: number, defaultPort: number): boolean {
   return patterns.some((p) => {
-    const pattern = p.toLowerCase();
+    let pattern = p.toLowerCase();
+    let portPattern: string | undefined;
+    const bracket = /^\[([^\]]+)\](?::(.*))?$/.exec(pattern);
+    if (bracket) [, pattern, portPattern] = bracket;
+    else if (pattern.indexOf(':') !== -1 && pattern.indexOf(':') === pattern.lastIndexOf(':')) [pattern, portPattern] = pattern.split(':');
+    if (portPattern === undefined ? port !== defaultPort : portPattern !== '*' && Number(portPattern) !== port) return false;
     return pattern.startsWith('*.') ? host.endsWith(pattern.slice(1)) : host === pattern;
   });
 }
@@ -250,12 +267,15 @@ export function fetchBroker(policy: FetchPolicy, denied: DenialReporter = () => 
       throw new TypeError(`fetch: ${url.protocol} URLs are not supported`);
     }
     const host = url.hostname.replace(/^\[|\]$/g, '');
+    const defaultPort = url.protocol === 'https:' ? 443 : 80;
     if (!allowPrivate && isIP(host) && !isPublicAddress(host)) {
       denied('fetch', redacted(url), 'not a public address');
       throw new Error(`fetch to ${url.origin} is not allowed: not a public address`);
     }
     const allowed =
-      typeof policy.hosts === 'function' ? await policy.hosts(new URL(url), method) : hostAllowed(policy.hosts, host);
+      typeof policy.hosts === 'function'
+        ? await policy.hosts(new URL(url), method)
+        : hostAllowed(policy.hosts, host.toLowerCase(), Number(url.port) || defaultPort, defaultPort);
     if (allowed !== true) {
       denied('fetch', redacted(url), 'not allowed by the fetch policy');
       throw new Error(`fetch to ${url.origin} is not allowed by the fetch policy`);

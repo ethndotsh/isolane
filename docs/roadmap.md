@@ -129,6 +129,17 @@ first pass's findings:
 | `globals` could replace built-ins (`Object`, `TextEncoder`) or fail setup on non-writable names | low | ECMAScript names are refused as `ERR_INVALID_CONFIG`, web platform names when the isolate starts; each global is defined, never assigned | done |
 | The review's release gate | — | Still open before untrusted production: the tenant-wide background budget (or accepting it), `prctl` narrowed, supervisor-side CPU accounting, the Linux fd and syscall gates passing in CI, the external review and Fuzzilli (P5) | open |
 
+A third pass ranked what's left by worst case:
+
+| Finding | Severity | Fix | Status |
+|---|---|---|---|
+| C1: IPv6 addresses that embed an IPv4 address passed the private-address check: 6to4 (`2002:7f00:1::` is 127.0.0.1, `2002:a9fe:a9fe::` is 169.254.169.254), Teredo (`2001::/32`), local-use NAT64 (`64:ff9b:1::/48`), IPv4-translated (`::ffff:0:0:0/96`). A host with routes for them would reach loopback or cloud metadata | critical (policy bypass) | All of them are non-public now, along with the rest of IANA's special-purpose IPv6 space (`2001::/23`, `3fff::/20`, `5f00::/16`, `fec0::/10`); tested | done |
+| C7: `fetch` allowed any port on an allowed host | medium | A bare host allows only the scheme's default port (443 or 80); others are named as `host:port`, `[v6]:port`, or `host:*`. Only `http:`/`https:` are fetched, as before. **Breaking**: a policy that relied on other ports must name them | done |
+| C2: macOS, `strict: false`, and dev builds without the V8 sandbox can't contain untrusted code | — | Accepted by design: strict mode refuses them. Ship macOS workers for development only | decided |
+| C4: a writable `fs.root` can still race a symlink between the broker resolving a path and opening it | medium | Open every path relative to a directory descriptor for the root with `openat2(RESOLVE_BENEATH \| RESOLVE_NO_SYMLINKS)` on Linux (a small native helper or Node API if one lands); elsewhere, `O_NOFOLLOW` per component | planned |
+| C5: a compromised worker can call any host function registered for any isolate of its tenant (they share one worker process) | — | Only matters if isolates of one tenant are treated as separate security domains. Document that the tenant, not the isolate, is the boundary; tie host-call ids to the isolate in the supervisor anyway | planned |
+| C6: a V8 sandbox or kernel zero-day | — | The release gate: Fuzzilli, the external review, and a run of the real Linux worker under them | planned (P5) |
+
 ## 2. Guest capabilities (per-VM policies)
 
 | Item | Status |
