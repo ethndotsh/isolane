@@ -91,6 +91,17 @@ fn throw_range(scope: &mut v8::PinScope, msg: &str) {
     scope.throw_exception(e);
 }
 
+/// A JS string for text the guest can make arbitrarily long (a URL grows up
+/// to 9x when percent-encoded): past V8's maximum string length, a
+/// RangeError, as V8 throws for its own strings, instead of a panic.
+fn guest_string<'s>(scope: &mut v8::PinScope<'s, '_>, s: &str) -> Option<v8::Local<'s, v8::String>> {
+    let string = v8::String::new(scope, s);
+    if string.is_none() {
+        throw_range(scope, "Invalid string length");
+    }
+    string
+}
+
 /// Where the bytes of an ArrayBuffer or a view of one are, right now: the
 /// buffer's backing store (held, so the memory can't be freed under us)
 /// and the byte range within it, checked against the store's current

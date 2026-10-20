@@ -8,7 +8,7 @@ use url::form_urlencoded;
 use url::quirks;
 use url::Url;
 
-use super::{string_arg, throw_type, with_bytes, with_u32s_mut, Args, Rv};
+use super::{guest_string, string_arg, throw_type, with_bytes, with_u32s_mut, Args, Rv};
 
 #[repr(u32)]
 enum ParseStatus {
@@ -99,7 +99,9 @@ pub fn op_url_parse_with_base(scope: &mut v8::PinScope, args: Args, mut rv: Rv) 
 
 pub fn op_url_get_serialization(scope: &mut v8::PinScope, _args: Args, mut rv: Rv) {
     let s = SERIALIZATION.with(|s| s.borrow_mut().take()).unwrap_or_default();
-    rv.set(v8::String::new(scope, &s).unwrap().into());
+    if let Some(s) = guest_string(scope, &s) {
+        rv.set(s.into());
+    }
 }
 
 pub fn op_url_reparse(scope: &mut v8::PinScope, args: Args, mut rv: Rv) {
@@ -180,7 +182,9 @@ pub fn op_url_stringify_search_params(scope: &mut v8::PinScope, args: Args, mut 
         let v = pair.get_index(scope, 1).map(|v| v.to_rust_string_lossy(scope)).unwrap_or_default();
         ser.append_pair(&k, &v);
     }
-    rv.set(v8::String::new(scope, &ser.finish()).unwrap().into());
+    if let Some(s) = guest_string(scope, &ser.finish()) {
+        rv.set(s.into());
+    }
 }
 
 // Keep in sync with parseSimpleSpecialUrl() in ext/web/00_url.js.
