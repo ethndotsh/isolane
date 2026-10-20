@@ -40,6 +40,62 @@ await acme.run('db.getUser(42).then((u) => u.plan)', {
 
 See [docs/design.md](docs/design.md) for the threat model.
 
+## Why isolane
+
+The two common ways to run untrusted JavaScript from Node are
+[isolated-vm](https://github.com/laverdet/isolated-vm) (V8 isolates inside
+your Node process) and [quickjs-wasi](https://github.com/vercel-labs/quickjs-wasi)
+(the QuickJS interpreter compiled to WebAssembly). isolane makes different
+trade-offs:
+
+| | isolane | isolated-vm | quickjs-wasi |
+|---|---|---|---|
+| Engine | V8 15.2, with its JIT | your Node's V8 (Node 22: 12.4, Node 26: 14.6) | QuickJS-NG, interpreted |
+| Guest code runs | in a locked-down process per tenant | inside your Node process | inside your Node process, in Wasm memory |
+| V8 memory sandbox | on | off (Node isn't built with it) | n/a (Wasm's bounds checks) |
+| OS lockdown | seccomp and Landlock (Linux) | none | none |
+| V8 security fixes | isolane patch releases, from CI | when you upgrade Node | n/a |
+| Memory limit | enforced, ArrayBuffers and Wasm included | "a guideline": an attacker can use 2–3× | enforced (Wasm memory) |
+| Web APIs | WinterTC: `fetch`, streams, `crypto.subtle`, `URL`, sockets, ... | none | a few (`URL`, `TextEncoder`, `crypto.subtle`) |
+| Network and files | brokered, under policies checked in your process | build your own | build your own |
+
+**Against isolated-vm:**
+- **Your process stays out of reach.** In isolated-vm, a V8 bug or a leaked
+  `Reference` reaches your Node process; its README calls leaked handles
+  "usually trivial" to use "as a springboard back into the nodejs isolate"
+  and recommends a separate process. isolane is that separate process, with
+  V8's memory sandbox and seccomp around it.
+- **Current V8, patched on its own schedule.** isolated-vm runs whatever V8
+  your Node ships and gets V8 fixes only when you upgrade Node. isolane
+  carries its own V8, and CI turns V8 security releases into patch releases.
+- **Pointer compression.** Node is built without it, so pointers in an
+  isolated-vm heap take twice the space they do in isolane's.
+- **What a sandbox needs, built in:** CPU and wall-time limits, a limit on
+  every resource, policy-checked `fetch` and sockets, typed errors with the
+  guest's stack trace, and hooks.
+- **No native addon:** no rebuild per Node release, no
+  `--no-node-snapshot`, and odd-numbered Node releases work. isolated-vm is
+  also in maintenance mode.
+
+**Against quickjs-wasi:**
+- **A JIT, not an interpreter.** On `fib(26)` (Apple M4 Pro), isolane takes
+  0.69 ms and quickjs-wasi 10.5 ms, about 15× slower. Compute-heavy guest
+  code (parsers, templating, crypto written in JS) feels it most.
+- **The JavaScript of Chrome, Node, Deno, and Workers:** V8's language
+  support, `Intl`, and WebAssembly, plus the WinterTC web platform, so code
+  written for server runtimes runs unchanged.
+- **A process boundary.** Wasm memory is a strong sandbox, but it runs in
+  your process on your process's Wasm engine; a bug there is a bug in your
+  process.
+
+**Pick something else when:**
+- You want many cheap sandboxes in your own process. isolane's floor is a
+  worker process per tenant (about 15 MB) and an IPC round trip per call.
+- You need live snapshots of a running VM (quickjs-wasi), or objects shared
+  by reference with the host (isolated-vm).
+- You need Windows, or macOS in production: isolane's lockdown is
+  Linux-only.
+
 ## What guest code can use
 
 | Option | Default | Gives the guest |
