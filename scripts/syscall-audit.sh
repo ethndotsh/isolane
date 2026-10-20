@@ -18,7 +18,7 @@ chmod +x "$wrapper"
 # Bounded per test: tracing makes the worker slower, and a test that waits
 # on it shouldn't hold the audit for an hour. Failures are listed, not fatal.
 ISOLANE_WORKER="$wrapper" node --test --test-timeout=120000 $(ls test/*.test.mjs | grep -v lockdown) >"$out/tests.log" 2>&1 || true
-grep -E '^(✖|# (tests|pass|fail|cancelled))|^ℹ (tests|pass|fail|cancelled|duration_ms)' "$out/tests.log" | sort | uniq -c | sort -rn | head -40 || true
+grep -E '^\s*not ok |^# (tests|pass|fail|cancelled) ' "$out/tests.log" || true
 python3 - "$out" <<'PY'
 import collections, glob, os, re, sys
 root = sys.argv[1]
