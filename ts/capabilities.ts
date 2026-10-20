@@ -30,9 +30,11 @@ const MiB = 1 << 20;
 
 export interface FetchPolicy {
   /**
-   * Hostnames the guest may fetch from: exact (`api.example.com`) or any
-   * subdomain (`*.example.com`, not the apex). Ports aren't restricted.
-   * Or a function that decides each request (and each redirect hop).
+   * Hosts the guest may fetch from: exact (`api.example.com`) or any
+   * subdomain (`*.example.com`, not the apex), on the scheme's default port
+   * unless a port is named (`api.example.com:8443`, `[2001:db8::1]:8080`,
+   * `host:*`). Or a function that decides each request (and each redirect
+   * hop).
    */
   hosts: readonly string[] | ((url: URL, method: string) => boolean | Promise<boolean>);
   /** Allowed methods. Default: GET, HEAD, POST, PUT, PATCH, DELETE. */
@@ -45,8 +47,10 @@ export interface FetchPolicy {
    */
   privateNetworks?: boolean;
   limits?: {
-    /** Fetches per isolate over its lifetime. Default unlimited. */
+    /** Fetches per isolate over its lifetime. Default 1,000. */
     requests?: number;
+    /** Request and response body bytes per isolate over its lifetime. Default 1 GiB. */
+    transferBytes?: number;
     /** Per request body, streamed or not. Default 10 MiB. */
     requestBytes?: number;
     /** Per response body. Default 10 MiB. */
@@ -258,7 +262,15 @@ export function fetchBroker(policy: FetchPolicy, denied: DenialReporter = () => 
   const maxRequest = policy.limits?.requestBytes ?? 10 * MiB;
   const timeoutMs = policy.limits?.timeoutMs ?? 30_000;
   const maxRedirects = policy.limits?.redirects ?? 5;
-  const maxRequests = policy.limits?.requests;
+  const maxRequests = policy.limits?.requests ?? 1000;
+  const maxTransfer = policy.limits?.transferBytes ?? 1024 * MiB;
+  let transferred = 0;
+  /** Count body bytes against transferBytes; the error to fail with past it. */
+  const transfer = (n: number): TypeError | undefined => {
+    transferred += n;
+    if (transferred <= maxTransfer) return undefined;
+    return new TypeError(`fetch: this isolate has moved its ${maxTransfer} bytes (fetch.limits.transferBytes)`);
+  };
   const allowPrivate = policy.privateNetworks === true;
   let requests = 0;
   const inFlight = new Map<number, InFlight>();
@@ -337,9 +349,14 @@ export function fetchBroker(policy: FetchPolicy, denied: DenialReporter = () => 
     let body: Uint8Array | PassThrough | undefined = given;
     if (given && given.length > maxRequest) throw new TypeError(`fetch: request body larger than ${maxRequest} bytes`);
     if (inFlight.size >= MAX_OPEN_FETCHES) throw new TypeError(`fetch: more than ${MAX_OPEN_FETCHES} fetches in flight`);
-    if (maxRequests !== undefined && requests >= maxRequests) {
+    if (requests >= maxRequests) {
       denied('fetch', redacted((rawMeta as { url?: unknown } | null)?.url), `used its ${maxRequests} requests`);
       throw new TypeError(`fetch: this isolate has used its ${maxRequests} requests (fetch.limits.requests)`);
+    }
+    const over = given ? transfer(given.length) : undefined;
+    if (over) {
+      denied('fetch', redacted((rawMeta as { url?: unknown } | null)?.url), 'used its transferBytes');
+      throw over;
     }
     requests++;
     let url: URL;
@@ -437,8 +454,9 @@ export function fetchBroker(policy: FetchPolicy, denied: DenialReporter = () => 
         f.res = res;
         res.on('data', (chunk: Buffer) => {
           f.received += chunk.length;
-          if (f.received > maxResponse) {
-            f.error = new TypeError(`fetch: response larger than ${maxResponse} bytes`);
+          const over = f.received > maxResponse ? new TypeError(`fetch: response larger than ${maxResponse} bytes`) : transfer(chunk.length);
+          if (over) {
+            f.error = over;
             res.destroy();
             wake(f);
             return;
@@ -510,10 +528,10 @@ export function fetchBroker(policy: FetchPolicy, denied: DenialReporter = () => 
     }
     if (!(chunk instanceof Uint8Array)) throw new TypeError('fetch: malformed request body');
     f.sent += chunk.length;
-    if (f.sent > maxRequest) {
-      const err = new TypeError(`fetch: request body larger than ${maxRequest} bytes`);
-      f.abort.abort(err);
-      throw err;
+    const over = f.sent > maxRequest ? new TypeError(`fetch: request body larger than ${maxRequest} bytes`) : transfer(chunk.length);
+    if (over) {
+      f.abort.abort(over);
+      throw over;
     }
     if (!upload.write(chunk)) {
       // Backpressure: the next write waits until the request takes these.
@@ -579,6 +597,8 @@ export interface ConnectPolicy {
     connectMs?: number;
     /** Close a socket with no traffic for this long. Default 60 s. */
     idleMs?: number;
+    /** Bytes read and written per isolate over its lifetime, all sockets together. Default 1 GiB. */
+    transferBytes?: number;
   };
 }
 
@@ -625,6 +645,10 @@ export function connectBroker(policy: ConnectPolicy, denied: DenialReporter = ()
   const maxConnections = policy.limits?.connections ?? 8;
   const connectTimeoutMs = policy.limits?.connectMs ?? 10_000;
   const idleTimeoutMs = policy.limits?.idleMs ?? 60_000;
+  const maxTransfer = policy.limits?.transferBytes ?? 1024 * MiB;
+  let transferred = 0;
+  const overTransfer = (n: number) => (transferred += n) > maxTransfer;
+  const transferError = () => new Error(`connect: this isolate has moved its ${maxTransfer} bytes (connect.limits.transferBytes)`);
   const sockets = new Map<number, GuestSocket>();
   /** Sockets between release and track in startTls: still open, still counted. */
   let upgrading = 0;
@@ -676,6 +700,7 @@ export function connectBroker(policy: ConnectPolicy, denied: DenialReporter = ()
       w?.();
     };
     socket.on('data', (chunk: Buffer) => {
+      if (overTransfer(chunk.length)) return socket.destroy(transferError());
       g.chunks.push(chunk);
       g.buffered += chunk.length;
       if (g.buffered >= SOCKET_HIGH_WATER) socket.pause();
@@ -767,6 +792,11 @@ export function connectBroker(policy: ConnectPolicy, denied: DenialReporter = ()
     const g = get(id);
     if (!(data instanceof Uint8Array)) throw new TypeError('socket.write: malformed data');
     if (g.error) throw new Error(`socket error: ${g.error.message}`);
+    if (overTransfer(data.length)) {
+      const err = transferError();
+      g.socket.destroy(err);
+      throw err;
+    }
     await new Promise<void>((resolve, reject) =>
       g.socket.write(data, (err) => (err ? reject(new Error(`socket error: ${err.message}`)) : resolve())),
     );

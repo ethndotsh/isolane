@@ -211,6 +211,11 @@ test('fetch: limits', async () => {
   const counted = guest({ fetch: { ...local, limits: { requests: 1 } } });
   await counted(`await fetch('${base}/json')`);
   await assert.rejects(counted(`await fetch('${base}/json')`), /used its 1 requests/);
+  // Body bytes over the isolate's life, both ways, across fetches.
+  const moved = guest({ fetch: { ...local, limits: { transferBytes: 40 } } });
+  await moved(`await (await fetch('${base}/json')).text()`);
+  await assert.rejects(moved(`await (await fetch('${base}/big')).text()`), /moved its 40 bytes \(fetch.limits.transferBytes\)/);
+  await assert.rejects(guest({ fetch: { ...local, limits: { transferBytes: 4 } } })(`await fetch('${base}/echo', { method: 'POST', body: 'hello' })`), /fetch.limits.transferBytes/);
 });
 
 test('fetch: a policy function decides each hop', async () => {
@@ -277,6 +282,16 @@ test('connect broker: connection cap, and disposal closes them', async () => {
   dispose();
   await assert.rejects(sock('write', id, Buffer.from('x')), /socket is closed/);
   await assert.rejects(sock('open', { hostname: 'localhost', port: tcpPort }), /socket is closed/);
+});
+
+test('connect broker: transferBytes counts both ways, across sockets', async () => {
+  const { fn: sock } = connectBroker({ ...tcpLocal, limits: { transferBytes: 16 } });
+  const a = await sock('open', { hostname: 'localhost', port: tcpPort });
+  await sock('write', a.id, Buffer.from('abc')); // 3 out, 8 back ('echo:abc')
+  assert.equal(String(await sock('read', a.id)), 'echo:abc');
+  await sock('close', a.id);
+  const b = await sock('open', { hostname: 'localhost', port: tcpPort });
+  await assert.rejects(sock('write', b.id, Buffer.from('123456')), /moved its 16 bytes \(connect.limits.transferBytes\)/);
 });
 
 test('the prelude needs the web platform for each policy', () => {

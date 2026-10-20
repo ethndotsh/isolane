@@ -144,9 +144,14 @@ fetch: {
   hosts: ['api.example.com', '*.example.org', 'internal.example:8443'], // or a function (url, method) => boolean
   methods: ['GET', 'POST'],
   privateNetworks: false,
-  limits: { requests: 100, requestBytes: 10 << 20, responseBytes: 10 << 20, redirects: 5, timeoutMs: 30_000 },
+  limits: { requests: 1000, requestBytes: 10 << 20, responseBytes: 10 << 20, transferBytes: 1 << 30, redirects: 5, timeoutMs: 30_000 },
 }
 ```
+
+The values shown are the defaults, except `hosts` and `methods` (default
+GET, HEAD, POST, PUT, PATCH, DELETE). `requests` and `transferBytes` count
+over the isolate's life: fetches, and request and response body bytes
+together.
 
 Only `http:` and `https:` URLs are fetched. A bare host (`api.example.com`,
 `*.example.org`) allows only the scheme's default port, 443 or 80; name
@@ -162,7 +167,7 @@ reach the IPv4 address inside.
 ### `connect`
 
 ```js
-connect: { hosts: ['db.example.com:5432', '*.cache.example:*'], privateNetworks: false, ca: undefined, limits: { connections: 8, connectMs: 10_000, idleMs: 60_000 } }
+connect: { hosts: ['db.example.com:5432', '*.cache.example:*'], privateNetworks: false, ca: undefined, limits: { connections: 8, connectMs: 10_000, idleMs: 60_000, transferBytes: 1 << 30 } }
 ```
 
 `connect()` is the
@@ -199,6 +204,8 @@ or `expectedServerHostname`, and refuses to upgrade if the server sent bytes
 the guest hasn't read (they could have been injected before the
 handshake); bytes still in transit when the upgrade starts are read as TLS
 records, so they fail the handshake instead. The same address rules as `fetch` apply, to every connection.
+`transferBytes` caps the bytes read and written over the isolate's life,
+all its sockets together; past it, the socket in use errors.
 
 Libraries written for Workers' `cloudflare:sockets` work: the tests run
 postgres.js's Workers build against Postgres, bundled with `cloudflare:sockets`

@@ -402,12 +402,12 @@ export function validateConfig(layer: unknown, where: string, level: Level): Iso
       }
     }
   }
-  checkPolicy(at('fetch'), c.fetch, ['hosts', 'methods', 'privateNetworks', 'limits'], ['requests', 'requestBytes', 'responseBytes', 'redirects', 'timeoutMs']);
+  checkPolicy(at('fetch'), c.fetch, ['hosts', 'methods', 'privateNetworks', 'limits'], ['requests', 'requestBytes', 'responseBytes', 'transferBytes', 'redirects', 'timeoutMs']);
   if (c.fetch && (c.fetch as FetchPolicy).methods !== undefined) {
     const m = (c.fetch as FetchPolicy).methods;
     if (!Array.isArray(m) || !m.every((x) => typeof x === 'string')) throw invalidConfig(at('fetch.methods'), 'must be a list of method names');
   }
-  checkPolicy(at('connect'), c.connect, ['hosts', 'privateNetworks', 'ca', 'limits'], ['connections', 'connectMs', 'idleMs']);
+  checkPolicy(at('connect'), c.connect, ['hosts', 'privateNetworks', 'ca', 'limits'], ['connections', 'connectMs', 'idleMs', 'transferBytes']);
   checkPolicy(at('fs'), c.fs, ['root', 'write', 'limits'], ['fileBytes', 'writtenBytes', 'operations']);
   if (c.fs) {
     const fs = c.fs as FsPolicy;
