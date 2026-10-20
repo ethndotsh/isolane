@@ -252,4 +252,4 @@ jobs:
       - name: cargo audit
         run: |
           cargo install cargo-audit --locked --version 0.22.2
-          cargo audit
+          cargo audit -D warnings

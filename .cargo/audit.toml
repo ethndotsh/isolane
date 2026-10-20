@@ -7,4 +7,16 @@ ignore = [
   # The alternative (aws-lc-rs) parses guest keys in C outside the V8
   # sandbox; see docs/roadmap.md and the guide's known limits.
   "RUSTSEC-2023-0071",
+  # paste: unmaintained. A proc macro rusty_v8 uses at compile time
+  # (typed_array.rs, cppgc.rs); none of it is in the worker binary, and it
+  # parses only rusty_v8's own source. Goes away when rusty_v8 drops it.
+  "RUSTSEC-2024-0436",
 ]
+# Other warnings (unmaintained, unsound, yanked) fail the audit too: CI runs
+# `cargo audit -D warnings`, so each one is fixed or listed above with why.
+#
+# Not an advisory, but tracked here too: x448 is pinned to an exact
+# prerelease (=0.14.0-pre.12). It's RustCrypto's own X448, which has no
+# stable release yet (nor does ed448-goldilocks under it); X448 comes from
+# the Secure Curves draft, not the Web Crypto standard. Move to the first
+# stable release, or drop X448 if it stalls.
