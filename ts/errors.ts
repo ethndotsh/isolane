@@ -12,24 +12,35 @@
  *   schema. See `issues`.
  *
  * limit (a budget ran out):
- * - `ERR_LIMIT`: a limit was hit; `limit` names it (`timeoutMs`, `cpuMs`,
- *   `heapBytes`, `workerMemoryBytes`, `isolates`, `tenants`,
- *   `concurrentEvals`, `codeBytes`, `resultBytes`). After `heapBytes` the
- *   isolate is retired; after `workerMemoryBytes` the tenant's worker
- *   restarts on the next call; after the others the isolate stays usable.
+ * - `ERR_LIMIT`: a limit was hit; `limit` names it:
+ *   - isolate limits: `timeoutMs`, `cpuMs`, `heapBytes`, `backgroundMs`,
+ *     `codeBytes`, `resultBytes`, `pendingHostCalls`, `hostCalls`,
+ *     `pendingHostCallBytes`;
+ *   - tenant limits: `isolates`, `pendingEvals`, `workerMemoryBytes`;
+ *   - the runtime's: `tenants`.
+ *   After `heapBytes` and `backgroundMs` the isolate is retired; after
+ *   `workerMemoryBytes` the tenant's worker restarts on the next call;
+ *   after the others the isolate stays usable. Some limits don't fail the
+ *   eval: `timers` throws a RangeError in the guest, `decompressedBytes`
+ *   errors the stream, the log limits truncate output, and the policies'
+ *   limits (`fetch.limits.requests`, ...) fail the guest's call. All of
+ *   them emit `onLimit`.
  * - `ERR_ISOLATE_RETIRED`: an earlier failure retired this isolate; create
  *   a new one.
  *
- * usage (the calling code's mistake):
+ * usage (the calling code's doing):
  * - `ERR_INVALID_CONFIG`: the configuration is malformed (the message names
  *   the field). Thrown synchronously.
  * - `ERR_ISOLATE_CLOSED`: the isolate was closed (or its tenant stopped).
  * - `ERR_RUNTIME_CLOSED`: the runtime was closed.
+ * - `ERR_ABORTED`: the eval's `signal` was aborted (`reason`).
  * - `ERR_SHIM`: one of the embedder's `shims` threw (or, for `after`,
  *   rejected or never settled). See `shim`; the message has its error.
+ * - `ERR_DENIED`: a `beforeEval` hook refused the eval (`reason`). (A
+ *   `beforeHostCall` denial reaches the guest as an error with this
+ *   `code`, and doesn't fail the eval.)
  *
  * security:
- * - `ERR_DENIED`: a `beforeEval` hook refused the eval (`reason`).
  * - `ERR_TENANT_QUARANTINED`: the tenant's worker had a security event
  *   recently (see `quarantineMs`), so the runtime refuses it for now.
  *
@@ -53,6 +64,7 @@ export type IsolaneErrorCode =
   | 'ERR_ISOLATE_CLOSED'
   | 'ERR_RUNTIME_CLOSED'
   | 'ERR_SHIM'
+  | 'ERR_ABORTED'
   | 'ERR_DENIED'
   | 'ERR_TENANT_QUARANTINED'
   | 'ERR_WORKER_CRASHED'
@@ -74,7 +86,8 @@ const KINDS: Record<IsolaneErrorCode, IsolaneErrorKind> = {
   ERR_ISOLATE_CLOSED: 'usage',
   ERR_RUNTIME_CLOSED: 'usage',
   ERR_SHIM: 'usage',
-  ERR_DENIED: 'security',
+  ERR_ABORTED: 'usage',
+  ERR_DENIED: 'usage',
   ERR_TENANT_QUARANTINED: 'security',
   ERR_WORKER_CRASHED: 'infrastructure',
   ERR_WORKER_UNRESPONSIVE: 'infrastructure',
@@ -161,7 +174,7 @@ export interface IsolaneErrorDetails {
   limit?: string;
   guest?: GuestErrorInfo;
   issues?: ReadonlyArray<SchemaIssue>;
-  /** For `ERR_DENIED`: the hook's reason. */
+  /** For `ERR_DENIED`: the hook's reason; for `ERR_ABORTED`: the signal's. */
   reason?: string;
   shim?: ShimErrorInfo;
   /** Overrides the default for the code (worker-level memory limits are retryable). */
@@ -303,3 +316,9 @@ export function parseGuestError(raw: unknown, depth = 0): GuestErrorInfo | undef
 }
 
 const isPosInt = (v: unknown): v is number => typeof v === 'number' && Number.isSafeInteger(v) && v > 0;
+
+/** `ERR_ABORTED` for an eval whose `signal` was aborted. */
+export function abortedError(signal: AbortSignal, tenant: string): IsolaneError {
+  const reason = signal.reason instanceof Error ? signal.reason.message : String(signal.reason ?? 'aborted');
+  return new IsolaneError('ERR_ABORTED', `isolane: the eval was aborted: ${reason}`, { tenant, reason, cause: signal.reason });
+}

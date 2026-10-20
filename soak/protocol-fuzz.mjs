@@ -148,7 +148,7 @@ function binStep() {
 
 function plan() {
   const ready = rand() < 0.9
-    ? { t: 'ready', protocol: rand() < 0.95 ? 3 : pick([1, 2, '3', weird()]), v8: 'fake', sandboxSecure: true, lockdown: { landlock: 'full', seccomp: 'full' } }
+    ? { t: 'ready', protocol: rand() < 0.95 ? 4 : pick([1, 3, '4', weird()]), v8: 'fake', sandboxSecure: true, lockdown: { landlock: 'full', seccomp: 'full' } }
     : message();
   const steps = Array.from({ length: 1 + Math.floor(rand() * 4) }, () => {
     const r = rand();

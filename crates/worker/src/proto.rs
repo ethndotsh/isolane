@@ -7,7 +7,7 @@ use serde_json::value::RawValue;
 
 /// The protocol version. The worker reports it in `ready`; a supervisor
 /// that speaks another version refuses the worker.
-pub const PROTOCOL_VERSION: u32 = 3;
+pub const PROTOCOL_VERSION: u32 = 4;
 
 /// Supervisor → worker.
 #[derive(Deserialize)]
@@ -75,6 +75,12 @@ pub enum In {
         /// value itself), and its length. `value` has null there.
         #[serde(default)]
         bin: Vec<(Vec<PathSegment>, usize)>,
+    },
+    /// Stop eval `req` (its `signal` was aborted): now if it's running,
+    /// before it starts if it's queued.
+    Abort {
+        vm: u64,
+        req: u64,
     },
     Dispose {
         vm: u64,
@@ -153,6 +159,9 @@ pub enum ErrorCode {
     /// A shim (embedder code) threw or never settled; `Failure::shim` says which.
     #[serde(rename = "ERR_SHIM")]
     Shim,
+    /// The supervisor aborted the eval (its `signal`).
+    #[serde(rename = "ERR_ABORTED")]
+    Aborted,
     #[serde(rename = "ERR_INTERNAL")]
     Internal,
 }

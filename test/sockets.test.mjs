@@ -32,9 +32,10 @@ function testCertificates() {
 const { ca, ...tlsOptions } = testCertificates();
 
 const denials = [];
+const limitsHit = [];
 const runtime = new Runtime({
   strict: process.env.ISOLANE_STRICT === '1',
-  hooks: { onPolicyDenial: (e) => denials.push(e) },
+  hooks: { onPolicyDenial: (e) => denials.push(e), onLimit: (e) => limitsHit.push(e) },
 });
 after(() => runtime.close());
 
@@ -275,6 +276,9 @@ test('the connection limit', async () => {
     { ...local(echoPort), limits: { connections: 1 } },
   );
   assert.equal(out, 'connect: this isolate already has 1 sockets open (connect.limits.connections)');
+  // A policy limit is an onLimit event, not a policy denial.
+  assert.equal(limitsHit.at(-1)?.limit, 'connect.limits.connections');
+  assert.ok(!denials.some((d) => /sockets open/.test(d.reason)));
 });
 
 test('a connection the server closed stops counting once its data is read', async () => {

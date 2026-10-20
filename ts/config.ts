@@ -53,10 +53,10 @@ export interface IsolateLimits {
   hostCalls?: number;
   /**
    * Bytes of host calls waiting for replies at once (their arguments, as
-   * sent); a call past it throws a RangeError in the guest and fails the
-   * eval with ERR_LIMIT. Default 64 MiB.
+   * sent, held in this process); a call past it throws a RangeError in the
+   * guest and fails the eval with ERR_LIMIT. Default 16 MiB.
    */
-  hostCallBytes?: number;
+  pendingHostCallBytes?: number;
 }
 
 /** Limits on one tenant (its worker process). Settable in `defaults` and `tenants(name)`. */
@@ -64,7 +64,7 @@ export interface TenantLimits {
   /** Live isolates. Default 100. */
   isolates?: number;
   /** Evals in flight (running or queued) across its isolates. Default 1,000. */
-  concurrentEvals?: number;
+  pendingEvals?: number;
   /**
    * The worker's memory: every isolate's heap, ArrayBuffers, and
    * WebAssembly memory together, beyond V8's own baseline (Linux,
@@ -119,9 +119,9 @@ export const DEFAULT_LIMITS = Object.freeze({
   decompressedBytes: 128 * 1024 ** 2,
   pendingHostCalls: 1_000,
   hostCalls: 10_000,
-  hostCallBytes: 64 * 1024 ** 2,
+  pendingHostCallBytes: 16 * 1024 ** 2,
   isolates: 100,
-  concurrentEvals: 1_000,
+  pendingEvals: 1_000,
   workerMemoryBytes: 2 * 1024 ** 3,
   idleMs: 30_000,
   workerBackgroundMs: 10_000,
@@ -130,11 +130,37 @@ export const DEFAULT_LIMITS = Object.freeze({
   tenants: 1_000,
 } as const);
 
+/** The policies' limits, with their defaults (each policy's `limits`). */
+export const DEFAULT_POLICY_LIMITS = Object.freeze({
+  fetch: Object.freeze({
+    requests: 1_000,
+    transferBytes: 1024 ** 3,
+    requestBytes: 10 * 1024 ** 2,
+    responseBytes: 10 * 1024 ** 2,
+    redirects: 5,
+    timeoutMs: 30_000,
+  }),
+  connect: Object.freeze({
+    connections: 8,
+    connectMs: 10_000,
+    idleMs: 60_000,
+    transferBytes: 1024 ** 3,
+  }),
+  fs: Object.freeze({
+    fileBytes: 10 * 1024 ** 2,
+    writtenBytes: 100 * 1024 ** 2,
+    pendingOperations: 16,
+  }),
+} as const);
+
+/** The longest duration a limit can name: setTimeout's maximum, which a clock can also add without overflowing. */
+export const MAX_DURATION_MS = 2 ** 31 - 1;
+
 /** Every limit, with defaults filled in (`null` where a limit is off). */
 export type ResolvedLimits = { [K in keyof (Limits & RuntimeLimits)]-?: Exclude<(Limits & RuntimeLimits)[K], undefined> };
 
-const ISOLATE_LIMITS = new Set(['timeoutMs', 'cpuMs', 'heapBytes', 'timers', 'backgroundMs', 'logBytes', 'logLineBytes', 'codeBytes', 'resultBytes', 'decompressedBytes', 'pendingHostCalls', 'hostCalls', 'hostCallBytes']);
-const TENANT_LIMITS = new Set(['isolates', 'concurrentEvals', 'workerMemoryBytes', 'idleMs', 'workerBackgroundMs', 'workerLifetimeMs', 'workerEvals']);
+const ISOLATE_LIMITS = new Set(['timeoutMs', 'cpuMs', 'heapBytes', 'timers', 'backgroundMs', 'logBytes', 'logLineBytes', 'codeBytes', 'resultBytes', 'decompressedBytes', 'pendingHostCalls', 'hostCalls', 'pendingHostCallBytes']);
+const TENANT_LIMITS = new Set(['isolates', 'pendingEvals', 'workerMemoryBytes', 'idleMs', 'workerBackgroundMs', 'workerLifetimeMs', 'workerEvals']);
 const NULLABLE = new Set(['timeoutMs', 'cpuMs', 'heapBytes', 'backgroundMs', 'workerMemoryBytes', 'workerBackgroundMs', 'workerLifetimeMs', 'workerEvals']);
 const MINIMUM: Record<string, number> = { workerMemoryBytes: 64 * 1024 ** 2, heapBytes: 1024 ** 2 };
 /**
@@ -144,38 +170,15 @@ const MINIMUM: Record<string, number> = { workerMemoryBytes: 64 * 1024 ** 2, hea
  */
 const MAXIMUM: Record<string, number> = {
   timers: 2 ** 32 - 1,
-  timeoutMs: 2 ** 31 - 1,
-  cpuMs: 2 ** 31 - 1,
-  backgroundMs: 2 ** 31 - 1,
-  idleMs: 2 ** 31 - 1,
-  workerBackgroundMs: 2 ** 31 - 1,
-  workerLifetimeMs: 2 ** 31 - 1,
+  timeoutMs: MAX_DURATION_MS,
+  cpuMs: MAX_DURATION_MS,
+  backgroundMs: MAX_DURATION_MS,
+  idleMs: MAX_DURATION_MS,
+  workerBackgroundMs: MAX_DURATION_MS,
+  workerLifetimeMs: MAX_DURATION_MS,
   heapBytes: 4 * 1024 ** 3,
   pendingHostCalls: 2 ** 32 - 1,
   hostCalls: 2 ** 32 - 1,
-};
-
-/** Old names, for errors that say what to write instead. */
-const RENAMED: Record<string, string> = {
-  timeoutMs: 'limits.timeoutMs',
-  cpuTimeLimitMs: 'limits.cpuMs',
-  memoryLimitBytes: 'limits.heapBytes',
-  hostFunctions: 'host',
-  allowCodeGeneration: 'eval',
-  allowWebAssembly: 'wasm',
-  webPlatform: 'web',
-  network: 'fetch',
-  sockets: 'connect',
-  clock: 'time',
-  randomSeed: 'random.seed',
-  onLog: 'hooks.onLog',
-  result: 'returns',
-};
-const RENAMED_LIMITS: Record<string, string> = {
-  cpuTimeMs: 'cpuMs',
-  logBytesPerEval: 'logBytes',
-  logMessageBytes: 'logLineBytes',
-  idleTimeoutMs: 'idleMs',
 };
 
 export type Level = 'defaults' | 'tenant' | 'call';
@@ -205,8 +208,7 @@ export function validateLimits(limits: unknown, path: string, level: Level | 'ru
     } else if (key === 'tenants') {
       throw invalidConfig(field, `is a runtime limit; set it in the Runtime's limits`);
     } else if (!ISOLATE_LIMITS.has(key) && !TENANT_LIMITS.has(key)) {
-      const hint = RENAMED_LIMITS[key];
-      throw invalidConfig(field, hint ? `is now limits.${hint}` : 'is not a limit');
+      throw invalidConfig(field, 'is not a limit');
     } else if (TENANT_LIMITS.has(key) && level === 'call') {
       throw invalidConfig(field, 'is a tenant limit; set it in defaults.limits or tenants(name).limits');
     }
@@ -362,7 +364,8 @@ function shimList(shims: ShimsConfig, phase: (typeof SHIM_PHASES)[number], level
   );
 }
 
-function checkPolicy(path: string, value: unknown, keys: string[], limitKeys: string[]): void {
+function checkPolicy(kind: keyof typeof DEFAULT_POLICY_LIMITS, path: string, value: unknown, keys: string[]): void {
+  const limitKeys = Object.keys(DEFAULT_POLICY_LIMITS[kind]);
   if (value === undefined || value === false) return;
   if (value === true) throw invalidConfig(path, 'needs a policy object (there is no safe default target list)');
   if (value === null || typeof value !== 'object') throw invalidConfig(path, 'must be a policy object or false');
@@ -374,8 +377,7 @@ function checkPolicy(path: string, value: unknown, keys: string[], limitKeys: st
     if (limits === null || typeof limits !== 'object') throw invalidConfig(`${path}.limits`, 'must be an object');
     for (const [key, v] of Object.entries(limits)) {
       if (!limitKeys.includes(key)) throw invalidConfig(`${path}.limits.${key}`, `is not a ${path} limit (limits: ${limitKeys.join(', ')})`);
-      // Durations end up in setTimeout, which takes at most 2^31 - 1 ms.
-      checkInteger(`${path}.limits.${key}`, v, 1, false, key.endsWith('Ms') ? 2 ** 31 - 1 : undefined);
+      checkInteger(`${path}.limits.${key}`, v, 1, false, key.endsWith('Ms') ? MAX_DURATION_MS : undefined);
     }
   }
   const p = value as Record<string, unknown>;
@@ -390,7 +392,7 @@ function checkPolicy(path: string, value: unknown, keys: string[], limitKeys: st
     if (typeof hosts !== 'function' && !(Array.isArray(hosts) && hosts.every((h) => typeof h === 'string'))) {
       throw invalidConfig(`${path}.hosts`, 'must be a list of patterns or a function');
     }
-  } else if (path !== 'fs') {
+  } else if (kind !== 'fs') {
     throw invalidConfig(`${path}.hosts`, 'is required (a list of patterns or a function)');
   }
 }
@@ -403,8 +405,7 @@ export function validateConfig(layer: unknown, where: string, level: Level): Iso
   const c = layer as Record<string, unknown>;
   for (const key of Object.keys(c)) {
     if (CONFIG_KEYS.has(key) || (level === 'call' && (key === 'tenant' || key === 'returns'))) continue;
-    const hint = RENAMED[key];
-    throw invalidConfig(at(key), hint ? `is not a config field; use ${hint}` : 'is not a config field');
+    throw invalidConfig(at(key), 'is not a config field');
   }
   for (const key of ['eval', 'wasm'] as const) {
     if (c[key] !== undefined && typeof c[key] !== 'boolean') throw invalidConfig(at(key), 'must be a boolean');
@@ -425,13 +426,13 @@ export function validateConfig(layer: unknown, where: string, level: Level): Iso
       }
     }
   }
-  checkPolicy(at('fetch'), c.fetch, ['hosts', 'methods', 'privateNetworks', 'limits'], ['requests', 'requestBytes', 'responseBytes', 'transferBytes', 'redirects', 'timeoutMs']);
+  checkPolicy('fetch', at('fetch'), c.fetch, ['hosts', 'methods', 'privateNetworks', 'limits']);
   if (c.fetch && (c.fetch as FetchPolicy).methods !== undefined) {
     const m = (c.fetch as FetchPolicy).methods;
     if (!Array.isArray(m) || !m.every((x) => typeof x === 'string')) throw invalidConfig(at('fetch.methods'), 'must be a list of method names');
   }
-  checkPolicy(at('connect'), c.connect, ['hosts', 'privateNetworks', 'ca', 'limits'], ['connections', 'connectMs', 'idleMs', 'transferBytes']);
-  checkPolicy(at('fs'), c.fs, ['root', 'write', 'limits'], ['fileBytes', 'writtenBytes', 'operations']);
+  checkPolicy('connect', at('connect'), c.connect, ['hosts', 'privateNetworks', 'ca', 'limits']);
+  checkPolicy('fs', at('fs'), c.fs, ['root', 'write', 'limits']);
   if (c.fs) {
     const fs = c.fs as FsPolicy;
     if (typeof fs.root !== 'string' || fs.root === '') throw invalidConfig(at('fs.root'), 'must be a directory path');
@@ -561,6 +562,6 @@ export function workerLimits(l: ResolvedLimits) {
     decompressedBytes: l.decompressedBytes,
     pendingHostCalls: l.pendingHostCalls,
     hostCalls: l.hostCalls,
-    hostCallBytes: l.hostCallBytes,
+    pendingHostCallBytes: l.pendingHostCallBytes,
   };
 }

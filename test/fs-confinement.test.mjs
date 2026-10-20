@@ -32,7 +32,7 @@ function fixture() {
 test('fs confinement: symlinks are followed only while they stay inside the root', async () => {
   const { tmp, root, out } = fixture();
   const denials = [];
-  const fs = fsBroker({ root, write: true }, (api, target, reason) => denials.push(reason));
+  const fs = fsBroker({ root, write: true }, { denied: (api, target, reason) => denials.push(reason), limit: () => {} });
   try {
     assert.equal(decode(await fs('readFile', '/rel')), 'inside');
     assert.equal(decode(await fs('readFile', '/abs/a.txt')), 'inside');

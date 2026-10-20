@@ -155,10 +155,10 @@ test('limits: code, results, timers, console, concurrency', async () => {
   });
   assert.ok(logs[0].length <= 22, logs[0]);
   assert.match(logs.at(-1), /output limit reached/);
-  const rt = new Runtime({ strict: process.env.ISOLANE_STRICT === "1", defaults: { limits: { concurrentEvals: 2 } } });
+  const rt = new Runtime({ strict: process.env.ISOLANE_STRICT === "1", defaults: { limits: { pendingEvals: 2 } } });
   const vm = isolateOf(rt, { tenant: 'c', host: { wait: () => new Promise((r) => setTimeout(r, 100)) } });
   const running = [vm.eval('wait()'), vm.eval('wait()')];
-  await assert.rejects(vm.eval('1'), (e) => e.code === 'ERR_LIMIT' && e.limit === 'concurrentEvals');
+  await assert.rejects(vm.eval('1'), (e) => e.code === 'ERR_LIMIT' && e.limit === 'pendingEvals');
   await Promise.all(running);
   vm.close();
   rt.close();
@@ -408,9 +408,9 @@ test('limits.pendingHostCalls and limits.hostCalls bound host-call floods', asyn
   // Their bytes, too: 100 calls of 1 MiB that never settle.
   ran = 0;
   const held = await pool
-    .run('for (let i = 0; i < 100; i++) never(new Uint8Array(1 << 20)); 1', { ...T, host: { never }, limits: { hostCallBytes: 10 << 20 } })
+    .run('for (let i = 0; i < 100; i++) never(new Uint8Array(1 << 20)); 1', { ...T, host: { never }, limits: { pendingHostCallBytes: 10 << 20 } })
     .catch((e) => e);
-  assert.deepEqual([held.code, held.limit], ['ERR_LIMIT', 'hostCallBytes']);
+  assert.deepEqual([held.code, held.limit], ['ERR_LIMIT', 'pendingHostCallBytes']);
   assert.equal(ran, 9);
   // The defaults allow ordinary use.
   assert.equal(await pool.run('Promise.all(Array.from({ length: 900 }, () => one())).then((r) => r.length)', { ...T, host }), 900);
@@ -425,7 +425,7 @@ test('limits.pendingHostCalls and limits.hostCalls bound host-call floods', asyn
   for (const [limits, code] of [
     [{ timeoutMs: 100, pendingHostCalls: 5 }, 'for (let i = 0; i < 5; i++) hang(); await new Promise(() => {})'],
     [{ pendingHostCalls: 5 }, 'for (let i = 0; i < 6; i++) hang()'],
-    [{ hostCallBytes: 3 << 20 }, 'for (let i = 0; i < 4; i++) hang(new Uint8Array(1 << 20))'],
+    [{ pendingHostCallBytes: 3 << 20 }, 'for (let i = 0; i < 4; i++) hang(new Uint8Array(1 << 20))'],
   ]) {
     signals.length = 0;
     const stateful = isolate({ ...T, host: { hang, one: host.one }, limits });

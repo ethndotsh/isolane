@@ -458,7 +458,7 @@ background work runs again.
 
 **Recycling.** A tenant's worker is replaced after `workerLifetimeMs` or
 `workerEvals`, so a worker that guest code had quietly compromised doesn't
-live on. `onWorker` fires with `event: 'recycle'`, new isolates (every
+live on. `onWorker` fires with `kind: 'recycle'`, new isolates (every
 `run`) start on a fresh worker, and the old one finishes what it's
 running and exits. Stateful isolates still open on it keep working for up
 to a minute (or `workerLifetimeMs`, if that's shorter); then they're

@@ -5,12 +5,15 @@
 import { resolve as resolvePath } from 'node:path';
 
 import { resolve, validateConfig, validateLimits, type IsolateConfig, type ResolvedConfig, type ResolvedLimits, type RuntimeLimits } from './config.js';
-import { IsolaneError, invalidConfig, limitError } from './errors.js';
+import { IsolaneError, abortedError, invalidConfig, limitError } from './errors.js';
 import { Emitter, HookChain, validateHooks, type Hooks, type RuntimeEvents } from './hooks.js';
 import { checkReturn, isStandardSchema, type StandardSchemaV1 } from './schema.js';
 import { resolveWorkerBinary } from './worker-binary.js';
-import { SpareWorker, TenantWorker, emptyUsage, isOutOfMemory, type IsolateState, type TenantUsage } from './worker-pool.js';
+import { SpareWorker, TenantWorker, emptyUsage, exitCode, isOutOfMemory, type IsolateState, type TenantUsage } from './worker-pool.js';
 import { WorkerProcess, meetsStrict, type IsolationInfo, type WorkerExit } from './worker.js';
+
+/** What `isolationReport()` finds: the host's isolation, and whether strict mode accepts it. */
+export type IsolationReport = IsolationInfo & { meetsStrict: boolean };
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type AnySchema = StandardSchemaV1<any, any>;
@@ -33,6 +36,17 @@ export interface EvalOptions<S extends AnySchema | undefined = undefined> {
    * `<tenant>/eval-<n>.js` (n counts the isolate's evals from 1).
    */
   filename?: string;
+  /**
+   * Aborting it stops the eval: a running one is terminated (as a timeout
+   * would), a queued one never runs, and it rejects with `ERR_ABORTED`.
+   * Its host calls' `ctx.signal` aborts too. The isolate stays usable.
+   */
+  signal?: AbortSignal;
+}
+
+function checkSignal(signal: unknown): AbortSignal | undefined {
+  if (signal !== undefined && !(signal instanceof AbortSignal)) throw invalidConfig('signal', 'must be an AbortSignal');
+  return signal;
 }
 
 /** A filename for stack traces: printable, and not one of isolane's own (`ext:`, `isolane:`). */
@@ -91,15 +105,6 @@ export interface RuntimeOptions {
 }
 
 const RUNTIME_KEYS = new Set(['workerPath', 'strict', 'defaults', 'tenants', 'hooks', 'limits', 'spares', 'quarantineMs']);
-const RUNTIME_RENAMED: Record<string, string> = {
-  prewarm: 'spares',
-  idleTimeoutMs: 'defaults.limits.idleMs',
-  workerMemoryLimitBytes: 'defaults.limits.workerMemoryBytes',
-  tenantLimits: 'tenants',
-  onLog: 'hooks.onLog',
-  onSecurityEvent: 'hooks.onSecurityEvent',
-};
-
 /** Stop starting spares after this many in a row die before being used. */
 const MAX_SPARE_FAILURES = 3;
 
@@ -147,8 +152,7 @@ export class Runtime {
     if (options === null || typeof options !== 'object') throw invalidConfig('', 'Runtime options must be an object');
     for (const key of Object.keys(options)) {
       if (RUNTIME_KEYS.has(key)) continue;
-      const hint = RUNTIME_RENAMED[key];
-      throw invalidConfig(key, hint ? `is not a Runtime option; use ${hint}` : 'is not a Runtime option');
+      throw invalidConfig(key, 'is not a Runtime option');
     }
     let workerPath = options.workerPath;
     if (!workerPath) {
@@ -200,11 +204,12 @@ export class Runtime {
    */
   async run<S extends AnySchema | undefined = undefined>(code: string, config: RunConfig & EvalOptions<S>): Promise<ResultOf<S>> {
     if (config === null || typeof config !== 'object') throw invalidConfig('', 'run() needs a config with a tenant');
-    const { tenant, returns, filename, ...rest } = config;
+    const { tenant, returns, filename, signal, ...rest } = config;
     checkFilename(filename);
+    checkSignal(signal);
     const isolate = this[CREATE](tenant, rest);
     try {
-      return await isolate[EVAL_LAST](code, { returns, filename });
+      return await isolate[EVAL_LAST](code, { returns, filename, signal });
     } finally {
       isolate.close();
     }
@@ -215,7 +220,7 @@ export class Runtime {
    * version and sandbox, and which lockdown layers took effect. Ignores
    * strict mode, so it works on hosts that strict mode would refuse.
    */
-  async isolationReport(): Promise<IsolationInfo & { meetsStrict: boolean }> {
+  async isolationReport(): Promise<IsolationReport> {
     const probe = new WorkerProcess(this.#workerPath, { onMessage: () => {}, onExit: () => {} }, false, undefined, false, true);
     try {
       const info = await probe.ready;
@@ -513,20 +518,17 @@ export class Isolate {
     const { returns } = options;
     if (returns !== undefined && !isStandardSchema(returns)) throw invalidConfig('returns', 'must be a Standard Schema');
     const filename = checkFilename(options.filename) ?? `${filenameSafe(this.tenant)}/eval-${this.#evals + 1}.js`;
+    const signal = checkSignal(options.signal);
     this.#evals++;
     if (this.#closed) throw new IsolaneError('ERR_ISOLATE_CLOSED', 'isolane: the isolate has been closed', { tenant: this.tenant });
+    if (signal?.aborted) throw abortedError(signal, this.tenant);
     if (typeof code !== 'string') throw invalidConfig('code', 'must be a string');
-    await this.#worker.ready.catch((err: Error) => {
-      const code = /strict mode/.test(err.message)
-        ? 'ERR_ISOLATION_UNAVAILABLE'
-        : /speaks protocol/.test(err.message)
-          ? 'ERR_WORKER_INCOMPATIBLE'
-          : 'ERR_WORKER_CRASHED';
-      throw new IsolaneError(code, err.message, { tenant: this.tenant });
+    await this.#worker.ready.catch((err: Error & { exit?: WorkerExit }) => {
+      throw new IsolaneError(err.exit ? exitCode(err.exit) : 'ERR_WORKER_CRASHED', err.message, { tenant: this.tenant });
     });
     const chain = this.#chain;
     if (!chain.observesEvals) {
-      const value = await this.#worker.eval(this.#state, this.#nextReq(), code, filename, last);
+      const value = await this.#worker.eval(this.#state, this.#nextReq(), code, filename, last, signal);
       return (returns ? await checkReturn(returns, value, this.tenant) : value) as ResultOf<S>;
     }
     const event = { tenant: this.tenant, isolate: this.id, code, filename };
@@ -537,7 +539,7 @@ export class Isolate {
     const started = performance.now();
     let value: unknown;
     try {
-      value = await this.#worker.eval(this.#state, this.#nextReq(), before.code, filename, last);
+      value = await this.#worker.eval(this.#state, this.#nextReq(), before.code, filename, last, signal);
     } catch (err) {
       await chain.afterEval({ ...event, code: before.code, durationMs: performance.now() - started, error: err as IsolaneError });
       throw err;

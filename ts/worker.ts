@@ -7,10 +7,47 @@ import { spawn, type ChildProcessByStdio } from 'node:child_process';
 import type { Readable, Writable } from 'node:stream';
 
 import type { PathSegment } from './binary.js';
+import type { ResolvedShims, TimeSpec } from './config.js';
 import { parseGuestError, type GuestErrorInfo } from './errors.js';
 
+/**
+ * What the supervisor sends a worker: one variant per `proto::In` in
+ * crates/worker/src/proto.rs, with the same field names.
+ */
+export type WorkerCommand =
+  | {
+      t: 'create';
+      vm: number;
+      limits: Record<string, number | undefined>;
+      time: TimeSpec;
+      random: { seed?: number };
+      eval: boolean;
+      wasm: boolean;
+      web: boolean;
+      baseUrl?: string;
+      functions: { path: readonly string[]; sync: boolean }[];
+      prelude?: string;
+      shims: ResolvedShims;
+    }
+  | { t: 'eval'; vm: number; req: number; code: string; filename: string; last?: true }
+  | {
+      t: 'hostReply';
+      vm: number;
+      call: number;
+      ok: boolean;
+      /** JSON text; absent for `undefined`. */
+      value?: string;
+      error?: string;
+      errorName?: string;
+      errorCode?: string;
+      /** Byte values in the result: where each goes, and its length. */
+      bin?: [PathSegment[], number][];
+    }
+  | { t: 'abort'; vm: number; req: number }
+  | { t: 'dispose'; vm: number };
+
 /** The protocol version this library speaks; a worker reporting another is refused. */
-export const PROTOCOL_VERSION = 3;
+export const PROTOCOL_VERSION = 4;
 
 /** Largest frame accepted from a worker (matches the worker's own cap). */
 export const MAX_FRAME = 64 << 20;
@@ -257,7 +294,7 @@ export class WorkerProcess {
       this.#alive = false;
       clearTimeout(readyTimer);
       clearTimeout(this.#stall);
-      if (!isReady) failReady(new Error(`worker failed to start: ${exit.detail ?? exit.reason}`));
+      if (!isReady) failReady(Object.assign(new Error(`worker failed to start: ${exit.detail ?? exit.reason}`), { exit }));
       handlers.onExit(exit);
     };
     this.#fail = (reason, detail) => {
@@ -396,7 +433,7 @@ export class WorkerProcess {
   }
 
   /** Send a message, with `attached` bytes after its JSON (a binary frame). */
-  send(msg: object, attached: Uint8Array[] = []): void {
+  send(msg: WorkerCommand, attached: Uint8Array[] = []): void {
     if (!this.#alive) return;
     const json = Buffer.from(JSON.stringify(msg, wellFormed), 'utf8');
     if (attached.length === 0) {

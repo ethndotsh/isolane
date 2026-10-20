@@ -91,12 +91,12 @@ test('a worker is recycled after limits.workerEvals evals', async () => {
   assert.equal(pids[0], pids[1], `${pids}`);
   assert.equal(pids[2], undefined, `${pids}`);
   assert.ok(pids[3] && pids[3] !== pids[0], `${pids}`);
-  const recycle = events.find((e) => e.event === 'recycle');
+  const recycle = events.find((e) => e.kind === 'recycle');
   assert.ok(recycle, JSON.stringify(events));
   assert.equal(recycle.pid, pids[0]);
   assert.match(recycle.reason, /workerEvals/);
   await new Promise((r) => setTimeout(r, 100));
-  assert.ok(events.some((e) => e.event === 'exit' && e.pid === pids[0]), 'the old worker exited once drained');
+  assert.ok(events.some((e) => e.kind === 'exit' && e.pid === pids[0]), 'the old worker exited once drained');
   rt.close();
 });
 
@@ -108,7 +108,7 @@ test('a recycled worker drains: open isolates keep working, then are retired', a
   await vm.eval('globalThis.kept = 1');
   const first = rt.diagnostics.workerPid('long');
   await new Promise((r) => setTimeout(r, 500)); // past its lifetime
-  assert.ok(events.some((e) => e.event === 'recycle' && e.pid === first), JSON.stringify(events));
+  assert.ok(events.some((e) => e.kind === 'recycle' && e.pid === first), JSON.stringify(events));
   // New work starts on a fresh worker; the open isolate is still on the old one.
   assert.equal(await t.run('2'), 2);
   assert.notEqual(rt.diagnostics.workerPid('long'), first);
@@ -206,6 +206,49 @@ test('closing an isolate rejects its in-flight evals at once, and the worker sta
   forever.close();
   assert.equal(await spin, 'ERR_ISOLATE_CLOSED');
   assert.equal(await t.run('4'), 4);
+  rt.close();
+});
+
+test('an eval stops when its signal aborts, and the isolate stays usable', async () => {
+  const rt = new Runtime({ strict });
+  const security = [];
+  rt.on('securityEvent', (e) => security.push(e));
+  const t = rt.tenant('abort');
+  const vm = t.isolate({ limits: { timeoutMs: 5000 } });
+  await vm.eval('globalThis.n = 1');
+  // Running: terminated, and its pending host call's signal aborts.
+  let hostSignal;
+  const host = t.isolate({
+    host: {
+      wait() {
+        hostSignal = this.signal;
+        return new Promise(() => {});
+      },
+    },
+  });
+  const a = new AbortController();
+  const waiting = host.eval('wait()', { signal: a.signal }).catch((e) => [e.code, e.reason]);
+  const spin = new AbortController();
+  const busy = vm.eval('for (;;) {}', { signal: spin.signal }).catch((e) => [e.code, e.reason]);
+  const queued = new AbortController();
+  const later = vm.eval('n += 1', { signal: queued.signal }).catch((e) => e.code);
+  await new Promise((r) => setTimeout(r, 50));
+  const started = Date.now();
+  spin.abort('enough');
+  queued.abort();
+  a.abort(new Error('gone'));
+  assert.deepEqual(await busy, ['ERR_ABORTED', 'enough']);
+  assert.equal(await later, 'ERR_ABORTED');
+  assert.deepEqual(await waiting, ['ERR_ABORTED', 'gone']);
+  assert.ok(Date.now() - started < 1000, 'rejected promptly');
+  assert.equal(hostSignal?.aborted, true);
+  // The queued eval never ran; the isolate keeps its state.
+  assert.equal(await vm.eval('n'), 1);
+  // Already aborted: rejected without running.
+  await assert.rejects(vm.eval('n = 99', { signal: AbortSignal.abort() }), code('ERR_ABORTED'));
+  assert.equal(await t.run('2', { signal: new AbortController().signal }), 2);
+  assert.equal(await vm.eval('n'), 1);
+  assert.deepEqual(security, []);
   rt.close();
 });
 

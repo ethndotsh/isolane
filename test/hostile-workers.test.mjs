@@ -2,12 +2,13 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { Runtime } from '../dist/index.js';
+import { PROTOCOL_VERSION } from '../dist/worker.js';
 import { code, isolateOf, fakeWorker } from './helpers.mjs';
 
 test('a crashing worker rejects in-flight evals and raises a security event', async () => {
   const events = [];
   const crashy = new Runtime({
-    workerPath: fakeWorker(`send({ t: 'ready', protocol: 3, v8: 'fake', sandboxSecure: true, lockdown: { landlock: 'full', seccomp: 'full' } }); process.stdin.once('data', () => process.abort());`),
+    workerPath: fakeWorker(`send({ t: 'ready', protocol: ${PROTOCOL_VERSION}, v8: 'fake', sandboxSecure: true, lockdown: { landlock: 'full', seccomp: 'full' } }); process.stdin.once('data', () => process.abort());`),
     hooks: { onSecurityEvent: (e) => events.push(e) },
   });
   await assert.rejects(crashy.run('1', { tenant: 'victim' }), code('ERR_WORKER_CRASHED'));
@@ -21,7 +22,7 @@ test('a crashing worker rejects in-flight evals and raises a security event', as
 test('a worker that exits cleanly by itself is a security event too', async () => {
   const events = [];
   const quiet = new Runtime({
-    workerPath: fakeWorker(`send({ t: 'ready', protocol: 3, v8: 'fake', sandboxSecure: true, lockdown: { landlock: 'full', seccomp: 'full' } }); process.stdin.once('data', () => process.exit(0));`),
+    workerPath: fakeWorker(`send({ t: 'ready', protocol: ${PROTOCOL_VERSION}, v8: 'fake', sandboxSecure: true, lockdown: { landlock: 'full', seccomp: 'full' } }); process.stdin.once('data', () => process.exit(0));`),
     hooks: { onSecurityEvent: (e) => events.push(e) },
   });
   await assert.rejects(quiet.run('1', { tenant: 'quiet' }), code('ERR_WORKER_CRASHED'));
@@ -33,7 +34,7 @@ test('a worker flooding log lines is cut off at a per-second bound', async () =>
   const logs = [];
   const line = 'x'.repeat(1000);
   const flood = new Runtime({
-    workerPath: fakeWorker(`send({ t: 'ready', protocol: 3, v8: 'fake', sandboxSecure: true, lockdown: { landlock: 'full', seccomp: 'full' } });
+    workerPath: fakeWorker(`send({ t: 'ready', protocol: ${PROTOCOL_VERSION}, v8: 'fake', sandboxSecure: true, lockdown: { landlock: 'full', seccomp: 'full' } });
       process.stdin.once('data', () => { for (let i = 0; i < 10000; i++) send({ t: 'log', vm: 1, level: 'log', message: '${line}' }); });
       setInterval(() => {}, 1000);`),
     hooks: { onLog: (e) => logs.push(e) },
@@ -49,7 +50,7 @@ test('a worker flooding log lines is cut off at a per-second bound', async () =>
 test('a security event quarantines the tenant', async () => {
   const events = [];
   const rt = new Runtime({
-    workerPath: fakeWorker(`send({ t: 'ready', protocol: 3, v8: 'fake', sandboxSecure: true, lockdown: { landlock: 'full', seccomp: 'full' } }); process.stdin.once('data', () => process.abort());`),
+    workerPath: fakeWorker(`send({ t: 'ready', protocol: ${PROTOCOL_VERSION}, v8: 'fake', sandboxSecure: true, lockdown: { landlock: 'full', seccomp: 'full' } }); process.stdin.once('data', () => process.abort());`),
     hooks: { onSecurityEvent: (e) => events.push(e) },
     quarantineMs: 60_000,
   });
@@ -71,7 +72,7 @@ test('a security event quarantines the tenant', async () => {
 test('a worker that breaks the protocol is killed', async () => {
   const events = [];
   const hostile = new Runtime({
-    workerPath: fakeWorker(`send({ t: 'ready', protocol: 3, v8: 'fake', sandboxSecure: true, lockdown: { landlock: 'full', seccomp: 'full' } }); process.stdin.once('data', () => send({ t: 'result', req: 'not-a-number' })); setInterval(() => {}, 1000);`),
+    workerPath: fakeWorker(`send({ t: 'ready', protocol: ${PROTOCOL_VERSION}, v8: 'fake', sandboxSecure: true, lockdown: { landlock: 'full', seccomp: 'full' } }); process.stdin.once('data', () => send({ t: 'result', req: 'not-a-number' })); setInterval(() => {}, 1000);`),
     hooks: { onSecurityEvent: (e) => events.push(e) },
   });
   await assert.rejects(hostile.run('1', { tenant: 'evil' }), code('ERR_WORKER_CRASHED'));
@@ -85,10 +86,10 @@ test('a worker claiming an insecure sandbox never runs code', async (t) => {
   t.after(() => dev !== undefined && (process.env.ISOLANE_DEV_INSECURE = dev));
   const events = [];
   const insecure = new Runtime({
-    workerPath: fakeWorker(`send({ t: 'ready', protocol: 3, v8: 'fake', sandboxSecure: false, lockdown: { landlock: 'full', seccomp: 'full' } }); setInterval(() => {}, 1000);`),
+    workerPath: fakeWorker(`send({ t: 'ready', protocol: ${PROTOCOL_VERSION}, v8: 'fake', sandboxSecure: false, lockdown: { landlock: 'full', seccomp: 'full' } }); setInterval(() => {}, 1000);`),
     hooks: { onSecurityEvent: (e) => events.push(e) },
   });
-  await assert.rejects(insecure.run('1', { tenant: 't' }), /no secure V8 sandbox/);
+  await assert.rejects(insecure.run('1', { tenant: 't' }), (e) => /no secure V8 sandbox/.test(e.message) && e.code === 'ERR_ISOLATION_UNAVAILABLE' && !e.retryable);
   // A development build is a setup problem: no security event, no quarantine.
   assert.deepEqual(events, []);
   await assert.rejects(insecure.run('1', { tenant: 't' }), /no secure V8 sandbox/);
@@ -101,7 +102,7 @@ test('a worker claiming an insecure sandbox never runs code', async (t) => {
 test('a worker that stops answering is killed after its timeout', async () => {
   const events = [];
   const silent = new Runtime({
-    workerPath: fakeWorker(`send({ t: 'ready', protocol: 3, v8: 'fake', sandboxSecure: true, lockdown: { landlock: 'full', seccomp: 'full' } }); setInterval(() => {}, 1000);`),
+    workerPath: fakeWorker(`send({ t: 'ready', protocol: ${PROTOCOL_VERSION}, v8: 'fake', sandboxSecure: true, lockdown: { landlock: 'full', seccomp: 'full' } }); setInterval(() => {}, 1000);`),
     hooks: { onSecurityEvent: (e) => events.push(e) },
   });
   const started = Date.now();
@@ -113,7 +114,7 @@ test('a worker that stops answering is killed after its timeout', async () => {
 
 test('an oversized frame is a protocol violation', async () => {
   const big = new Runtime({
-    workerPath: fakeWorker(`send({ t: 'ready', protocol: 3, v8: 'fake', sandboxSecure: true, lockdown: { landlock: 'full', seccomp: 'full' } }); process.stdin.once('data', () => { const h = Buffer.alloc(4); h.writeUInt32LE(0xffffffff); process.stdout.write(h); }); setInterval(() => {}, 1000);`),
+    workerPath: fakeWorker(`send({ t: 'ready', protocol: ${PROTOCOL_VERSION}, v8: 'fake', sandboxSecure: true, lockdown: { landlock: 'full', seccomp: 'full' } }); process.stdin.once('data', () => { const h = Buffer.alloc(4); h.writeUInt32LE(0xffffffff); process.stdout.write(h); }); setInterval(() => {}, 1000);`),
   });
   await assert.rejects(big.run('1', { tenant: 't' }), code('ERR_WORKER_CRASHED'));
   big.close();
@@ -128,7 +129,7 @@ test('a worker speaking another protocol version is refused, not treated as host
     const old = new Runtime({ workerPath: fakeWorker(`${ready} setInterval(() => {}, 1000);`), hooks: { onSecurityEvent: (e) => events.push(e) } });
     const err = await old.run('1', { tenant: 't' }).catch((e) => e);
     assert.equal(err.code, 'ERR_WORKER_INCOMPATIBLE');
-    assert.match(err.message, /speaks protocol 1, this library 3/);
+    assert.match(err.message, new RegExp(`speaks protocol 1, this library ${PROTOCOL_VERSION}`));
     assert.deepEqual(events, []);
     old.close();
   }
@@ -139,7 +140,7 @@ test('a worker that sends host calls past limits.pendingHostCalls is killed', as
   let calls = 0;
   const hostile = new Runtime({
     workerPath: fakeWorker(
-      `send({ t: 'ready', protocol: 3, v8: 'fake', sandboxSecure: true, lockdown: { landlock: 'full', seccomp: 'full' } });
+      `send({ t: 'ready', protocol: ${PROTOCOL_VERSION}, v8: 'fake', sandboxSecure: true, lockdown: { landlock: 'full', seccomp: 'full' } });
        process.stdin.once('data', (d) => {
          const { vm } = JSON.parse(d.subarray(4, 4 + d.readUInt32LE(0)));
          for (let call = 1; call <= 1000; call++) send({ t: 'hostCall', vm, call, fn: 0, args: [] });
@@ -160,7 +161,7 @@ test('a worker that stops reading its input is killed, not buffered for without 
   const events = [];
   const stuck = new Runtime({
     // Never reads stdin.
-    workerPath: fakeWorker(`send({ t: 'ready', protocol: 3, v8: 'fake', sandboxSecure: true, lockdown: { landlock: 'full', seccomp: 'full' } }); process.stdin.pause(); setInterval(() => {}, 1000);`),
+    workerPath: fakeWorker(`send({ t: 'ready', protocol: ${PROTOCOL_VERSION}, v8: 'fake', sandboxSecure: true, lockdown: { landlock: 'full', seccomp: 'full' } }); process.stdin.pause(); setInterval(() => {}, 1000);`),
     hooks: { onSecurityEvent: (e) => events.push(e) },
   });
   const vm = isolateOf(stuck, { tenant: 'stuck', limits: { timeoutMs: null } });
@@ -181,7 +182,7 @@ test('guest-sized data never makes a frame the worker refuses', async () => {
   const t = rt.tenant('frames');
   // A host function that echoes guest input in its error.
   const host = { echo: (s) => Promise.reject(new Error(`not found: ${s}, nor ${s}`)) };
-  const out = await t.run(`echo('k'.repeat(60 << 20)).catch((e) => e.message.length)`, { host, limits: { heapBytes: 1 << 30 } });
+  const out = await t.run(`echo('k'.repeat(60 << 20)).catch((e) => e.message.length)`, { host, limits: { heapBytes: 1 << 30, pendingHostCallBytes: 64 << 20 } });
   assert.ok(out <= 64 * 1024 + 1, `${out}`);
   // codeBytes set past what a frame carries.
   await assert.rejects(t.run(`/*${'c'.repeat(70 << 20)}*/ 1`, { limits: { codeBytes: 1 << 30 } }), (e) => e.code === 'ERR_LIMIT' && e.limit === 'codeBytes');

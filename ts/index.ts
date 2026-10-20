@@ -6,13 +6,14 @@
 //   config.ts       IsolateConfig, limits, layering and validation
 //   host.ts         host functions, namespaces, the call context
 //   hooks.ts        interceptors and events
-//   capabilities.ts the fetch, connect, and fs brokers
+//   capabilities.ts the policies' brokers and setup, per isolate
+//   brokers/        the fetch, connect, and fs brokers
 //   worker-pool.ts  worker processes and their isolates
 //   worker.ts       one worker process and its protocol
 
 export { Runtime, Tenant, Isolate } from './runtime.js';
-export type { EvalOptions, RunConfig, RuntimeOptions } from './runtime.js';
-export { DEFAULT_LIMITS } from './config.js';
+export type { EvalOptions, IsolationReport, RunConfig, RuntimeOptions } from './runtime.js';
+export { DEFAULT_LIMITS, DEFAULT_POLICY_LIMITS } from './config.js';
 export type { IsolateConfig, IsolateLimits, Limits, RuntimeLimits, TenantLimits, Shim, ShimsConfig, TimeConfig, WebConfig } from './config.js';
 export { hostFunction } from './host.js';
 export type { HostContext, HostFunction, HostFunctionDefinition, HostTree } from './host.js';

@@ -49,7 +49,7 @@ test('beforeEval can deny or replace code; afterEval can replace results', async
   };
   assert.deepEqual(await pool.run('ONE + 1', { ...T, hooks }), { wrapped: 2 });
   const err = await pool.run('"forbidden"', { ...T, hooks }).catch((e) => e);
-  assert.deepEqual([err.code, err.kind, err.reason], ['ERR_DENIED', 'security', 'no forbidden words']);
+  assert.deepEqual([err.code, err.kind, err.reason], ['ERR_DENIED', 'usage', 'no forbidden words']);
 });
 
 test('every level runs: runtime, defaults, tenants(name), the call, in onion order', async () => {
@@ -79,7 +79,7 @@ test('events: limits, policy denials, workers, and runtime.on', async () => {
     hooks: {
       onLimit: (e) => events.push(['limit', e.limit]),
       onPolicyDenial: (e) => events.push(['denial', e.api, e.target]),
-      onWorker: (e) => events.push(['worker', e.event]),
+      onWorker: (e) => events.push(['worker', e.kind]),
     },
   });
   const seen = [];

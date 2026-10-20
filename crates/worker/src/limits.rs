@@ -44,7 +44,7 @@ pub struct Limits {
     pub host_calls: u64,
     /// Frame bytes (arguments and all) of host calls waiting for replies
     /// at once; a call past it throws a RangeError and fails the eval.
-    pub host_call_bytes: usize,
+    pub pending_host_call_bytes: usize,
 }
 
 impl Default for Limits {
@@ -62,7 +62,7 @@ impl Default for Limits {
             decompressed_bytes: 128 << 20,
             pending_host_calls: 1_000,
             host_calls: 10_000,
-            host_call_bytes: 64 << 20,
+            pending_host_call_bytes: 16 << 20,
         }
     }
 }

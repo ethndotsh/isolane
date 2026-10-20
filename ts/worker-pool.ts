@@ -7,7 +7,7 @@ import { readFileSync } from 'node:fs';
 import { splitBytes, type BinaryPart } from './binary.js';
 import { capabilities } from './capabilities.js';
 import { workerLimits, type ResolvedConfig, type ResolvedLimits, type ResolvedShims } from './config.js';
-import { IsolaneError, invalidConfig, isIsolaneErrorCode, limitError, type IsolaneErrorCode } from './errors.js';
+import { IsolaneError, abortedError, invalidConfig, isIsolaneErrorCode, limitError, type IsolaneErrorCode } from './errors.js';
 import type { HookChain } from './hooks.js';
 import type { HostContext, HostEntry } from './host.js';
 import {
@@ -16,6 +16,7 @@ import {
   WorkerProcess,
   type LogLevel,
   type WorkerExit,
+  type WorkerCommand,
   type WorkerHandlers,
   type WorkerMessage,
   type WorkerUsage,
@@ -73,6 +74,45 @@ export const emptyUsage = (): TenantUsage => ({
 const unresponsiveAfterMs = (timeoutMs: number) => timeoutMs + Math.max(1000, timeoutMs);
 
 export const isOutOfMemory = (exit: WorkerExit) => exit.reason === 'exited' && exit.code === OOM_EXIT_CODE;
+
+/**
+ * A guest log line as the supervisor passes it on, or null to drop it. The
+ * worker cuts long lines and holds each eval to its budget; a worker that
+ * didn't (a compromised one) is cut here too, leaving room for the
+ * worker's own notices, and past a per-second bound its lines are dropped,
+ * with one notice per window.
+ */
+function admitLog(state: IsolateState, line: string, tenant: string, isolate: number): string | null {
+  let message = line;
+  const max = Math.max(state.limits.logLineBytes, 1024);
+  let bytes = Buffer.byteLength(message);
+  if (bytes > max + 3) {
+    message = `${Buffer.from(message).subarray(0, max).toString('utf8').replace(/\uFFFD$/, '')}…`;
+    bytes = Buffer.byteLength(message);
+  }
+  const now = Date.now();
+  const window = state.logWindow;
+  if (now - window.start >= 1000) Object.assign(window, { start: now, bytes: 0, dropped: false });
+  window.bytes += bytes;
+  if (window.bytes <= state.logBytesPerSecond) return message;
+  if (!window.dropped) {
+    window.dropped = true;
+    const notice = `[isolane] log output dropped: more than ${state.logBytesPerSecond} bytes in a second from this isolate`;
+    state.chain.emit('log', { tenant, isolate, level: 'warn', message: notice, source: 'guest' });
+  }
+  return null;
+}
+
+/** The error code for a worker that exited this way (the supervisor stopping it aside). */
+const EXIT_CODES: Partial<Record<WorkerExit['reason'], IsolaneErrorCode>> = {
+  unresponsive: 'ERR_WORKER_UNRESPONSIVE',
+  'insufficient-isolation': 'ERR_ISOLATION_UNAVAILABLE',
+  incompatible: 'ERR_WORKER_INCOMPATIBLE',
+};
+
+export function exitCode(exit: WorkerExit): IsolaneErrorCode {
+  return isOutOfMemory(exit) ? 'ERR_LIMIT' : (EXIT_CODES[exit.reason] ?? 'ERR_WORKER_CRASHED');
+}
 
 export function describeExit(exit: WorkerExit): string {
   if (isOutOfMemory(exit)) return 'ran out of memory (limits.workerMemoryBytes)';
@@ -173,17 +213,12 @@ export interface IsolateState {
   /** Host functions by index, as the worker names them in host calls. */
   readonly functions: readonly HostEntry[];
   readonly chain: HookChain;
-  readonly timeoutMs: number | null;
-  readonly codeBytes: number;
-  /** The longest console line it may send (the worker cuts lines; this checks it did). */
-  readonly logLineBytes: number;
+  /** Its limits. The worker enforces the isolate's; the supervisor checks the ones a compromised worker could ignore. */
+  readonly limits: ResolvedLimits;
   /** Log bytes it may send per second, however many evals it runs (the worker holds each eval to logBytes; this bounds a worker that doesn't). */
   readonly logBytesPerSecond: number;
   /** The current one-second window: when it started, and its bytes. */
   logWindow: { start: number; bytes: number; dropped: boolean };
-  /** Async host calls it may have waiting (the worker refuses more; this checks it did). */
-  readonly pendingHostCalls: number;
-  readonly hostCallBytes: number;
   /** Its shims, for naming the one in an `ERR_SHIM`. */
   readonly shims: ResolvedShims;
   /** When its queued evals will have run out their timeouts (they run one at a time). */
@@ -198,7 +233,7 @@ export interface TenantWorkerOptions {
   tenant: string;
   workerPath: string;
   strict: boolean;
-  /** Its tenant-level limits (isolates, concurrentEvals, workerMemoryBytes, idleMs), fixed at start. */
+  /** Its tenant-level limits (isolates, pendingEvals, workerMemoryBytes, idleMs), fixed at start. */
   limits: ResolvedLimits;
   usage: TenantUsage;
   /** The tenant's hooks (runtime, defaults, tenants(name)), for worker and limit events. */
@@ -299,7 +334,7 @@ export class TenantWorker {
     }
     this.#proc.ready.then(
       () => {
-        this.#chain.emit('worker', { tenant: this.tenant, event: 'start', pid: this.#proc.pid });
+        this.#chain.emit('worker', { tenant: this.tenant, kind: 'start', pid: this.#proc.pid });
         if (process.platform === 'linux' && this.#proc.alive) {
           this.#cpuTimer = setInterval(() => this.sampleCpu(), CPU_SAMPLE_MS);
           this.#cpuTimer.unref();
@@ -345,9 +380,10 @@ export class TenantWorker {
     const topLevel = new Set(config.host.map((e) => e.path[0]));
     let caps;
     try {
-      caps = capabilities(config, topLevel, (api, target, reason) =>
-        chain.emit('policyDenial', { tenant: this.tenant, isolate: id, api, target, reason }),
-      );
+      caps = capabilities(config, topLevel, {
+        denied: (api, target, reason) => chain.emit('policyDenial', { tenant: this.tenant, isolate: id, api, target, reason }),
+        limit: (limit, message) => chain.emit('limit', { tenant: this.tenant, isolate: id, limit, message }),
+      });
     } catch (err) {
       throw err instanceof TypeError ? invalidConfig('', (err as Error).message.replace(/^isolane: /, '')) : err;
     }
@@ -356,13 +392,9 @@ export class TenantWorker {
       id,
       functions,
       chain,
-      timeoutMs: config.limits.timeoutMs,
-      codeBytes: config.limits.codeBytes,
-      logLineBytes: config.limits.logLineBytes,
+      limits: config.limits,
       logBytesPerSecond: Math.max(4 * config.limits.logBytes, 4 * 1024 ** 2),
       logWindow: { start: 0, bytes: 0, dropped: false },
-      pendingHostCalls: config.limits.pendingHostCalls,
-      hostCallBytes: config.limits.hostCallBytes,
       shims: config.shims,
       busyUntil: 0,
       calls: new Map(),
@@ -392,7 +424,7 @@ export class TenantWorker {
   /** `last`: the isolate closes after this eval (a one-shot run), so the
    * worker drops it as soon as the result is sent and its pending timers
    * never run. */
-  eval(state: IsolateState, req: number, code: string, filename: string, last = false): Promise<unknown> {
+  eval(state: IsolateState, req: number, code: string, filename: string, last = false, signal?: AbortSignal): Promise<unknown> {
     return new Promise((resolve, reject) => {
       if (!this.#proc.alive) {
         reject(
@@ -408,17 +440,17 @@ export class TenantWorker {
       }
       // A frame carries at most 64 MiB: a frame the worker can't take
       // would end it as if it had crashed.
-      const codeBytes = Math.min(state.codeBytes, MAX_FRAME - 64 * 1024);
+      const codeBytes = Math.min(state.limits.codeBytes, MAX_FRAME - 64 * 1024);
       if (Buffer.byteLength(code, 'utf8') > codeBytes) {
         reject(this.#limit('codeBytes', `the code is larger than ${codeBytes} bytes`, state.id));
         return;
       }
-      if (this.#requests.size >= this.limits.concurrentEvals) {
-        reject(this.#limit('concurrentEvals', `tenant ${this.tenant} already has ${this.limits.concurrentEvals} evals in flight`, state.id));
+      if (this.#requests.size >= this.limits.pendingEvals) {
+        reject(this.#limit('pendingEvals', `tenant ${this.tenant} already has ${this.limits.pendingEvals} evals in flight`, state.id));
         return;
       }
       const pending: Pending = { isolate: state, resolve, reject };
-      const timeoutMs = state.timeoutMs;
+      const timeoutMs = state.limits.timeoutMs;
       if (timeoutMs !== null) {
         const start = Math.max(Date.now(), state.busyUntil);
         state.busyUntil = start + timeoutMs;
@@ -447,9 +479,34 @@ export class TenantWorker {
       this.#requests.set(req, pending);
       this.#touch();
       this.#proc.send(last ? { t: 'eval', vm: state.id, req, code, filename, last } : { t: 'eval', vm: state.id, req, code, filename });
+      if (signal) this.#abortOn(signal, req, pending);
       const most = this.limits.workerEvals;
       if (most !== null && ++this.#evals >= most) this.#recycle(`it ran limits.workerEvals (${most}) evals`);
     });
+  }
+
+  /** Abort eval `req` when `signal` does: it fails now with ERR_ABORTED, and the worker stops it (a late result is ignored). */
+  #abortOn(signal: AbortSignal, req: number, pending: Pending): void {
+    const onAbort = () => {
+      if (this.#requests.get(req) !== pending) return;
+      this.#requests.delete(req);
+      clearTimeout(pending.timer);
+      const err = abortedError(signal, this.tenant);
+      this.#abandonCalls(pending.isolate, err);
+      this.#proc.send({ t: 'abort', vm: pending.isolate.id, req });
+      pending.reject(err);
+      this.#touch();
+    };
+    signal.addEventListener('abort', onAbort, { once: true });
+    const { resolve, reject } = pending;
+    pending.resolve = (value) => {
+      signal.removeEventListener('abort', onAbort);
+      resolve(value);
+    };
+    pending.reject = (err) => {
+      signal.removeEventListener('abort', onAbort);
+      reject(err);
+    };
   }
 
   closeIsolate(state: IsolateState): void {
@@ -489,7 +546,7 @@ export class TenantWorker {
     if (this.recycling || this.#stopped || !this.#proc.alive) return;
     this.recycling = true;
     clearTimeout(this.#lifetimeTimer);
-    this.#chain.emit('worker', { tenant: this.tenant, event: 'recycle', pid: this.#proc.pid, reason: why });
+    this.#chain.emit('worker', { tenant: this.tenant, kind: 'recycle', pid: this.#proc.pid, reason: why });
     this.#onRecycle();
     if (this.idle) {
       this.stop('ERR_ISOLATE_CLOSED', `was recycled: ${why}`);
@@ -584,28 +641,9 @@ export class TenantWorker {
     }
     if (msg.t === 'log') {
       if (!state) return;
-      // The worker cuts long lines; a worker that didn't is cut here too
-      // (leaving room for the worker's own notices).
-      let message = msg.message;
-      const max = Math.max(state.logLineBytes, 1024);
-      if (Buffer.byteLength(message) > max + 3) {
-        message = `${Buffer.from(message).subarray(0, max).toString('utf8').replace(/\uFFFD$/, '')}…`;
-      }
-      // A worker floods only if it's compromised: past the per-second
-      // bound, lines are dropped, with one notice per window.
-      const now = Date.now();
-      const window = state.logWindow;
-      if (now - window.start >= 1000) Object.assign(window, { start: now, bytes: 0, dropped: false });
-      window.bytes += Buffer.byteLength(message);
-      if (window.bytes > state.logBytesPerSecond) {
-        if (!window.dropped) {
-          window.dropped = true;
-          const notice = `[isolane] log output dropped: more than ${state.logBytesPerSecond} bytes in a second from this isolate`;
-          state.chain.emit('log', { tenant: this.tenant, isolate: msg.vm, level: 'warn', message: notice, source: 'guest' });
-        }
-        return;
-      }
-      this.#usage.logBytes += message.length;
+      const message = admitLog(state, msg.message, this.tenant, msg.vm);
+      if (message === null) return;
+      this.#usage.logBytes += Buffer.byteLength(message);
       state.chain.emit('log', { tenant: this.tenant, isolate: msg.vm, level: msg.level, message, source: 'guest' });
       return;
     }
@@ -616,13 +654,13 @@ export class TenantWorker {
     // The worker refuses a call past limits.pendingHostCalls (it counts a
     // call until its reply lands, so never fewer than here, plus one sync
     // call at a time). More means it isn't enforcing the limit.
-    if (state && state.calls.size > state.pendingHostCalls) {
-      this.#proc.kill('protocol-violation', `more than ${state.pendingHostCalls} host calls in flight (limits.pendingHostCalls)`);
+    if (state && state.calls.size > state.limits.pendingHostCalls) {
+      this.#proc.kill('protocol-violation', `more than ${state.limits.pendingHostCalls} host calls in flight (limits.pendingHostCalls)`);
       return;
     }
-    // Likewise their bytes (limits.hostCallBytes).
-    if (state && state.callBytes + msg.size > state.hostCallBytes) {
-      this.#proc.kill('protocol-violation', `more than ${state.hostCallBytes} bytes of host calls in flight (limits.hostCallBytes)`);
+    // Likewise their bytes (limits.pendingHostCallBytes).
+    if (state && state.callBytes + msg.size > state.limits.pendingHostCallBytes) {
+      this.#proc.kill('protocol-violation', `more than ${state.limits.pendingHostCallBytes} bytes of host calls in flight (limits.pendingHostCallBytes)`);
       return;
     }
     this.#usage.hostCalls++;
@@ -633,7 +671,7 @@ export class TenantWorker {
       replied = true;
       clearTimeout(expiry);
       if (state?.calls.delete(msg.call)) state.callBytes -= msg.size;
-      const frame: Record<string, unknown> = { t: 'hostReply', vm: msg.vm, call: msg.call, ok };
+      const frame: Extract<WorkerCommand, { t: 'hostReply' }> = { t: 'hostReply', vm: msg.vm, call: msg.call, ok };
       if (value !== undefined) frame.value = value; // JSON text; absent = undefined
       if (parts.length) frame.bin = parts.map((p) => [p.path, p.bytes.length]);
       if (!ok) {
@@ -680,10 +718,10 @@ export class TenantWorker {
     // rejects, ctx.signal aborts, and the call's slot is free again.
     // isolane's own brokers have their own timeouts (a socket read may
     // rightly wait as long as connect.limits.idleMs).
-    if (state.timeoutMs !== null && !entry.internal) {
+    if (state.limits.timeoutMs !== null && !entry.internal) {
       // A second past it, so an eval's own timeout (which abandons the
       // calls itself) always comes first.
-      const ms = state.timeoutMs;
+      const ms = state.limits.timeoutMs;
       expiry = setTimeout(() => {
         const message = `host function ${entry.name} didn't settle within ${ms}ms (limits.timeoutMs)`;
         ctx.abandon(new IsolaneError('ERR_LIMIT', `isolane: ${message}`, { tenant: this.tenant, limit: 'timeoutMs' }));
@@ -738,17 +776,7 @@ export class TenantWorker {
     clearTimeout(this.#drainTimer);
     clearInterval(this.#cpuTimer);
     const oom = isOutOfMemory(exit);
-    const code: IsolaneErrorCode = oom
-      ? 'ERR_LIMIT'
-      : exit.reason === 'unresponsive'
-        ? 'ERR_WORKER_UNRESPONSIVE'
-        : exit.reason === 'insufficient-isolation'
-          ? 'ERR_ISOLATION_UNAVAILABLE'
-          : exit.reason === 'incompatible'
-            ? 'ERR_WORKER_INCOMPATIBLE'
-            : exit.reason === 'killed'
-              ? (this.#stopped?.code ?? 'ERR_ISOLATE_CLOSED')
-              : 'ERR_WORKER_CRASHED';
+    const code: IsolaneErrorCode = exit.reason === 'killed' ? (this.#stopped?.code ?? 'ERR_ISOLATE_CLOSED') : exitCode(exit);
     const why = exit.reason === 'killed' && this.#stopped ? this.#stopped.why : describeExit(exit);
     const err = new IsolaneError(code, `isolane: worker for tenant ${this.tenant} ${why}`, {
       tenant: this.tenant,
@@ -772,7 +800,7 @@ export class TenantWorker {
     this.#requests.clear();
     this.#chain.emit('worker', {
       tenant: this.tenant,
-      event: 'exit',
+      kind: 'exit',
       pid: this.#proc.pid,
       reason: exit.reason === 'killed' ? (this.#stopped?.why ?? 'stopped') : oom ? 'out of memory' : exit.reason === 'exited' && exit.code === 0 ? 'exited' : describeExit(exit),
     });

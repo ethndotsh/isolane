@@ -102,8 +102,7 @@ function checkDefinition(def: unknown, path: string): void {
   if (typeof d.handler !== 'function') throw invalidConfig(`${path}.handler`, 'must be a function');
   for (const key of Object.keys(d)) {
     if (!['handler', 'args', 'returns', 'sync'].includes(key)) {
-      const hint = key === 'fn' ? ' (it is now handler)' : key === 'result' ? ' (it is now returns)' : '';
-      throw invalidConfig(`${path}.${key}`, `is not a hostFunction field${hint}`);
+      throw invalidConfig(`${path}.${key}`, 'is not a hostFunction field (fields: handler, args, returns, sync)');
     }
   }
   const argsOk = d.args === undefined || isStandardSchema(d.args) || (Array.isArray(d.args) && d.args.every(isStandardSchema));

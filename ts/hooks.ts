@@ -101,7 +101,7 @@ export interface SecurityEvent {
 export interface WorkerEvent {
   tenant: string;
   /** `recycle`: it reached `workerLifetimeMs` or `workerEvals`; new isolates start on a fresh worker, and this one exits once it has drained. */
-  event: 'start' | 'recycle' | 'exit';
+  kind: 'start' | 'recycle' | 'exit';
   pid?: number;
   /** For `recycle` and `exit`: why (`idle`, `stopped`, `crashed`, `out of memory`, ...). */
   reason?: string;

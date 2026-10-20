@@ -50,7 +50,13 @@ pub(super) enum Fired {
     No,
     Wall,
     Cpu,
+    /// The supervisor aborted the eval.
+    Aborted,
 }
+
+/// Aborts remembered for evals not yet started, at most (older ones are for
+/// evals that had already finished when their abort came).
+const MAX_EARLY_ABORTS: usize = 1024;
 
 struct WatchState {
     deadline: Option<Instant>,
@@ -61,6 +67,10 @@ struct WatchState {
     armed: bool,
     /// The VM is being disposed: stop what it runs, now and from now on.
     stopping: bool,
+    /// The eval being run, if one is (for `abort`).
+    eval: Option<u64>,
+    /// Evals aborted before they started.
+    aborted: std::collections::VecDeque<u64>,
     closed: bool,
 }
 
@@ -75,7 +85,7 @@ impl Watchdog {
     /// Call on the VM thread (its CPU clock is the one budgets measure).
     pub(super) fn start(handle: v8::IsolateHandle) -> std::io::Result<Arc<Watchdog>> {
         let w = Arc::new(Watchdog {
-            state: Mutex::new(WatchState { deadline: None, cpu_deadline: None, fired: Fired::No, armed: false, stopping: false, closed: false }),
+            state: Mutex::new(WatchState { deadline: None, cpu_deadline: None, fired: Fired::No, armed: false, stopping: false, eval: None, aborted: Default::default(), closed: false }),
             cv: Condvar::new(),
             cpu: CpuClock::current(),
             handle: handle.clone(),
@@ -152,6 +162,37 @@ impl Watchdog {
         }
     }
 
+    /// Eval `req` is about to run (call before `arm`). False if it was
+    /// aborted already: don't run it.
+    pub(super) fn begin_eval(&self, req: u64) -> bool {
+        let mut s = self.state.lock().unwrap();
+        if let Some(i) = s.aborted.iter().position(|&r| r == req) {
+            s.aborted.remove(i);
+            return false;
+        }
+        s.eval = Some(req);
+        true
+    }
+
+    /// Stop eval `req`: terminate it if it's running (it ends with
+    /// `Fired::Aborted`), or skip it when it starts. Callable from any thread.
+    pub(super) fn abort(&self, req: u64) {
+        let mut s = self.state.lock().unwrap();
+        if s.eval == Some(req) {
+            if s.armed && s.fired == Fired::No {
+                s.deadline = None;
+                s.cpu_deadline = None;
+                s.fired = Fired::Aborted;
+                self.handle.terminate_execution();
+            }
+        } else {
+            if s.aborted.len() == MAX_EARLY_ABORTS {
+                s.aborted.pop_front();
+            }
+            s.aborted.push_back(req);
+        }
+    }
+
     /// Has a budget run out since the last `arm`?
     pub(super) fn fired(&self) -> bool {
         self.state.lock().unwrap().fired != Fired::No
@@ -163,6 +204,7 @@ impl Watchdog {
         s.deadline = None;
         s.cpu_deadline = None;
         s.armed = false;
+        s.eval = None;
         std::mem::replace(&mut s.fired, Fired::No)
     }
 

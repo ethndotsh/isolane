@@ -41,8 +41,11 @@ function resultToGuest(value, GuestUint8Array) {
   return out;
 }
 
-/** Policy denials the brokers reported (for onPolicyDenial), most recent last. */
+/** Policy denials and limits the brokers reported (for onPolicyDenial and onLimit), most recent last. */
 const denials = [];
+const limitsHit = [];
+const NO_REPORT = { denied: () => {}, limit: () => {} };
+const reporter = { denied: (api, target, reason) => denials.push({ api, target, reason }), limit: (limit, message) => limitsHit.push({ limit, message }) };
 
 /**
  * The web platform's fetch hook, minimally: Headers, Response (whole bodies),
@@ -90,7 +93,7 @@ const WEB_FETCH = String.raw`(rawFetch) => {
 
 /** A guest context with the policies installed; returns an async eval. */
 function guest(policies, track) {
-  const caps = capabilities({ globals: {}, ...policies }, new Set(), (api, target, reason) => denials.push({ api, target, reason }));
+  const caps = capabilities({ globals: {}, ...policies }, new Set(), reporter);
   track?.(caps);
   const ctx = vm.createContext({ TextEncoder, TextDecoder });
   ctx.__isolane_web_fetch = vm.runInContext(WEB_FETCH, ctx);
@@ -211,6 +214,7 @@ test('fetch: limits', async () => {
   const counted = guest({ fetch: { ...local, limits: { requests: 1 } } });
   await counted(`await fetch('${base}/json')`);
   await assert.rejects(counted(`await fetch('${base}/json')`), /used its 1 requests/);
+  assert.deepEqual(limitsHit.at(-1), { limit: 'fetch.limits.requests', message: 'fetch: this isolate has used its 1 requests (fetch.limits.requests)' });
   // Body bytes over the isolate's life, both ways, across fetches.
   const moved = guest({ fetch: { ...local, limits: { transferBytes: 40 } } });
   await moved(`await (await fetch('${base}/json')).text()`);
@@ -296,7 +300,7 @@ test('connect broker: transferBytes counts both ways, across sockets', async () 
 
 test('the prelude needs the web platform for each policy', () => {
   for (const [policy, fn] of [['connect', '__isolane_socket'], ['fetch', '__isolane_fetch'], ['fs', '__isolane_fs']]) {
-    const caps = capabilities({ globals: {}, [policy]: policy === 'fs' ? { root: tmpdir() } : tcpLocal }, new Set(), () => {});
+    const caps = capabilities({ globals: {}, [policy]: policy === 'fs' ? { root: tmpdir() } : tcpLocal }, new Set(), NO_REPORT);
     const ctx = vm.createContext({});
     ctx[fn] = () => {};
     assert.throws(() => vm.runInContext(caps.prelude, ctx), new RegExp(`${policy} needs the web platform`));
@@ -306,11 +310,11 @@ test('the prelude needs the web platform for each policy', () => {
 // ---- globals ----
 
 test('globals arrive as plain data', async () => {
-  const caps = capabilities({ globals: { input: { n: 21, s: '"); throw 1; ("' } } }, new Set(), () => {});
+  const caps = capabilities({ globals: { input: { n: 21, s: '"); throw 1; ("' } } }, new Set(), NO_REPORT);
   const ctx = vm.createContext({});
   vm.runInContext(caps.prelude, ctx);
   assert.equal(vm.runInContext('input.n * 2 + input.s.length', ctx), 42 + 15);
-  assert.throws(() => capabilities({ globals: { f: 1 } }, new Set(['f']), () => {}), /also a host function/);
+  assert.throws(() => capabilities({ globals: { f: 1 } }, new Set(['f']), NO_REPORT), /also a host function/);
 });
 
 // ---- fs ----
@@ -368,7 +372,7 @@ test('fs: writes, directories, removal, and size limits', async () => {
 });
 
 test('fs: totals per isolate, and operations in flight at once', async () => {
-  const run = guest({ fs: { root, write: true, limits: { writtenBytes: 10, operations: 4 } } });
+  const run = guest({ fs: { root, write: true, limits: { writtenBytes: 10, pendingOperations: 4 } } });
   // Bytes written over the isolate's life, across files.
   await assert.rejects(
     run(`await fs.mkdir('/quota'); await fs.writeFile('/quota/a', 'x'.repeat(6)); await fs.writeFile('/quota/b', 'x'.repeat(6));`),
@@ -379,14 +383,14 @@ test('fs: totals per isolate, and operations in flight at once', async () => {
   assert.deepEqual(
     await run(`const all = await Promise.allSettled(Array.from({ length: 50 }, () => fs.readFile('/hello.txt')));
       const refused = all.filter((r) => r.status === 'rejected');
-      return [all.length - refused.length, refused.every((r) => /fs.limits.operations/.test(r.reason.message)), (await fs.readFile('/hello.txt', 'utf8'))];`),
+      return [all.length - refused.length, refused.every((r) => /fs.limits.pendingOperations/.test(r.reason.message)), (await fs.readFile('/hello.txt', 'utf8'))];`),
     [4, true, 'héllo'],
   );
   rmSync(join(root, 'quota'), { recursive: true });
 });
 
 test('policy names are reserved', () => {
-  const none = () => {};
+  const none = NO_REPORT;
   assert.throws(() => capabilities({ globals: {}, fetch: { hosts: [] } }, new Set(['fetch']), none), /taken by the fetch policy/);
   assert.throws(() => capabilities({ globals: {}, fs: { root } }, new Set(['fs']), none), /taken by the fs policy/);
   assert.throws(() => capabilities({ globals: { connect: 1 }, connect: { hosts: [] } }, new Set(), none), /globals\.connect is taken/);
@@ -396,7 +400,7 @@ test('policy names are reserved', () => {
 test('refusals are reported as policy denials', async () => {
   denials.length = 0;
   await assert.rejects(guest({ fetch: { hosts: ['api.example.com'] } })(`await fetch('https://nope.example/x')`), /not allowed/);
-  const sockets = capabilities({ globals: {}, connect: { hosts: ['db.example.com:5432'] } }, new Set(), (api, target, reason) => denials.push({ api, target, reason }));
+  const sockets = capabilities({ globals: {}, connect: { hosts: ['db.example.com:5432'] } }, new Set(), reporter);
   await assert.rejects(Promise.resolve(sockets.entries[0].run({}, ['open', { hostname: '10.0.0.1', port: 5432 }])), /not a public address/);
   await assert.rejects(guest({ fs: { root } })(`await fs.writeFile('/x', 'y')`), /read-only/);
   assert.deepEqual(denials.map((d) => [d.api, d.target]), [
@@ -406,7 +410,7 @@ test('refusals are reported as policy denials', async () => {
   ]);
   // A denied URL is reported without the credentials in it.
   denials.length = 0;
-  const fetches = capabilities({ globals: {}, fetch: { hosts: ['api.example.com'] } }, new Set(), (api, target, reason) => denials.push({ api, target, reason }));
+  const fetches = capabilities({ globals: {}, fetch: { hosts: ['api.example.com'] } }, new Set(), reporter);
   const meta = { url: 'https://user:secret@nope.example/x', method: 'GET', headers: [] };
   await assert.rejects(Promise.resolve(fetches.entries[0].run({}, ['open', 1, meta])), /not allowed/);
   assert.deepEqual(denials.map((d) => d.target), ['https://nope.example/x']);

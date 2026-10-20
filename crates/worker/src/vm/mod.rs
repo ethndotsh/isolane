@@ -149,7 +149,7 @@ pub struct Reply {
 }
 
 pub fn spawn(id: u64, config: VmConfig, rx: Receiver<VmMsg>, out: Output) -> std::io::Result<Stopper> {
-    let stopper = Stopper(Arc::new(std::sync::OnceLock::new()));
+    let stopper = Stopper(Arc::new(StopperState::default()));
     let watchdog = stopper.0.clone();
     std::thread::Builder::new()
         .name(format!("vm-{id}"))
@@ -161,12 +161,41 @@ pub fn spawn(id: u64, config: VmConfig, rx: Receiver<VmMsg>, out: Output) -> std
 /// Stops whatever a VM is running, from another thread: after `Dispose`,
 /// so a VM busy in guest code (with no time limit, or a long one) doesn't
 /// keep its thread until it finishes.
-pub struct Stopper(Arc<std::sync::OnceLock<Arc<Watchdog>>>);
+pub struct Stopper(Arc<StopperState>);
+
+/// The VM's watchdog, once its thread has started it, and the aborts that
+/// came before then.
+#[derive(Default)]
+struct StopperState {
+    watchdog: std::sync::OnceLock<Arc<Watchdog>>,
+    early: std::sync::Mutex<Vec<u64>>,
+}
+
+impl StopperState {
+    /// Called by the VM thread once its watchdog runs (before it reads a
+    /// message): hand it the aborts that came first.
+    fn started(&self, watchdog: Arc<Watchdog>) {
+        let mut early = self.early.lock().unwrap();
+        for req in early.drain(..) {
+            watchdog.abort(req);
+        }
+        let _ = self.watchdog.set(watchdog);
+    }
+}
 
 impl Stopper {
     pub fn stop(&self) {
-        if let Some(watchdog) = self.0.get() {
+        if let Some(watchdog) = self.0.watchdog.get() {
             watchdog.stop();
+        }
+    }
+
+    /// Abort eval `req` (see `Watchdog::abort`).
+    pub fn abort(&self, req: u64) {
+        let mut early = self.0.early.lock().unwrap();
+        match self.0.watchdog.get() {
+            Some(watchdog) => watchdog.abort(req),
+            None => early.push(req),
         }
     }
 }
@@ -296,7 +325,7 @@ impl Guard<'_> {
     }
 }
 
-fn vm_main(id: u64, config: VmConfig, rx: Receiver<VmMsg>, out: Output, stopper: Arc<std::sync::OnceLock<Arc<Watchdog>>>) {
+fn vm_main(id: u64, config: VmConfig, rx: Receiver<VmMsg>, out: Output, stopper: Arc<StopperState>) {
     crate::limits::set(config.limits);
     crate::clock::set_mode(config.time);
     SEED.with(|seed| seed.set(config.seed));
@@ -329,7 +358,7 @@ fn vm_main(id: u64, config: VmConfig, rx: Receiver<VmMsg>, out: Output, stopper:
         Err(e) => return refuse_all(&rx, &out, format!("vm could not start: {e}")),
     };
     WATCHDOG.with(|w| *w.borrow_mut() = Some(watchdog.clone()));
-    let _ = stopper.set(watchdog.clone());
+    stopper.started(watchdog.clone());
     let oom = Box::new(OomState { handle, hit: AtomicBool::new(false) });
     isolate.add_near_heap_limit_callback(near_heap_limit, &*oom as *const OomState as *mut c_void);
     // The heap limit as configured (V8's own figure, which adds young
@@ -444,6 +473,10 @@ fn vm_main(id: u64, config: VmConfig, rx: Receiver<VmMsg>, out: Output, stopper:
                     send_result(&out, req, Err(cause.clone()), Usage::default());
                     continue;
                 }
+                if !watchdog.begin_eval(req) {
+                    send_result(&out, req, Err(fail(ErrorCode::Aborted, "the eval was aborted")), Usage::default());
+                    continue;
+                }
                 let cpu_start = cpu_clock.map(|c| c.now()).unwrap_or_default();
                 bridge.in_eval.set(true);
                 bridge.host_calls.set(0);
@@ -465,6 +498,8 @@ fn vm_main(id: u64, config: VmConfig, rx: Receiver<VmMsg>, out: Output, stopper:
                 } else if fired == Fired::Wall {
                     let ms = config.limits.timeout_ms.unwrap_or(0);
                     Err(limit("timeoutMs", format!("execution timed out after {ms}ms (limits.timeoutMs)")))
+                } else if fired == Fired::Aborted {
+                    Err(fail(ErrorCode::Aborted, "the eval was aborted"))
                 } else if fired == Fired::Cpu {
                     let ms = config.limits.cpu_ms.unwrap_or(0);
                     Err(limit("cpuMs", format!("execution used more than {ms}ms of CPU time (limits.cpuMs)")))
@@ -473,12 +508,12 @@ fn vm_main(id: u64, config: VmConfig, rx: Receiver<VmMsg>, out: Output, stopper:
                 } else {
                     result
                 };
-                // An eval that ran out of a limit leaves its isolate's host
+                // An eval that ran out of a limit (or was aborted) leaves its isolate's host
                 // calls with no one waiting (the supervisor abandons them
                 // too): free their slots, or they'd count against
-                // limits.pendingHostCalls and hostCallBytes in the next eval.
+                // limits.pendingHostCalls and pendingHostCallBytes in the next eval.
                 // Late replies to them are ignored.
-                if let Err(Failure { code: ErrorCode::Limit | ErrorCode::IsolateRetired, .. }) = &result {
+                if let Err(Failure { code: ErrorCode::Limit | ErrorCode::IsolateRetired | ErrorCode::Aborted, .. }) = &result {
                     bridge.pending.borrow_mut().clear();
                     bridge.pending_bytes.set(0);
                 }

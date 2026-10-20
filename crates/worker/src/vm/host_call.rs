@@ -25,7 +25,7 @@ pub(super) struct Bridge {
     /// Async host calls waiting for replies, with each one's frame size,
     /// function, and (for the embedder's functions) the call site's Error.
     pub(super) pending: RefCell<HashMap<u64, Pending>>,
-    /// The frame bytes of host calls waiting for replies (`limits.hostCallBytes`).
+    /// The frame bytes of host calls waiting for replies (`limits.pendingHostCallBytes`).
     pub(super) pending_bytes: Cell<usize>,
     /// When the running eval or continuation must stop (a sync host call
     /// waits no longer than this).
@@ -110,11 +110,11 @@ fn send_host_call(scope: &mut v8::PinScope, args: &v8::FunctionCallbackArguments
     let frame = serde_json::to_vec(&Out::HostCall { vm: bridge.vm, call, function, args: &args, bin: &bin }).expect("protocol messages serialize");
     let size = crate::frame::body_len(frame.len(), &attached);
     let waiting = bridge.pending_bytes.get();
-    if waiting.saturating_add(size) > limits.host_call_bytes {
+    if waiting.saturating_add(size) > limits.pending_host_call_bytes {
         let message = format!(
-            "this call's {size} bytes, with the {waiting} bytes of calls already waiting, are more than the isolate may have waiting (limits.hostCallBytes)"
+            "this call's {size} bytes, with the {waiting} bytes of calls already waiting, are more than the isolate may have waiting (limits.pendingHostCallBytes)"
         );
-        return refuse(scope, bridge, "hostCallBytes", message);
+        return refuse(scope, bridge, "pendingHostCallBytes", message);
     }
     bridge.next_call.set(call + 1);
     if counted {

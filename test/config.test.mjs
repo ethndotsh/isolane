@@ -223,18 +223,18 @@ test('config errors name the field, and old names say what to use instead', () =
     }
   };
   const t = pool.tenant('acme');
-  assert.deepEqual(message(() => t.isolate({ timeoutMs: 5 })), ['ERR_INVALID_CONFIG', 'isolane: timeoutMs is not a config field; use limits.timeoutMs']);
-  assert.deepEqual(message(() => t.isolate({ hostFunctions: {} })), ['ERR_INVALID_CONFIG', 'isolane: hostFunctions is not a config field; use host']);
-  assert.deepEqual(message(() => t.isolate({ limits: { cpuTimeMs: 5 } })), ['ERR_INVALID_CONFIG', 'isolane: limits.cpuTimeMs is now limits.cpuMs']);
+  assert.deepEqual(message(() => t.isolate({ timeoutMs: 5 })), ['ERR_INVALID_CONFIG', 'isolane: timeoutMs is not a config field']);
+  assert.deepEqual(message(() => t.isolate({ hostFunctions: {} })), ['ERR_INVALID_CONFIG', 'isolane: hostFunctions is not a config field']);
+  assert.deepEqual(message(() => t.isolate({ limits: { cpuTimeMs: 5 } })), ['ERR_INVALID_CONFIG', 'isolane: limits.cpuTimeMs is not a limit']);
   assert.deepEqual(message(() => t.isolate({ fetch: { allow: [] } })), ['ERR_INVALID_CONFIG', 'isolane: fetch.allow is not a fetch policy field (fields: hosts, methods, privateNetworks, limits)']);
   assert.deepEqual(message(() => t.isolate({ fetch: true })), ['ERR_INVALID_CONFIG', 'isolane: fetch needs a policy object (there is no safe default target list)']);
-  assert.deepEqual(message(() => t.isolate({ fs: { root: '/x', limits: { maxFileBytes: 1 } } })), ['ERR_INVALID_CONFIG', 'isolane: fs.limits.maxFileBytes is not a fs limit (limits: fileBytes, writtenBytes, operations)']);
+  assert.deepEqual(message(() => t.isolate({ fs: { root: '/x', limits: { maxFileBytes: 1 } } })), ['ERR_INVALID_CONFIG', 'isolane: fs.limits.maxFileBytes is not a fs limit (limits: fileBytes, writtenBytes, pendingOperations)']);
   assert.deepEqual(message(() => t.isolate({ connect: { hosts: [], limits: { bytes: 1 } } })), ['ERR_INVALID_CONFIG', 'isolane: connect.limits.bytes is not a connect limit (limits: connections, connectMs, idleMs, transferBytes)']);
   assert.deepEqual(message(() => t.isolate({ fetch: { hosts: [], limits: { transferBytes: 0 } } }))[0], 'ERR_INVALID_CONFIG');
   assert.deepEqual(message(() => t.isolate({ random: { seed: -1 } })), ['ERR_INVALID_CONFIG', 'isolane: random.seed must be an integer from 0 to 2^53 - 1']);
   assert.deepEqual(message(() => t.isolate({ time: 'realtime' })), ['ERR_INVALID_CONFIG', "isolane: time must be 'frozen', 'real', or { fixedMs }"]);
   assert.deepEqual(message(() => t.isolate({ limits: { isolates: 2 } })), ['ERR_INVALID_CONFIG', 'isolane: limits.isolates is a tenant limit; set it in defaults.limits or tenants(name).limits']);
-  assert.deepEqual(message(() => new Runtime({ prewarm: 1 })), ['ERR_INVALID_CONFIG', 'isolane: prewarm is not a Runtime option; use spares']);
+  assert.deepEqual(message(() => new Runtime({ prewarm: 1 })), ['ERR_INVALID_CONFIG', 'isolane: prewarm is not a Runtime option']);
   assert.deepEqual(message(() => new Runtime({ defaults: { web: { baseUrl: 'ftp://x/' } } })), ['ERR_INVALID_CONFIG', 'isolane: defaults.web.baseUrl must be an absolute http: or https: URL']);
   assert.deepEqual(message(() => new Runtime({ tenants: () => ({ nope: 1 }) }).tenant('x').isolate()), ['ERR_INVALID_CONFIG', 'isolane: tenants("x").nope is not a config field']);
 });

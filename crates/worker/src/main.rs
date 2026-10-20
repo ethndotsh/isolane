@@ -357,6 +357,11 @@ fn serve(lock_down: bool, memory_limit: Option<u64>, web_background: bool) -> Ex
                     let _ = tx.send(VmMsg::HostReply { call, reply });
                 }
             }
+            In::Abort { vm, req } => {
+                if let Some((_, stopper)) = vms.get(&vm) {
+                    stopper.abort(req);
+                }
+            }
             In::Dispose { vm } => {
                 failed.remove(&vm);
                 if let Some((tx, stopper)) = vms.remove(&vm) {
