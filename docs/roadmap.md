@@ -463,7 +463,7 @@ differences.
 
 ## 5. Performance
 
-Measured against isolated-vm (Linux x64 under Rosetta; re-measure natively):
+Measured against isolated-vm (Linux x64 under Rosetta; superseded by the CI comparison below, `bench/compare.mjs`):
 
 | | isolane | isolated-vm |
 |---|---|---|
@@ -486,7 +486,8 @@ Measured against isolated-vm (Linux x64 under Rosetta; re-measure natively):
 | Frame batching (fewer syscalls), fewer copies | planned |
 | Prewarmed worker pool (`prewarm: n`; spares never run guest code before a tenant claims one): new-tenant p50 36 → 4.9 ms (`bench/cold-start.mjs`, native macOS dev build) | done |
 | Startup snapshot of the web platform (see WinterTC above for the numbers) | done |
-| Native benchmarks (not Rosetta) in CI, tracked over time | planned |
+| Comparison benchmark in CI (`bench/compare.mjs`, `.github/workflows/bench.yml`, after every green CI run on main): isolane (web on, web off, one tenant per sandbox) against isolated-vm, `node:vm` contexts, and `worker_threads` on the release worker, with memory for 1–1,000 live sandboxes (RSS and PSS over the process tree), cold start, call and host-call latency. Numbers quoted in the README come from its job summary | done |
+| Benchmarks tracked over time (store each run's `bench-report.json`, chart it, flag regressions) | planned |
 | Shared-memory transport | idea (needs a native addon; conflicts with plain `npm install`) |
 
 ## 6. Operations
