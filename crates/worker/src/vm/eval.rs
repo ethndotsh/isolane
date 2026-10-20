@@ -13,17 +13,12 @@ use super::host_call::{apply_host_reply, Bridge};
 use super::mailbox::Mailbox;
 use super::watchdog::CpuClock;
 use super::{pump_tasks, Output, VmMsg};
-use super::console::bounded_string;
 use super::errors;
 use crate::proto::{fail, limit, ErrorCode, Failure, Out, ShimRef, Usage};
 
 /// How often to look for V8's foreground tasks while it has background work
 /// in flight and nothing else to wait for.
 const BACKGROUND_POLL: Duration = Duration::from_millis(1);
-
-/// Longest error text sent for a guest exception (its message, its stack):
-/// a guest can throw an Error with any size of message.
-const ERROR_TEXT_MAX: usize = 64 << 10;
 
 /// Room left in a frame for everything around a guest-sized value.
 const FRAME_SLACK: usize = 1 << 20;
@@ -35,17 +30,17 @@ pub(super) enum EvalEnd {
 }
 
 /// "Message\nstack" for thrown errors, or the value's string form, at most
-/// `ERROR_TEXT_MAX` bytes (copied out of V8 no further than that).
+/// `errors::TEXT_MAX` bytes (copied out of V8 no further than that).
 pub(super) fn describe(scope: &mut v8::PinScope, exception: v8::Local<v8::Value>) -> String {
     if let Ok(obj) = v8::Local::<v8::Object>::try_from(exception) {
         let key = v8::String::new(scope, "stack").unwrap();
         if let Some(stack) = obj.get(scope, key.into()) {
             if stack.is_string() {
-                return bounded_string(scope, stack, ERROR_TEXT_MAX);
+                return crate::js::string(scope, stack, errors::TEXT_MAX);
             }
         }
     }
-    errors::text(scope, exception, ERROR_TEXT_MAX).unwrap_or_default()
+    crate::js::text(scope, exception, errors::TEXT_MAX).unwrap_or_default()
 }
 
 /// `ERR_GUEST_EXCEPTION` for a thrown value: the one-line message ("stack"
@@ -76,16 +71,8 @@ pub(super) fn shim_failure(shim: &ShimRef, what: String) -> Failure {
     f
 }
 
-fn clip(mut s: String) -> String {
-    if s.len() > ERROR_TEXT_MAX {
-        let mut cut = ERROR_TEXT_MAX;
-        while !s.is_char_boundary(cut) {
-            cut -= 1;
-        }
-        s.truncate(cut);
-        s.push('…');
-    }
-    s
+fn clip(s: String) -> String {
+    crate::js::clip(s, errors::TEXT_MAX)
 }
 
 fn to_json(scope: &mut v8::PinScope, value: v8::Local<v8::Value>) -> Result<String, Failure> {
@@ -109,7 +96,7 @@ fn to_json(scope: &mut v8::PinScope, value: v8::Local<v8::Value>) -> Result<Stri
             Ok(if s == "undefined" { "null".into() } else { s })
         }
         None => {
-            let msg = tc.exception().map(|e| bounded_string(tc, e, ERROR_TEXT_MAX)).unwrap_or_default();
+            let msg = tc.exception().map(|e| crate::js::string(tc, e, errors::TEXT_MAX)).unwrap_or_default();
             Err(fail(ErrorCode::NotSerializable, msg))
         }
     }

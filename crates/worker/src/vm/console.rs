@@ -7,40 +7,6 @@ use std::rc::Rc;
 use super::host_call::Bridge;
 use crate::proto::Out;
 
-/// `value`'s string form, at most `max` bytes of UTF-8 (cut at a character
-/// boundary, with "…" after a cut). Only what's kept is copied out of V8's
-/// heap, so a guest string of any size costs at most `max` bytes here.
-///
-/// Never throws: a value whose string conversion throws (a symbol, a
-/// `toString` or `Symbol.toPrimitive` that throws, a revoked proxy) gets
-/// V8's side-effect-free description instead (`Symbol(x)`, `#<Object>`).
-/// Termination (the watchdog) still propagates.
-pub(crate) fn bounded_string(scope: &mut v8::PinScope, value: v8::Local<v8::Value>, max: usize) -> String {
-    let s = if value.is_string() {
-        value.cast::<v8::String>()
-    } else {
-        v8::tc_scope!(let tc, scope);
-        let converted = if value.is_symbol() { None } else { value.to_string(tc) };
-        if tc.has_terminated() {
-            tc.rethrow();
-            return String::new();
-        }
-        tc.reset();
-        match converted.or_else(|| value.to_detail_string(tc)) {
-            Some(s) => s,
-            None => return String::new(),
-        }
-    };
-    let mut buf = vec![0u8; max.min(s.length().saturating_mul(3))];
-    let n = s.write_utf8_v2(scope, &mut buf, v8::WriteFlags::kReplaceInvalidUtf8, None);
-    buf.truncate(n);
-    let mut out = String::from_utf8(buf).unwrap_or_else(|e| String::from_utf8_lossy(e.as_bytes()).into_owned());
-    if n < s.utf8_length(scope) {
-        out.push('…');
-    }
-    out
-}
-
 /// Send one console line within the eval's budget: the line that would
 /// exhaust it becomes a single notice, and later lines are dropped.
 fn emit(bridge: &Bridge, level: &str, message: &str) {
@@ -83,18 +49,18 @@ fn console_method(scope: &mut v8::PinScope, args: v8::FunctionCallbackArguments,
         let v = args.get(i);
         // Strings as-is, and values JSON can't represent by their string form.
         let part = if v.is_string() || v.is_function() || v.is_symbol() || v.is_undefined() || v.is_big_int() {
-            bounded_string(scope, v, room)
+            crate::js::string(scope, v, room)
         } else {
             v8::tc_scope!(let tc, scope);
             match v8::json::stringify(tc, v) {
-                Some(s) => bounded_string(tc, s.into(), room),
+                Some(s) => crate::js::string(tc, s.into(), room),
                 None if tc.has_terminated() => {
                     tc.rethrow();
                     return;
                 }
                 None => {
                     tc.reset();
-                    bounded_string(tc, v, room)
+                    crate::js::string(tc, v, room)
                 }
             }
         };
@@ -116,7 +82,7 @@ pub fn guest_log(scope: &mut v8::PinScope, level: &str, prefix: &str, value: v8:
     }
     let max_line = max_line();
     let mut message = String::from(prefix);
-    message.push_str(&bounded_string(scope, value, max_line.saturating_sub(prefix.len())));
+    message.push_str(&crate::js::string(scope, value, max_line.saturating_sub(prefix.len())));
     emit(&bridge, level, &message);
 }
 

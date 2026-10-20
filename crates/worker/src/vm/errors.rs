@@ -16,7 +16,8 @@ use std::rc::Rc;
 
 use serde_json::value::RawValue;
 
-use super::console::{bounded_string, guest_log};
+use super::console::guest_log;
+use crate::js::text;
 use super::host_call::Bridge;
 use crate::proto::{GuestError, Location, Out};
 
@@ -39,24 +40,6 @@ const KEY_BYTES: usize = 128;
 const SOURCE_WINDOW: usize = 240;
 /// Unhandled rejections remembered at once (until they're reported).
 const MAX_REJECTIONS: usize = 1000;
-
-/// What the guest's own code can't throw at us: properties are read under
-/// their own TryCatch, so a getter or Proxy trap that throws (or a Symbol's
-/// string conversion) gives None, not an exception left pending.
-pub(super) fn text(scope: &mut v8::PinScope, value: v8::Local<v8::Value>, max: usize) -> Option<String> {
-    if let Ok(sym) = v8::Local::<v8::Symbol>::try_from(value) {
-        let desc = sym.description(scope);
-        let desc = if desc.is_undefined() { String::new() } else { bounded_string(scope, desc, max) };
-        return Some(format!("Symbol({desc})"));
-    }
-    v8::tc_scope!(let tc, scope);
-    let s = bounded_string(tc, value, max);
-    if tc.has_caught() || tc.has_terminated() {
-        tc.reset();
-        return None;
-    }
-    Some(s)
-}
 
 fn get<'s>(scope: &mut v8::PinScope<'s, '_>, obj: v8::Local<'s, v8::Object>, key: &str) -> Option<v8::Local<'s, v8::Value>> {
     let key = v8::String::new(scope, key)?;

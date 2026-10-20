@@ -33,7 +33,6 @@ mod shared;
 mod x25519;
 mod x448;
 
-use std::borrow::Cow;
 
 use deno_error::JsErrorClass;
 use serde::de::DeserializeOwned;
@@ -76,30 +75,19 @@ impl rand_core::CryptoRng for IsolaneRng {}
 /// themselves, everything else (`DOMException*`, `NotSupported`) as an
 /// Error named for its class, which runtime/core.js converts.
 fn throw(scope: &mut v8::PinScope, class: &str, message: &str) {
+    use crate::js::Class;
     // An error can quote guest input (a serde message names the value it
-    // refused): keep it short, and never panic making the string.
-    let mut end = message.len().min(1024);
-    while !message.is_char_boundary(end) {
-        end -= 1;
-    }
-    let msg = v8::String::new(scope, &message[..end]).unwrap_or_else(|| v8::String::empty(scope));
-    let error = match class {
-        "TypeError" => v8::Exception::type_error(scope, msg),
-        "RangeError" => v8::Exception::range_error(scope, msg),
-        "SyntaxError" => v8::Exception::syntax_error(scope, msg),
-        "Error" => v8::Exception::error(scope, msg),
-        other => {
-            let error = v8::Exception::error(scope, msg);
-            if let Ok(object) = v8::Local::<v8::Object>::try_from(error) {
-                let key = v8::String::new(scope, "name").unwrap();
-                let name: Cow<str> = if other == "NotSupported" { "DOMExceptionNotSupportedError".into() } else { other.into() };
-                let value = v8::String::new(scope, &name).unwrap();
-                object.set(scope, key.into(), value.into());
-            }
-            error
-        }
+    // refused): keep it short.
+    let message = crate::js::prefix(message, 1024);
+    let class = match class {
+        "TypeError" => Class::Type,
+        "RangeError" => Class::Range,
+        "SyntaxError" => Class::Syntax,
+        "Error" => Class::Error,
+        "NotSupported" => Class::Named("DOMExceptionNotSupportedError"),
+        other => Class::Named(other),
     };
-    scope.throw_exception(error);
+    crate::js::throw(scope, class, message);
 }
 
 fn fail(scope: &mut v8::PinScope, error: &impl JsErrorClass) {

@@ -88,7 +88,7 @@ fn send_host_call(scope: &mut v8::PinScope, args: &v8::FunctionCallbackArguments
     let mut attached: Vec<Vec<u8>> = Vec::new();
     for i in 0..args.length() {
         let arg = args.get(i);
-        if let Some(b) = arg_bytes(arg) {
+        if let Some(b) = crate::bytes::copy_bytes(scope, arg) {
             bin.push((i as u32, b.len()));
             attached.push(b);
             let null = v8::null(scope).into();
@@ -101,9 +101,7 @@ fn send_host_call(scope: &mut v8::PinScope, args: &v8::FunctionCallbackArguments
     let json = v8::json::stringify(scope, arr.into())?.to_rust_string_lossy(scope);
     let attached_len: usize = attached.iter().map(Vec::len).sum();
     if !crate::frame::fits(json.len() + 128, attached_len) {
-        let msg = v8::String::new(scope, "host function arguments are larger than 64 MiB").unwrap();
-        let e = v8::Exception::range_error(scope, msg);
-        scope.throw_exception(e);
+        crate::js::throw_range(scope, "host function arguments are larger than 64 MiB");
         return None;
     }
     let call = bridge.next_call.get();
@@ -133,47 +131,8 @@ fn refuse<T>(scope: &mut v8::PinScope, bridge: &Bridge, name: &'static str, mess
     if bridge.in_eval.get() && bridge.limit_hit.borrow().is_none() {
         *bridge.limit_hit.borrow_mut() = Some(limit(name, message.clone()));
     }
-    let msg = v8::String::new(scope, &message).unwrap();
-    let e = v8::Exception::range_error(scope, msg);
-    if let Ok(obj) = v8::Local::<v8::Object>::try_from(e) {
-        for (k, v) in [("code", "ERR_LIMIT"), ("limit", name)] {
-            let k = v8::String::new(scope, k).unwrap();
-            let v = v8::String::new(scope, v).unwrap();
-            obj.set(scope, k.into(), v.into());
-        }
-    }
-    scope.throw_exception(e);
+    crate::js::throw_with(scope, crate::js::Class::Range, &message, &[("code", "ERR_LIMIT"), ("limit", name)]);
     None
-}
-
-/// A copy of the bytes of an ArrayBuffer or a view of one.
-fn arg_bytes(value: v8::Local<v8::Value>) -> Option<Vec<u8>> {
-    if let Ok(view) = v8::Local::<v8::ArrayBufferView>::try_from(value) {
-        let mut out = vec![0u8; view.byte_length()];
-        let n = view.copy_contents(&mut out);
-        out.truncate(n);
-        return Some(out);
-    }
-    let buffer = v8::Local::<v8::ArrayBuffer>::try_from(value).ok()?;
-    let len = buffer.byte_length();
-    Some(match buffer.data() {
-        // SAFETY: data() and byte_length() describe the buffer's current
-        // memory (guests have no SharedArrayBuffer), and it's copied out
-        // before anything else runs.
-        Some(p) if len > 0 => unsafe { std::slice::from_raw_parts(p.as_ptr() as *const u8, len) }.to_vec(),
-        _ => Vec::new(),
-    })
-}
-
-/// A new Uint8Array holding `data`, allocated by V8 (inside the sandbox).
-fn new_u8array<'s>(scope: &mut v8::PinScope<'s, '_>, data: &[u8]) -> v8::Local<'s, v8::Value> {
-    let buffer = v8::ArrayBuffer::new(scope, data.len());
-    if let Some(p) = buffer.data() {
-        // SAFETY: a fresh buffer of exactly data.len() bytes that no one
-        // else references yet.
-        unsafe { std::ptr::copy_nonoverlapping(data.as_ptr(), p.as_ptr() as *mut u8, data.len()) };
-    }
-    v8::Uint8Array::new(scope, buffer, 0, data.len()).unwrap().into()
 }
 
 /// Put byte values into a parsed host reply at their paths. A path the
@@ -186,7 +145,7 @@ fn place_bytes<'s>(
     bytes: Vec<(Vec<PathSegment>, Vec<u8>)>,
 ) -> v8::Local<'s, v8::Value> {
     for (path, data) in bytes {
-        let u8s = new_u8array(scope, &data);
+        let u8s: v8::Local<v8::Value> = crate::bytes::new_u8array(scope, &data).into();
         let Some((last, parents)) = path.split_last() else {
             value = u8s;
             continue;

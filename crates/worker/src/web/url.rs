@@ -159,8 +159,7 @@ pub fn op_url_parse_search_params(scope: &mut v8::PinScope, args: Args, mut rv: 
     };
     let list = v8::Array::new(scope, pairs.len() as i32);
     for (i, (k, v)) in pairs.iter().enumerate() {
-        let k = v8::String::new(scope, k).unwrap();
-        let v = v8::String::new(scope, v).unwrap();
+        let (Some(k), Some(v)) = (guest_string(scope, k), guest_string(scope, v)) else { return };
         let pair = v8::Array::new_with_elements(scope, &[k.into(), v.into()]);
         list.set_index(scope, i as u32, pair.into());
     }
