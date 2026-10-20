@@ -303,7 +303,8 @@ export class TenantWorker {
     this.#proc.send({
       t: 'create',
       vm: id,
-      limits: workerLimits(config.limits),
+      // The tenant's shared budget, as fixed when this worker started.
+      limits: { ...workerLimits(config.limits), workerBackgroundMs: this.limits.workerBackgroundMs ?? undefined },
       time: config.time,
       random: config.seed === undefined ? {} : { seed: config.seed },
       eval: config.eval,
@@ -427,8 +428,11 @@ export class TenantWorker {
         const state = this.#isolates.get(msg.vm);
         const message = msg.message ?? '';
         (state?.chain ?? this.#chain).emit('limit', { tenant: this.tenant, isolate: msg.vm, limit: msg.limit, message });
-        // The isolate is retired: its host calls have no one waiting.
-        if (state) this.#abandonCalls(state, new IsolaneError('ERR_LIMIT', message, { tenant: this.tenant, limit: msg.limit }));
+        // The isolate is retired: its host calls have no one waiting. (The
+        // tenant's shared budget only pauses background work.)
+        if (state && msg.limit !== 'workerBackgroundMs') {
+          this.#abandonCalls(state, new IsolaneError('ERR_LIMIT', message, { tenant: this.tenant, limit: msg.limit }));
+        }
       }
       return;
     }

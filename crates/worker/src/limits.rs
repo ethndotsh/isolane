@@ -24,6 +24,10 @@ pub struct Limits {
     /// CPU time where there's a CPU clock (Linux), wall time elsewhere.
     /// None: no limit.
     pub background_ms: Option<u64>,
+    /// The same, for every isolate on this worker together (the tenant's
+    /// `limits.workerBackgroundMs`; the same in every create). Running out
+    /// pauses background work instead of retiring anything. None: no limit.
+    pub worker_background_ms: Option<u64>,
     /// Console output per eval; the rest is dropped.
     pub log_bytes: usize,
     /// Longest single console line; longer ones are cut.
@@ -51,6 +55,7 @@ impl Default for Limits {
             heap_bytes: None,
             timers: 10_000,
             background_ms: None,
+            worker_background_ms: None,
             log_bytes: 1 << 20,
             log_line_bytes: 16 << 10,
             result_bytes: 16 << 20,

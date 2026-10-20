@@ -428,6 +428,7 @@ await acme.run(app.code, {
 | `concurrentEvals` | 1,000 | tenant |
 | `workerMemoryBytes` | 2 GiB | tenant (Linux; covers ArrayBuffer and WebAssembly memory a heap limit doesn't) |
 | `idleMs` | 30 s | tenant (an idle worker exits) |
+| `workerBackgroundMs` | 10 s per minute | tenant: `backgroundMs` for all its isolates together (pauses their background work) |
 | `tenants` | 1,000 | runtime (evicts the least recently used idle tenant) |
 
 **Work between evals.** After an eval returns, a stateful isolate can
@@ -444,6 +445,15 @@ counted in the tenant's `usage().cpuMs` like an eval's. Timers run in
 slices of 10 ms, so an isolate's own evals and host replies aren't held
 up behind a timer storm, and each isolate has its own thread, so a storm
 doesn't slow the tenant's other isolates beyond sharing the CPU.
+
+The tenant's isolates also share `workerBackgroundMs`, the same kind of
+budget for all of them together, so a hundred isolates don't get a hundred
+budgets. Running it out retires nothing: every isolate's timers and
+continuations wait until it has refilled, its evals still run, and
+`onLimit` fires once per isolate with `limit: 'workerBackgroundMs'`.
+Isolates in the middle of a batch when it runs out finish it (at most a
+10 ms slice each), and what they overdraw is paid back before any
+background work runs again.
 
 **Host calls.** A call past `pendingHostCalls`, `hostCalls`, or
 `hostCallBytes` throws a `RangeError` in the guest (`code: 'ERR_LIMIT'`,
@@ -471,7 +481,7 @@ input.
 
 Isolate limits can be set at every level; tenant limits at the runtime and
 in `tenants(name)`; `tenants` on the runtime only. Each is an integer of at
-least 1, and durations (`timeoutMs`, `cpuMs`, `backgroundMs`, `idleMs`, and the policies'
+least 1, and durations (`timeoutMs`, `cpuMs`, `backgroundMs`, `idleMs`, `workerBackgroundMs`, and the policies'
 `*Ms` limits) are at most 2^31 - 1 ms, `timers` at most 2^32 - 1, and
 `heapBytes` at most 4 GiB (V8's largest heap); anything else is
 `ERR_INVALID_CONFIG`. Hitting any limit fails

@@ -73,6 +73,13 @@ export interface TenantLimits {
   workerMemoryBytes?: number | null;
   /** Stop the tenant's worker after this long with no isolates and nothing running. Default 30 s. */
   idleMs?: number;
+  /**
+   * `backgroundMs` for every isolate of the tenant together, per minute.
+   * Past it nothing is retired: their timers and continuations wait until
+   * the budget refills (evals still run), and `onLimit` fires. `null`:
+   * none. Default 10 s per minute.
+   */
+  workerBackgroundMs?: number | null;
 }
 
 /** Limits on the runtime as a whole (`RuntimeOptions.limits`). */
@@ -106,6 +113,7 @@ export const DEFAULT_LIMITS = Object.freeze({
   concurrentEvals: 1_000,
   workerMemoryBytes: 2 * 1024 ** 3,
   idleMs: 30_000,
+  workerBackgroundMs: 10_000,
   tenants: 1_000,
 } as const);
 
@@ -113,8 +121,8 @@ export const DEFAULT_LIMITS = Object.freeze({
 export type ResolvedLimits = { [K in keyof (Limits & RuntimeLimits)]-?: Exclude<(Limits & RuntimeLimits)[K], undefined> };
 
 const ISOLATE_LIMITS = new Set(['timeoutMs', 'cpuMs', 'heapBytes', 'timers', 'backgroundMs', 'logBytes', 'logLineBytes', 'codeBytes', 'resultBytes', 'decompressedBytes', 'pendingHostCalls', 'hostCalls', 'hostCallBytes']);
-const TENANT_LIMITS = new Set(['isolates', 'concurrentEvals', 'workerMemoryBytes', 'idleMs']);
-const NULLABLE = new Set(['timeoutMs', 'cpuMs', 'heapBytes', 'backgroundMs', 'workerMemoryBytes']);
+const TENANT_LIMITS = new Set(['isolates', 'concurrentEvals', 'workerMemoryBytes', 'idleMs', 'workerBackgroundMs']);
+const NULLABLE = new Set(['timeoutMs', 'cpuMs', 'heapBytes', 'backgroundMs', 'workerMemoryBytes', 'workerBackgroundMs']);
 const MINIMUM: Record<string, number> = { workerMemoryBytes: 64 * 1024 ** 2, heapBytes: 1024 ** 2 };
 /**
  * The most each limit can be: what the worker holds it in (timers: a u32;
@@ -127,6 +135,7 @@ const MAXIMUM: Record<string, number> = {
   cpuMs: 2 ** 31 - 1,
   backgroundMs: 2 ** 31 - 1,
   idleMs: 2 ** 31 - 1,
+  workerBackgroundMs: 2 ** 31 - 1,
   heapBytes: 4 * 1024 ** 3,
   pendingHostCalls: 2 ** 32 - 1,
   hostCalls: 2 ** 32 - 1,

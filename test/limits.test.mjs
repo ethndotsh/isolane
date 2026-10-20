@@ -268,6 +268,41 @@ test('a timer storm leaves its own and other isolates responsive, and is charged
   rt.close();
 });
 
+test('limits.workerBackgroundMs bounds a tenant\'s isolates together, pausing them without retiring any', async () => {
+  assert.equal(DEFAULT_LIMITS.workerBackgroundMs, 10_000);
+  const limits = [];
+  const rt = new Runtime({
+    strict,
+    defaults: { web: true, time: 'real', limits: { backgroundMs: null, workerBackgroundMs: 300 } },
+    hooks: { onLimit: (e) => limits.push(e) },
+  });
+  const work = 'for (let j = 0; j < 2e5; j++) globalThis.x = (globalThis.x ?? 0) + j';
+  // What one tick costs, measured alone in an eval.
+  const probe = isolateOf(rt, { tenant: 'many' });
+  const tickMs = (await probe.eval(`const s = Date.now(); for (let i = 0; i < 50; i++) { ${work} } (Date.now() - s) / 50`)) || 0.05;
+  probe.close();
+  const vms = Array.from({ length: 20 }, () => isolateOf(rt, { tenant: 'many' }));
+  for (const vm of vms) await vm.eval(`globalThis.ticks = 0; setInterval(() => { ${work}; ticks++ }, 0); 0`);
+  await new Promise((r) => setTimeout(r, 1500));
+  let ticks = 0;
+  for (const vm of vms) ticks += await vm.eval('ticks');
+  // 300 ms of budget, plus what isolates mid-batch overdrew when it ran
+  // out (about a 10 ms slice each); without the tenant budget, 20 isolates
+  // would run for seconds of CPU.
+  assert.ok(ticks * tickMs < 1200, `${ticks} ticks of ${tickMs.toFixed(3)} ms`);
+  const hit = limits.filter((e) => e.limit === 'workerBackgroundMs');
+  assert.ok(hit.length > 0, JSON.stringify(limits));
+  assert.match(hit[0].message, /limits\.workerBackgroundMs/);
+  // Nothing was retired, and evals still run at once.
+  for (const vm of vms) {
+    const started = Date.now();
+    assert.ok((await vm.eval('ticks')) >= 0);
+    assert.ok(Date.now() - started < 500, `an eval waited ${Date.now() - started} ms`);
+  }
+  for (const vm of vms) vm.close();
+  rt.close();
+});
+
 test('a modest setInterval keeps running between evals within the default budget', async () => {
   const vm = isolate({ ...T, web: true });
   await vm.eval('globalThis.ticks = 0; setInterval(() => ticks++, 10); 0');

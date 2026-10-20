@@ -33,6 +33,7 @@ use std::sync::Arc;
 
 use crate::frame::Writer;
 use crate::proto::{fail, limit, ErrorCode, Failure, Usage};
+pub use background::init_shared as init_shared_background;
 pub use console::guest_log;
 pub use errors::{report as report_guest_error, RejectionReporter};
 use context::{allow_wasm, deny_wasm, new_context, Shims};
@@ -326,16 +327,24 @@ fn vm_main(id: u64, config: VmConfig, rx: Receiver<VmMsg>, out: Output, stopper:
     // Set when that budget runs out: the next eval fails with it, and the
     // isolate is retired.
     let mut background_hit: Option<Failure> = None;
+    // Host replies whose continuations wait for the tenant's shared
+    // background budget (at most limits.pendingHostCalls of them).
+    let mut deferred: std::collections::VecDeque<(u64, Reply)> = std::collections::VecDeque::new();
 
     loop {
         // Between evals, wake for the next timer too (stateful isolates keep
         // theirs; see run_idle_timers), and to report background usage.
         let next_timer = if retired.is_none() { crate::web::timers::next_timer().map(|(due, _)| due) } else { None };
-        let wake = match (next_timer, background.report_due()) {
-            (Some(a), Some(b)) => Some(a.min(b)),
-            (a, b) => a.or(b),
+        // While the tenant's shared budget is empty, timers and deferred
+        // continuations wait for it (evals and other messages don't).
+        let pause = if retired.is_none() && (next_timer.is_some_and(|d| d.is_zero()) || !deferred.is_empty()) { background.paused(&out, id) } else { None };
+        let next_timer = match pause {
+            Some(wait) => next_timer.map(|due| due.max(wait)),
+            None => next_timer,
         };
-        let msg = match bridge.mailbox.idle(wake) {
+        let wake = [next_timer, background.report_due(), pause.filter(|_| !deferred.is_empty())].into_iter().flatten().min();
+        let resumed = if pause.is_none() { deferred.pop_front() } else { None };
+        let msg = match resumed.map(|(call, reply)| Ok(VmMsg::HostReply { call, reply })).unwrap_or_else(|| bridge.mailbox.idle(wake)) {
             Ok(m) => m,
             Err(RecvTimeoutError::Timeout) if !crate::web::timers::next_timer().is_some_and(|(due, _)| due.is_zero()) || retired.is_some() => {
                 // No timer is due: only a usage report was.
@@ -343,6 +352,9 @@ fn vm_main(id: u64, config: VmConfig, rx: Receiver<VmMsg>, out: Output, stopper:
                 continue;
             }
             Err(RecvTimeoutError::Timeout) => {
+                if background.paused(&out, id).is_some() {
+                    continue;
+                }
                 let cpu_start = cpu_clock.map(|c| c.now()).unwrap_or_default();
                 let (wall, cpu_budget) = background.budgets(timeout, cpu);
                 bridge.blocked.set(std::time::Duration::ZERO);
@@ -438,6 +450,10 @@ fn vm_main(id: u64, config: VmConfig, rx: Receiver<VmMsg>, out: Output, stopper:
                 // A reply after its eval finished: the continuation it wakes
                 // runs under the same budget as an eval.
                 if retired.is_some() {
+                    continue;
+                }
+                if background.paused(&out, id).is_some() {
+                    deferred.push_back((call, reply));
                     continue;
                 }
                 let cpu_start = cpu_clock.map(|c| c.now()).unwrap_or_default();

@@ -296,6 +296,7 @@ fn serve(lock_down: bool, memory_limit: Option<u64>, web_background: bool) -> Ex
         }
         match msg {
             In::Create { vm, limits, time, random, eval, wasm, web, base_url, functions, prelude, shims } => {
+                vm::init_shared_background(limits.worker_background_ms);
                 let (tx, rx) = mpsc::channel();
                 let config = VmConfig { limits, time, seed: random.seed, eval, wasm, web, base_url, functions, prelude, shims };
                 match vm::spawn(vm, config, rx, out.clone()) {

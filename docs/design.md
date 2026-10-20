@@ -75,9 +75,9 @@ code, the worker is treated as potentially compromised.
 - Native work that V8 can't interrupt (RSA key generation, up to 4,096
   bits; URLPattern parsing, bounded by size) runs on the isolate's thread,
   so it can overrun the time limit by its bounded cost.
-- Background work is budgeted per isolate (`backgroundMs`), so a tenant
-  with many stateful isolates gets that many budgets; a tenant-wide budget
-  is planned.
+- Background work is budgeted per isolate (`backgroundMs`) and per tenant
+  (`workerBackgroundMs`, all its isolates together). Both are enforced in
+  the worker, so a worker that guest code has compromised escapes them.
 - Landlock at `partial` (kernels before 6.7) meets strict mode; seccomp is
   the first wall for files and sockets.
 
@@ -218,7 +218,9 @@ deploying. Development mode warns instead of refusing.
   and its exit code come from a process that may be compromised. The
   supervisor checks the shapes, cuts log lines, counts host calls and their
   bytes itself, and kills a worker that breaks the protocol, but billing on
-  `usage()` trusts the worker's word.
+  `usage()` trusts the worker's word. The background budgets
+  (`backgroundMs`, `workerBackgroundMs`) are enforced by the worker too,
+  so a compromised worker escapes them.
 
 ### L4: Shipping V8 fixes through npm
 

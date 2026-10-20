@@ -18,7 +18,13 @@
 //! Usage reports for this work are coalesced (one frame per
 //! `REPORT_EVERY` at most), so a timer firing every few milliseconds
 //! doesn't flood the supervisor with frames.
+//!
+//! The tenant's isolates also share one budget (`limits.workerBackgroundMs`,
+//! a `Shared` bucket per worker: a worker runs one tenant), so a hundred
+//! isolates don't get a hundred budgets. Running it out retires nothing:
+//! background work waits until the bucket has refilled, and evals carry on.
 
+use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use crate::proto::{fail, limit, ErrorCode, Failure, Out, Usage};
@@ -30,6 +36,60 @@ const WINDOW: Duration = Duration::from_secs(60);
 const REPORT_EVERY: Duration = Duration::from_millis(250);
 pub(super) const REPLY_COST: Duration = Duration::from_micros(250);
 
+/// The worker's budget for all its isolates' background work. Batches
+/// start only while its balance is positive, but several isolates (each on
+/// its own thread) can be mid-batch when it empties, so the balance can go
+/// negative: what they overdrew is repaid before any background work runs
+/// again, so over time the tenant gets no more than its budget.
+struct Shared {
+    budget: Duration,
+    /// Seconds left (negative: owed), and when it was last refilled.
+    state: Mutex<(f64, Instant)>,
+}
+
+static SHARED: OnceLock<Option<Shared>> = OnceLock::new();
+
+/// Set the worker's shared budget (from the first create; every create
+/// carries the same one).
+pub fn init_shared(ms: Option<u64>) {
+    SHARED.get_or_init(|| {
+        let budget = Duration::from_millis(ms?.min(crate::limits::MAX_BUDGET_MS));
+        Some(Shared { budget, state: Mutex::new((budget.as_secs_f64(), Instant::now())) })
+    });
+}
+
+impl Shared {
+    fn get() -> Option<&'static Shared> {
+        SHARED.get()?.as_ref()
+    }
+
+    /// Refill for the time since the last call, and return the balance.
+    fn balance(&self) -> f64 {
+        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        let now = Instant::now();
+        let rate = self.budget.as_secs_f64() / WINDOW.as_secs_f64();
+        state.0 = (state.0 + rate * now.duration_since(state.1).as_secs_f64()).min(self.budget.as_secs_f64());
+        state.1 = now;
+        state.0
+    }
+
+    fn charge(&self, spent: Duration) {
+        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        state.0 -= spent.as_secs_f64();
+    }
+
+    /// How long until the balance is positive again (zero: it is).
+    fn wait(&self) -> Duration {
+        let balance = self.balance();
+        if balance > 0.0 {
+            return Duration::ZERO;
+        }
+        let rate = self.budget.as_secs_f64() / WINDOW.as_secs_f64();
+        // A millisecond's worth past zero, so the work that wakes can run.
+        Duration::from_secs_f64(if rate > 0.0 { (0.001 - balance) / rate } else { 60.0 }).min(WINDOW)
+    }
+}
+
 pub(super) struct Background {
     /// The budget per `WINDOW`; None: unlimited.
     budget: Option<Duration>,
@@ -39,6 +99,9 @@ pub(super) struct Background {
     /// Usage not yet reported, and when the last report went out.
     unreported: Option<Usage>,
     reported: Instant,
+    /// The shared budget is empty and the supervisor has been told (once
+    /// per time it empties).
+    paused: bool,
 }
 
 /// One batch of background work in progress.
@@ -62,7 +125,7 @@ impl Background {
     pub(super) fn new(budget_ms: Option<u64>, clock: Option<CpuClock>) -> Background {
         let budget = budget_ms.map(|ms| Duration::from_millis(ms.min(crate::limits::MAX_BUDGET_MS)));
         let now = Instant::now();
-        Background { budget, left: budget.unwrap_or_default(), refilled: now, clock, unreported: None, reported: now }
+        Background { budget, left: budget.unwrap_or_default(), refilled: now, clock, unreported: None, reported: now, paused: false }
     }
 
     /// What's left of the budget now, if there is one.
@@ -80,11 +143,36 @@ impl Background {
     /// clock, the wall budget elsewhere).
     pub(super) fn budgets(&mut self, wall: Option<Duration>, cpu: Option<Duration>) -> (Option<Duration>, Option<Duration>) {
         let cap = |limit: Option<Duration>, left: Duration| Some(limit.map_or(left, |l| l.min(left)));
-        match self.remaining() {
+        let shared = Shared::get().map(|s| Duration::from_secs_f64(s.balance().max(0.0)));
+        let left = match (self.remaining(), shared) {
+            (Some(a), Some(b)) => Some(a.min(b)),
+            (a, b) => a.or(b),
+        };
+        match left {
             None => (wall, cpu),
             Some(left) if self.clock.is_some() => (wall, cap(cpu, left)),
             Some(left) => (cap(wall, left), cpu),
         }
+    }
+
+    /// How long background work must wait for the tenant's shared budget
+    /// (None: it may run now). The first time it has to wait since the
+    /// budget last had room, the supervisor hears (`workerBackgroundMs`;
+    /// nothing is retired).
+    pub(super) fn paused(&mut self, out: &Output, vm: u64) -> Option<Duration> {
+        let wait = Shared::get().map(Shared::wait).filter(|w| !w.is_zero());
+        if wait.is_none() {
+            self.paused = false;
+        } else if !self.paused {
+            self.paused = true;
+            let ms = Shared::get().map_or(0, |s| s.budget.as_millis());
+            let of = if self.clock.is_some() { "CPU time" } else { "time" };
+            let cause = format!(
+                "the tenant's isolates used more than {ms}ms of {of} per minute between evals together (limits.workerBackgroundMs): their timers and continuations wait until it refills"
+            );
+            self.report(out, vm, true, Some(("workerBackgroundMs", &cause)));
+        }
+        wait
     }
 
     /// Start a batch, charged at least `floor`.
@@ -101,6 +189,9 @@ impl Background {
             None => batch.wall_start.elapsed(),
         }
         .max(batch.floor);
+        if let Some(shared) = Shared::get() {
+            shared.charge(spent);
+        }
         if self.budget.is_none() {
             return false;
         }
