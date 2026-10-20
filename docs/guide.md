@@ -37,7 +37,7 @@ Besides the configuration, `run` and `eval` take options for the one call:
 - `filename`: the code's name in stack traces. Default
   `<tenant>/eval-<n>.js`, where n counts the isolate's evals from 1.
 - `signal`: an `AbortSignal`. Aborting it terminates the eval if it is
-  running, or skips it if it is queued; the eval rejects with
+  running, or skips it if it hasn't started; the eval rejects with
   `ERR_ABORTED`, and its host calls' `ctx.signal` aborts. The isolate stays
   usable.
 

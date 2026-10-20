@@ -209,8 +209,9 @@ test('closing an isolate rejects its in-flight evals at once, and the worker sta
   rt.close();
 });
 
-test('an eval stops when its signal aborts, and the isolate stays usable', async () => {
+test('an eval stops when its signal aborts, and the isolate stays usable', async (ctx) => {
   const rt = new Runtime({ strict });
+  ctx.after(() => rt.close());
   const security = [];
   rt.on('securityEvent', (e) => security.push(e));
   const t = rt.tenant('abort');
@@ -234,8 +235,9 @@ test('an eval stops when its signal aborts, and the isolate stays usable', async
   const later = vm.eval('n += 1', { signal: queued.signal }).catch((e) => e.code);
   await new Promise((r) => setTimeout(r, 50));
   const started = Date.now();
-  spin.abort('enough');
+  // The queued eval first: once the running one stops, the next would start.
   queued.abort();
+  spin.abort('enough');
   a.abort(new Error('gone'));
   assert.deepEqual(await busy, ['ERR_ABORTED', 'enough']);
   assert.equal(await later, 'ERR_ABORTED');

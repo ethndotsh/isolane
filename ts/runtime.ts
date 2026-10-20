@@ -38,7 +38,7 @@ export interface EvalOptions<S extends AnySchema | undefined = undefined> {
   filename?: string;
   /**
    * Aborting it stops the eval: a running one is terminated (as a timeout
-   * would), a queued one never runs, and it rejects with `ERR_ABORTED`.
+   * would), one that hasn't started never does, and it rejects with `ERR_ABORTED`.
    * Its host calls' `ctx.signal` aborts too. The isolate stays usable.
    */
   signal?: AbortSignal;
