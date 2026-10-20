@@ -47,6 +47,26 @@ test('usage is accounted per tenant', async () => {
   rt.close();
 });
 
+test('usage keeps counting after resetUsage, and the supervisor measures worker CPU on Linux', async () => {
+  const rt = new Runtime({ strict });
+  const t = rt.tenant('meter');
+  const vm = t.isolate();
+  await vm.eval('1');
+  t.resetUsage();
+  await vm.eval('let x = 0; for (let i = 0; i < 3e7; i++) x += i; x');
+  const u = t.usage();
+  assert.equal(u.evals, 1, 'the live worker counts into the reset usage');
+  if (process.platform === 'linux') {
+    assert.ok(u.workerCpuMs > 0, `workerCpuMs ${u.workerCpuMs}`);
+    // The process's CPU time covers its isolate threads' (to its 10 ms steps).
+    assert.ok(u.workerCpuMs + 20 >= u.cpuMs, `workerCpuMs ${u.workerCpuMs} < cpuMs ${u.cpuMs}`);
+  } else {
+    assert.equal(u.workerCpuMs, undefined);
+  }
+  vm.close();
+  rt.close();
+});
+
 test('recycling: worker defaults', () => {
   assert.equal(DEFAULT_LIMITS.workerLifetimeMs, 3_600_000);
   assert.equal(DEFAULT_LIMITS.workerEvals, 100_000);

@@ -25,7 +25,7 @@ has the details and is kept current.
 | A tenant's isolates aren't separate security domains | decided: the tenant is the boundary (`docs/design.md`) |
 | Recovery after a compromise: worker recycling (max lifetime, max requests), ideally a `--jitless` quarantine worker | partly: recycling after `limits.workerLifetimeMs` / `workerEvals`; the `--jitless` worker is planned |
 | A tenant-wide background CPU budget, or the per-isolate one accepted | done: `limits.workerBackgroundMs` |
-| CPU accounting the worker can't forge, or `usage()` documented as advisory | partly: documented as advisory |
+| CPU accounting the worker can't forge, or `usage()` documented as advisory | done: `usage().workerCpuMs` is measured by the supervisor (Linux); the rest is documented as advisory |
 | `prctl` narrowed; byte limits for `fs`, `connect`, and `fetch`; `x448` and `paste` resolved or accepted | partly: `prctl` narrowed, `fs.limits.writtenBytes` added, `paste` accepted and `x448` pinned (`.cargo/audit.toml`); `connect` bytes and a default for `fetch.limits.requests` open |
 | `docs/design.md` describes what's built; README and this file keep saying "not ready" until the rest is closed | done |
 

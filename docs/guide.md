@@ -22,7 +22,7 @@ returns the tenant's handle:
 |---|---|
 | `run(code, config?)` | Evaluate in a fresh isolate, then close it |
 | `isolate(config?)` | A stateful isolate: `eval(code, options?)` keeps globals between calls |
-| `usage()` / `resetUsage()` | Evals, failures, CPU ms, host calls, log bytes, peak memory, security events |
+| `usage()` / `resetUsage()` | Evals, failures, CPU ms, host calls, log bytes, peak memory, security events, and the worker's CPU ms as the kernel counts it (see [usage](#usage)) |
 | `release()` | Lift a quarantine early |
 | `stop()` | Stop the tenant's worker and its isolates |
 
@@ -501,6 +501,26 @@ with `ERR_LIMIT`, with `err.limit` naming it, and emits `onLimit`. `fetch`,
 `connections` counts a socket from when it starts opening, so opens racing
 each other can't pass it, until the guest closes it or the connection closes
 and the guest has read what was left.
+
+## Usage
+
+`tenant.usage()` returns what a tenant has used since it started or since
+`resetUsage()`: `evals`, `failures`, `cpuMs`, `hostCalls`, `logBytes`,
+`peakMemoryBytes`, `securityEvents`, and on Linux `workerCpuMs`.
+
+Every figure but `workerCpuMs` is reported by the worker. They're right
+unless guest code has compromised its worker, which could then report
+anything: fine for metrics and quotas, not for billing that has to hold
+against a hostile tenant.
+
+`workerCpuMs` is measured by the supervisor: the CPU time of the tenant's
+worker processes, every thread, user and system, read from the kernel
+(`/proc/<pid>/stat`, in 10 ms steps), so a worker can't understate it. It
+includes the worker's own work besides guest code (V8's compiler and
+garbage collector threads, startup), so it's a little over `cpuMs`. It's
+read every 5 s, when `usage()` is called, and when a worker is stopped; a
+worker that crashes loses at most its last 5 s. It's absent on other
+platforms.
 
 ## Errors
 

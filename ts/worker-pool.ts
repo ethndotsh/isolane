@@ -3,6 +3,7 @@
 // and host calls. Everything a worker sends is checked (worker.ts); this
 // module dispatches it.
 
+import { readFileSync } from 'node:fs';
 import { splitBytes, type BinaryPart } from './binary.js';
 import { capabilities } from './capabilities.js';
 import { workerLimits, type ResolvedConfig, type ResolvedLimits, type ResolvedShims } from './config.js';
@@ -25,12 +26,27 @@ import {
  * last `resetUsage`). Survives worker restarts. CPU time is measured on
  * Linux only (0 elsewhere).
  */
+/**
+ * What a tenant has used. Every figure but `workerCpuMs` is reported by
+ * the worker, which guest code that compromised it could falsify: good for
+ * metrics and quotas, not for billing that must hold against a hostile
+ * tenant. `workerCpuMs` is measured by the supervisor.
+ */
 export interface TenantUsage {
   evals: number;
   /** Evals that failed, for any reason. */
   failures: number;
-  /** CPU time on the tenant's isolate threads, evals and continuations. */
+  /** CPU time on the tenant's isolate threads, evals and continuations (worker-reported). */
   cpuMs: number;
+  /**
+   * CPU time of the tenant's worker processes, every thread, user and
+   * system, read by the supervisor from the kernel (`/proc/<pid>/stat`), in
+   * 10 ms steps: a worker can't understate it. It includes the worker's
+   * own work (V8's compiler and garbage collector threads, startup). Read
+   * every 5 s and when a worker is stopped, so a worker that crashes loses
+   * at most its last 5 s. Linux only (absent elsewhere).
+   */
+  workerCpuMs?: number;
   hostCalls: number;
   logBytes: number;
   /** The largest V8 heap (plus external memory) any of its isolates reported. */
@@ -195,6 +211,25 @@ export interface TenantWorkerOptions {
   spare?: SpareWorker;
 }
 
+/** How often the supervisor reads its workers' CPU time. */
+const CPU_SAMPLE_MS = 5_000;
+
+/** A process's CPU time, every thread, user and system, from the kernel. Linux only. */
+function processCpuMs(pid: number | undefined): number | undefined {
+  if (process.platform !== 'linux' || pid === undefined) return undefined;
+  try {
+    const stat = readFileSync(`/proc/${pid}/stat`, 'utf8');
+    // After the command name (in parentheses, and may contain anything):
+    // state is field 3, utime and stime fields 14 and 15, in clock ticks
+    // (Linux's USER_HZ, 100 a second).
+    const fields = stat.slice(stat.lastIndexOf(')') + 2).split(' ');
+    const ticks = Number(fields[11]) + Number(fields[12]);
+    return Number.isFinite(ticks) ? ticks * 10 : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 /** How long a recycled worker's stateful isolates have to close (or its
  * workerLifetimeMs, if shorter) before they're retired. */
 const RECYCLE_DRAIN_MS = 60_000;
@@ -236,6 +271,9 @@ export class TenantWorker {
   #evals = 0;
   #lifetimeTimer: NodeJS.Timeout | undefined;
   #drainTimer: NodeJS.Timeout | undefined;
+  #cpuTimer: NodeJS.Timeout | undefined;
+  /** Its CPU time at the last sample. */
+  #cpuSeen = 0;
 
   constructor(o: TenantWorkerOptions) {
     this.tenant = o.tenant;
@@ -260,7 +298,13 @@ export class TenantWorker {
       this.#proc = new WorkerProcess(o.workerPath, handlers, o.strict, o.limits.workerMemoryBytes ?? undefined, o.prepareWeb);
     }
     this.#proc.ready.then(
-      () => this.#chain.emit('worker', { tenant: this.tenant, event: 'start', pid: this.#proc.pid }),
+      () => {
+        this.#chain.emit('worker', { tenant: this.tenant, event: 'start', pid: this.#proc.pid });
+        if (process.platform === 'linux' && this.#proc.alive) {
+          this.#cpuTimer = setInterval(() => this.sampleCpu(), CPU_SAMPLE_MS);
+          this.#cpuTimer.unref();
+        }
+      },
       () => {},
     );
   }
@@ -271,6 +315,15 @@ export class TenantWorker {
 
   get pid(): number | undefined {
     return this.#proc.pid;
+  }
+
+  /** Add the worker's CPU time since the last sample to the tenant's usage. */
+  sampleCpu(): void {
+    if (!this.#proc.alive) return;
+    const ms = processCpuMs(this.#proc.pid);
+    if (ms === undefined) return;
+    this.#usage.workerCpuMs = (this.#usage.workerCpuMs ?? 0) + Math.max(0, ms - this.#cpuSeen);
+    this.#cpuSeen = ms;
   }
 
   /** No isolates and nothing in flight. */
@@ -423,6 +476,7 @@ export class TenantWorker {
     clearTimeout(this.#idleTimer);
     clearTimeout(this.#lifetimeTimer);
     clearTimeout(this.#drainTimer);
+    this.sampleCpu();
     this.#proc.kill();
   }
 
@@ -682,6 +736,7 @@ export class TenantWorker {
     clearTimeout(this.#idleTimer);
     clearTimeout(this.#lifetimeTimer);
     clearTimeout(this.#drainTimer);
+    clearInterval(this.#cpuTimer);
     const oom = isOutOfMemory(exit);
     const code: IsolaneErrorCode = oom
       ? 'ERR_LIMIT'

@@ -243,12 +243,22 @@ export class Runtime {
 
   /** @internal */
   [USAGE](tenant: string): TenantUsage {
+    this.#workers.get(tenant)?.sampleCpu();
+    this.#draining.get(tenant)?.sampleCpu();
     return { ...(this.#usage.get(tenant) ?? emptyUsage()) };
   }
 
   /** @internal */
   [RESET_USAGE](tenant: string): void {
-    this.#usage.delete(tenant);
+    const u = this.#usage.get(tenant);
+    if (!u) return;
+    // Zeroed in place: the tenant's live workers keep counting into it.
+    this.#workers.get(tenant)?.sampleCpu();
+    this.#draining.get(tenant)?.sampleCpu();
+    for (const key of Object.keys(u)) delete (u as unknown as Record<string, unknown>)[key];
+    Object.assign(u, emptyUsage());
+    // An idle tenant's entry goes, so names that come and go don't pile up.
+    if (!this.#workers.has(tenant) && !this.#draining.has(tenant)) this.#usage.delete(tenant);
   }
 
   /** @internal */
