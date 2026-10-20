@@ -175,8 +175,16 @@ mod linux {
         // Each rule is one way to be outside the allowed options (the
         // conditions in a rule all hold; any rule matching refuses).
         let arg = |n: u8, op: SeccompCmpOp, v: libc::c_int| SeccompCondition::new(n, SeccompCmpArgLen::Dword, op, v as u64).map_err(err);
+        // PR_SET_NO_NEW_PRIVS passes too: installing each later filter calls
+        // it (it can only ever add a restriction), and the allowlist, which
+        // must be last since it refuses seccomp() itself, kills the rest.
         let mut outside = vec![SeccompRule::new(
-            PRCTL_ALLOWED.iter().map(|&(option, _)| arg(0, SeccompCmpOp::Ne, option)).collect::<Result<_, _>>()?,
+            PRCTL_ALLOWED
+                .iter()
+                .map(|&(option, _)| option)
+                .chain([libc::PR_SET_NO_NEW_PRIVS])
+                .map(|option| arg(0, SeccompCmpOp::Ne, option))
+                .collect::<Result<_, _>>()?,
         )
         .map_err(err)?];
         for &(option, sub) in PRCTL_ALLOWED {
