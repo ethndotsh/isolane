@@ -96,6 +96,11 @@ mod linux {
         libc::SYS_membarrier,
         libc::SYS_pkey_mprotect,
         libc::SYS_prctl, // only the options in PRCTL_ALLOWED; see seccomp()
+        // V8's one-time kernel-version check before remapping its builtins
+        // into the code range (arm64, isolates with heaps of 2 GiB or more);
+        // it CHECKs that uname succeeds. Accepted: a compromised worker
+        // learns the kernel release and the host name.
+        libc::SYS_uname,
         libc::SYS_exit,
         libc::SYS_exit_group,
     ];

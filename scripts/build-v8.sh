@@ -9,6 +9,9 @@ cd "$(dirname "$0")/.."
 
 os=$(uname -s | tr '[:upper:]' '[:lower:]')
 arch=$(uname -m)
+# Cross builds (CARGO_BUILD_TARGET; see scripts/build-worker.sh) log under
+# the target's architecture.
+[ -n "${CARGO_BUILD_TARGET:-}" ] && arch=${CARGO_BUILD_TARGET%%-*}
 log="build/logs/${os}-${arch}.log"
 mkdir -p build/logs
 

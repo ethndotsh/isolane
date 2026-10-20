@@ -1,7 +1,7 @@
 # isolane: design and threat model
 
-Status: this describes what's built (Linux x64, tested in CI with the V8
-sandbox and full lockdown), except where it says planned. It isn't cleared
+Status: this describes what's built (Linux x64 and arm64, tested in CI with
+the V8 sandbox and full lockdown), except where it says planned. It isn't cleared
 for untrusted code yet: see the release gate in `SECURITY.md`.
 
 ## Goal
@@ -81,6 +81,10 @@ code, the worker is treated as potentially compromised.
   `usage().workerCpuMs` still sees what it used.
 - Landlock at `partial` (kernels before 6.7) meets strict mode; seccomp is
   the first wall for files and sockets.
+- seccomp allows `uname`: V8 checks the kernel version (and aborts if it
+  can't) before remapping its builtins on arm64, for isolates with heaps of
+  2 GiB or more. A compromised worker can read the kernel release and the
+  host name.
 
 ## Architecture
 
@@ -271,8 +275,10 @@ deploying. Development mode warns instead of refusing.
 
 - **V8 source builds are heavy:** roughly 30 GB of disk and an hour or more
   per clean build per target. CI needs caching.
-- **Linux arm64 is the hardest target:** Chromium's toolchain is built for
-  x64 Linux hosts, so arm64 Linux likely needs cross-compiling from x64.
+- **Linux arm64 is cross-compiled:** Chromium's clang and Rust toolchains
+  exist for x64 Linux hosts only, so CI builds arm64 on x64, makes the web
+  snapshot with that first build on a native arm64 runner, links it into a
+  second x64 build, and tests the result on the arm64 runner.
 - **seccomp allowlists are brittle across V8 versions:** a new V8 can start
   using a new syscall. The escape suite and per-release tests catch this.
 - **The V8 sandbox is still being hardened.** The V8 team doesn't yet treat

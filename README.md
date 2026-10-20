@@ -214,6 +214,8 @@ try {
 
 V8 is built from source, because no published rusty_v8 build enables the V8
 sandbox. Building requires Linux x64 with libclang 21, or macOS with Xcode.
+Linux arm64 workers are cross-compiled on x64; see
+`.github/actions/build-worker` for the toolchain setup.
 
 ```sh
 scripts/fetch-rusty-v8.sh   # rusty_v8 and V8 sources, into build/

@@ -17,16 +17,6 @@ jobs:
     # real kernel, not under emulation.
     runs-on: ubuntu-24.04
     timeout-minutes: 300
-    env:
-      V8_FROM_SOURCE: '1'
-      LIBCLANG_PATH: /usr/lib/llvm-21/lib
-      # The runner image also has clang 16-18; without this, bindgen takes
-      # /usr/bin/clang's builtin headers, which don't match libclang 21.
-      CLANG_PATH: /usr/lib/llvm-21/bin/clang
-      # Link with lld (several times faster than GNU ld on the V8 archive).
-      CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER: /usr/lib/llvm-21/bin/clang
-      CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUSTFLAGS: -C link-arg=-fuse-ld=lld
-      CARGO_INCREMENTAL: '0'
     # For test/postgres.test.mjs: postgres.js from a guest, over connect().
     # Password auth, which the image makes SCRAM-SHA-256: postgres.js does
     # SCRAM with crypto.subtle (PBKDF2, HMAC, SHA-256) in the guest.
@@ -41,199 +31,125 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           ref: ${{ inputs.ref || github.ref }}
-
-      # Deleting these takes ~1.5 min; do it in the background while the
-      # toolchain installs and the sources download, and wait before building.
-      - name: Free disk space (in the background)
-        run: nohup sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL >/dev/null 2>&1 &
-
-      - name: Install libclang 21, strace
-        run: |
-          wget -q https://apt.llvm.org/llvm.sh
-          chmod +x llvm.sh
-          sudo ./llvm.sh 21
-          sudo apt-get install -y -q libclang-21-dev libglib2.0-dev strace
-
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: 22
-
-      # Every cargo command below builds against the same V8, so they must all
-      # see the same GN_ARGS (or rusty_v8 regenerates and recompiles V8).
-      - name: GN args for V8
-        run: echo "GN_ARGS=$(scripts/gn-args.sh)" >>"$GITHUB_ENV"
-
-      # The rusty_v8 + V8 checkout changes only when its pins or our patches
-      # do, so it's cached: a hit means no traffic to Chromium's git host,
-      # which often fails CI runners with 5xx errors. (The Rust toolchain
-      # inside it is in the V8 build cache instead.)
-      - name: Restore rusty_v8 sources
-        id: v8-src
-        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+      - uses: ./.github/actions/build-worker
         with:
-          path: |
-            build/rusty_v8
-            !build/rusty_v8/third_party/rust-toolchain
-          key: rusty-v8-src-${{ hashFiles('scripts/fetch-rusty-v8.sh', 'patches/rusty_v8-*.patch') }}
-
-      - name: Fetch rusty_v8 (when not cached)
-        run: scripts/fetch-rusty-v8.sh
-
-      - name: Save rusty_v8 sources
-        if: steps.v8-src.outputs.cache-hit != 'true'
-        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+          arch: x64
+      - uses: ./.github/actions/test-worker
         with:
-          path: |
-            build/rusty_v8
-            !build/rusty_v8/third_party/rust-toolchain
-          key: rusty-v8-src-${{ hashFiles('scripts/fetch-rusty-v8.sh', 'patches/rusty_v8-*.patch') }}
-
-      - name: Restore V8 build
-        id: v8-cache
-        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
-        with:
-          path: |
-            target
-            build/rusty_v8/third_party/rust-toolchain
-            ~/.cargo/registry/index
-            ~/.cargo/registry/cache
-            ~/.cargo/git/db
-          key: v8-linux-x64-${{ hashFiles('scripts/fetch-rusty-v8.sh', 'scripts/v8.gn', 'patches/rusty_v8-*.patch', 'Cargo.lock', 'Cargo.toml') }}
-          restore-keys: v8-linux-x64-
-
-      - name: Wait for the disk space
-        run: |
-          while pgrep -f 'rm -rf /usr/share/dotnet' >/dev/null; do sleep 2; done
-          df -h /
-
-      - name: Build worker (V8 from source, sandbox enabled)
-        run: |
-          scripts/sync-mtimes.sh
-          scripts/build-v8.sh || { tail -100 build/logs/linux-x86_64.log; exit 1; }
-          cp target/release/isolane-worker "$RUNNER_TEMP/isolane-worker"
-
-      # Saved right after the build, even when the build fails (a failure
-      # in the final steps still leaves hours of compiled V8 worth keeping).
-      - name: Save V8 build
-        if: always() && steps.v8-cache.outputs.cache-hit != 'true'
-        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
-        with:
-          path: |
-            target
-            build/rusty_v8/third_party/rust-toolchain
-            ~/.cargo/registry/index
-            ~/.cargo/registry/cache
-            ~/.cargo/git/db
-          key: v8-linux-x64-${{ hashFiles('scripts/fetch-rusty-v8.sh', 'scripts/v8.gn', 'patches/rusty_v8-*.patch', 'Cargo.lock', 'Cargo.toml') }}
-
-      - name: Lint (every unsafe block documented)
-        run: cargo clippy --release -p isolane-worker --features escape-tests -- -D clippy::undocumented_unsafe_blocks -D unsafe_op_in_unsafe_fn
-
-      - name: V8 sandbox self-check
-        run: '"$RUNNER_TEMP/isolane-worker" --self-check'
-
-      - name: Build escape-test worker
-        # Same V8 build settings as above, so only the isolane crate rebuilds.
-        run: |
-          cargo build --release -p isolane-worker --features escape-tests
-          cp target/release/isolane-worker "$RUNNER_TEMP/isolane-escape-worker"
-
-      - name: Build TypeScript
-        run: |
-          npm ci
-          npx tsc
-          npm run typecheck
-          (cd examples/serverless && npm ci && npm run typecheck)
-
-      - name: Lockdown tests
-        env:
-          ISOLANE_WORKER: ${{ runner.temp }}/isolane-worker
-          ISOLANE_ESCAPE_WORKER: ${{ runner.temp }}/isolane-escape-worker
-        run: node --test --test-reporter=spec test/lockdown.test.mjs
-
-      - name: End-to-end tests (strict mode, lockdown on)
-        env:
-          ISOLANE_WORKER: ${{ runner.temp }}/isolane-worker
-          ISOLANE_STRICT: '1'
-          ISOLANE_PG_URL: postgres://postgres:isolane-test@localhost:5432/postgres
-        run: node --test --test-reporter=spec $(ls test/*.test.mjs | grep -v lockdown)
-
-      # web-platform-tests as a per-subtest gate (test/wpt/expectations.json),
-      # served by WPT's own server (Python), against the sandboxed worker.
-      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
-        with:
-          python-version: '3.12'
-
-      - name: Pinned WPT commit
-        id: wpt
-        run: echo "commit=$(sed -n "s/^export const WPT_COMMIT = '\(.*\)';/\1/p" test/wpt/run.mjs)" >>"$GITHUB_OUTPUT"
-
-      # Keyed by the commit; the runner's hash too, since it lists the
-      # directories to check out (it adds missing ones to a restored copy).
-      - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
-        with:
-          path: ${{ runner.temp }}/wpt
-          key: wpt-${{ steps.wpt.outputs.commit }}-${{ hashFiles('test/wpt/run.mjs') }}
-          restore-keys: wpt-${{ steps.wpt.outputs.commit }}-
-
-      - name: WPT gate (strict mode, lockdown on)
-        env:
-          ISOLANE_WORKER: ${{ runner.temp }}/isolane-worker
-          ISOLANE_STRICT: '1'
-          ISOLANE_WPT_DIR: ${{ runner.temp }}/wpt
-        run: node test/wpt/run.mjs --report wpt-report.json --summary "$GITHUB_STEP_SUMMARY"
-
-      # test262 as a per-test gate (test/test262/expectations.json): the
-      # engine as isolane configures it (removed globals, flags, the clock).
-      - name: Pinned test262 commit
-        id: test262
-        run: echo "commit=$(sed -n "s/^export const TEST262_COMMIT = '\(.*\)';/\1/p" test/test262/run.mjs)" >>"$GITHUB_OUTPUT"
-
-      - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
-        with:
-          path: ${{ runner.temp }}/test262
-          key: test262-${{ steps.test262.outputs.commit }}-${{ hashFiles('test/test262/run.mjs') }}
-          restore-keys: test262-${{ steps.test262.outputs.commit }}-
-
-      - name: test262 gate (strict mode, lockdown on)
-        env:
-          ISOLANE_WORKER: ${{ runner.temp }}/isolane-worker
-          ISOLANE_STRICT: '1'
-          ISOLANE_TEST262_DIR: ${{ runner.temp }}/test262
-        run: node test/test262/run.mjs --concurrency 4 --report test262-report.json --summary "$GITHUB_STEP_SUMMARY"
-
-      - name: Seccomp kills (kernel log)
-        if: always()
-        run: sudo dmesg | grep -iE 'seccomp|audit.*sig=31' | tail -40 || true
-
-      # A gate: fails if the worker makes a syscall the seccomp filter doesn't allow.
-      - name: Syscall audit
-        if: always()
-        run: |
-          status=0
-          scripts/syscall-audit.sh "$RUNNER_TEMP/isolane-worker" >syscall-audit.txt || status=$?
-          cat syscall-audit.txt
-          { echo '### Syscalls after ready'; echo '```'; cat syscall-audit.txt; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
-          exit "$status"
-
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
-        if: always()
-        with:
-          name: linux-x64
-          path: |
-            syscall-audit.txt
-            wpt-report.json
-            test262-report.json
-            build/logs/*.log
-          if-no-files-found: ignore
-
-      # For soak.yml (fuzzing and stress), which runs against main's build.
+          arch: x64
+      # For soak.yml, bench.yml, and release.yml.
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: worker-linux-x64
           path: |
             ${{ runner.temp }}/isolane-worker
             ${{ runner.temp }}/isolane-escape-worker
+
+  # arm64 is cross-compiled on x64 (rusty_v8's supported route: Chromium's
+  # clang and Rust toolchains exist for x64 Linux hosts only) and tested on a
+  # native arm64 runner. Its web snapshot is made by running the first
+  # build on arm64, then embedded by a second, relink-only build on x64.
+  linux-arm64-build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 300
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          ref: ${{ inputs.ref || github.ref }}
+      - uses: ./.github/actions/build-worker
+        with:
+          arch: arm64
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: worker-linux-arm64-first-pass
+          path: |
+            ${{ runner.temp }}/isolane-worker
+            ${{ runner.temp }}/isolane-escape-worker
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        if: failure()
+        with:
+          name: linux-arm64-build-log
+          path: build/logs/*.log
+          if-no-files-found: ignore
+
+  linux-arm64-snapshot:
+    needs: linux-arm64-build
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 10
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: worker-linux-arm64-first-pass
+          path: ${{ runner.temp }}
+      - name: Make the web snapshot
+        run: |
+          chmod +x "$RUNNER_TEMP/isolane-worker"
+          "$RUNNER_TEMP/isolane-worker" --make-web-snapshot="$RUNNER_TEMP/web-snapshot.bin"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: web-snapshot-linux-arm64
+          path: ${{ runner.temp }}/web-snapshot.bin
+
+  linux-arm64-link:
+    needs: linux-arm64-snapshot
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          ref: ${{ inputs.ref || github.ref }}
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: web-snapshot-linux-arm64
+          path: ${{ runner.temp }}/snapshot
+      # The first pass's escape-test worker, which needs no snapshot.
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: worker-linux-arm64-first-pass
+          path: ${{ runner.temp }}/first-pass
+      - uses: ./.github/actions/build-worker
+        with:
+          arch: arm64
+          snapshot: ${{ runner.temp }}/snapshot/web-snapshot.bin
+      - name: Collect the workers
+        run: cp "$RUNNER_TEMP/first-pass/isolane-escape-worker" "$RUNNER_TEMP/isolane-escape-worker"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: worker-linux-arm64
+          path: |
+            ${{ runner.temp }}/isolane-worker
+            ${{ runner.temp }}/isolane-escape-worker
+
+  linux-arm64:
+    needs: linux-arm64-link
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 60
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_PASSWORD: isolane-test
+        ports: ['5432:5432']
+        options: --health-cmd pg_isready --health-interval 5s --health-timeout 5s --health-retries 20
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          ref: ${{ inputs.ref || github.ref }}
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 22
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: worker-linux-arm64
+          path: ${{ runner.temp }}
+      - name: Make the workers executable
+        run: chmod +x "$RUNNER_TEMP/isolane-worker" "$RUNNER_TEMP/isolane-escape-worker"
+      - uses: ./.github/actions/test-worker
+        with:
+          arch: arm64
 
   # Known advisories in dependencies: a gate, apart from the long build.
   audit:

@@ -5,8 +5,8 @@ name: Release
 # (OIDC: no stored token) with provenance; each package's npm settings must
 # list this repository and workflow as its trusted publisher.
 #
-# Platforms built today: linux-x64-gnu (the full CI run, tests included).
-# linux-arm64-gnu and darwin-* join as their build jobs land.
+# Platforms built today: linux-x64-gnu and linux-arm64-gnu (the full CI run,
+# tests included on both). darwin-* joins when its build job lands.
 
 on:
   push:
@@ -16,13 +16,13 @@ permissions:
   contents: read
 
 jobs:
-  linux-x64:
+  ci:
     uses: ./.github/workflows/ci.yml
     with:
       ref: ${{ github.ref }}
 
   publish:
-    needs: [linux-x64]
+    needs: [ci]
     runs-on: ubuntu-24.04
     permissions:
       contents: read
@@ -56,8 +56,16 @@ jobs:
           name: worker-linux-x64
           path: bin/linux-x64
 
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: worker-linux-arm64
+          path: bin/linux-arm64
+
       - name: Pack
-        run: node scripts/pack-workers.mjs "$VERSION" linux-x64-gnu=bin/linux-x64/isolane-worker
+        run: |
+          node scripts/pack-workers.mjs "$VERSION" \
+            linux-x64-gnu=bin/linux-x64/isolane-worker \
+            linux-arm64-gnu=bin/linux-arm64/isolane-worker
 
       - name: Publish the platform packages, then the library
         run: |

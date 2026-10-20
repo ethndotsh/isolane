@@ -1,0 +1,125 @@
+name: Test the worker
+description: >
+  Run every gate against $RUNNER_TEMP/isolane-worker (and
+  $RUNNER_TEMP/isolane-escape-worker) on a native Linux kernel: the V8
+  sandbox self-check, the lockdown and escape tests, the end-to-end tests in
+  strict mode, the WPT and test262 gates, and the syscall audit. The job
+  provides Node and the Postgres service.
+
+inputs:
+  arch:
+    description: x64 or arm64 (names the report artifact)
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - name: Install strace
+      shell: bash
+      run: sudo apt-get update -q && sudo apt-get install -y -q strace
+
+    - name: V8 sandbox self-check
+      shell: bash
+      run: |
+        report=$("$RUNNER_TEMP/isolane-worker" --self-check)
+        echo "$report"
+        echo "$report" | grep -q '"sandboxSecure":true' || { echo "the V8 sandbox isn't configured securely" >&2; exit 1; }
+        echo "$report" | grep -q '"webSnapshot":"embedded"' || { echo "the web snapshot isn't embedded" >&2; exit 1; }
+
+    - name: Build TypeScript
+      shell: bash
+      run: |
+        npm ci
+        npx tsc
+        npm run typecheck
+        (cd examples/serverless && npm ci && npm run typecheck)
+
+    - name: Lockdown tests
+      shell: bash
+      env:
+        ISOLANE_WORKER: ${{ runner.temp }}/isolane-worker
+        ISOLANE_ESCAPE_WORKER: ${{ runner.temp }}/isolane-escape-worker
+      run: node --test --test-reporter=spec test/lockdown.test.mjs
+
+    - name: End-to-end tests (strict mode, lockdown on)
+      shell: bash
+      env:
+        ISOLANE_WORKER: ${{ runner.temp }}/isolane-worker
+        ISOLANE_STRICT: '1'
+        ISOLANE_PG_URL: postgres://postgres:isolane-test@localhost:5432/postgres
+      run: node --test --test-reporter=spec $(ls test/*.test.mjs | grep -v lockdown)
+
+    # web-platform-tests as a per-subtest gate (test/wpt/expectations.json),
+    # served by WPT's own server (Python), against the sandboxed worker.
+    - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+      with:
+        python-version: '3.12'
+
+    - name: Pinned WPT commit
+      id: wpt
+      shell: bash
+      run: echo "commit=$(sed -n "s/^export const WPT_COMMIT = '\(.*\)';/\1/p" test/wpt/run.mjs)" >>"$GITHUB_OUTPUT"
+
+    # Keyed by the commit; the runner's hash too, since it lists the
+    # directories to check out (it adds missing ones to a restored copy).
+    - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+      with:
+        path: ${{ runner.temp }}/wpt
+        key: wpt-${{ steps.wpt.outputs.commit }}-${{ hashFiles('test/wpt/run.mjs') }}
+        restore-keys: wpt-${{ steps.wpt.outputs.commit }}-
+
+    - name: WPT gate (strict mode, lockdown on)
+      shell: bash
+      env:
+        ISOLANE_WORKER: ${{ runner.temp }}/isolane-worker
+        ISOLANE_STRICT: '1'
+        ISOLANE_WPT_DIR: ${{ runner.temp }}/wpt
+      run: node test/wpt/run.mjs --report wpt-report.json --summary "$GITHUB_STEP_SUMMARY"
+
+    # test262 as a per-test gate (test/test262/expectations.json): the
+    # engine as isolane configures it (removed globals, flags, the clock).
+    - name: Pinned test262 commit
+      id: test262
+      shell: bash
+      run: echo "commit=$(sed -n "s/^export const TEST262_COMMIT = '\(.*\)';/\1/p" test/test262/run.mjs)" >>"$GITHUB_OUTPUT"
+
+    - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+      with:
+        path: ${{ runner.temp }}/test262
+        key: test262-${{ steps.test262.outputs.commit }}-${{ hashFiles('test/test262/run.mjs') }}
+        restore-keys: test262-${{ steps.test262.outputs.commit }}-
+
+    - name: test262 gate (strict mode, lockdown on)
+      shell: bash
+      env:
+        ISOLANE_WORKER: ${{ runner.temp }}/isolane-worker
+        ISOLANE_STRICT: '1'
+        ISOLANE_TEST262_DIR: ${{ runner.temp }}/test262
+      run: node test/test262/run.mjs --concurrency 4 --report test262-report.json --summary "$GITHUB_STEP_SUMMARY"
+
+    - name: Seccomp kills (kernel log)
+      if: always()
+      shell: bash
+      run: sudo dmesg | grep -iE 'seccomp|audit.*sig=31' | tail -40 || true
+
+    # A gate: fails if the worker makes a syscall the seccomp filter doesn't allow.
+    - name: Syscall audit
+      if: always()
+      shell: bash
+      run: |
+        status=0
+        scripts/syscall-audit.sh "$RUNNER_TEMP/isolane-worker" >syscall-audit.txt || status=$?
+        cat syscall-audit.txt
+        { echo '### Syscalls after ready (${{ inputs.arch }})'; echo '```'; cat syscall-audit.txt; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+        exit "$status"
+
+    - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+      if: always()
+      with:
+        name: linux-${{ inputs.arch }}
+        path: |
+          syscall-audit.txt
+          wpt-report.json
+          test262-report.json
+          build/logs/*.log
+        if-no-files-found: ignore

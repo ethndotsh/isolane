@@ -1,0 +1,156 @@
+name: Build the worker
+description: >
+  Build the release worker (V8 from source, sandbox enabled) and the
+  escape-test worker for one Linux target, into $RUNNER_TEMP/isolane-worker
+  and $RUNNER_TEMP/isolane-escape-worker. Runs on an x64 runner: arm64 is
+  cross-compiled, as rusty_v8 does (Chromium ships its clang and Rust
+  toolchains for x64 Linux hosts only). An x64 worker gets its web snapshot
+  embedded here; an arm64 one is built first without it, and again with
+  `snapshot` once an arm64 runner has made it (scripts/build-worker.sh).
+
+inputs:
+  arch:
+    description: x64 or arm64
+    required: true
+  snapshot:
+    description: A web snapshot made on the target, to embed (arm64's second pass). Skips the lint and the escape-test worker.
+    default: ''
+
+runs:
+  using: composite
+  steps:
+    # Deleting these takes ~1.5 min; do it in the background while the
+    # toolchain installs and the sources download, and wait before building.
+    - name: Free disk space (in the background)
+      shell: bash
+      run: nohup sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL >/dev/null 2>&1 &
+
+    - name: Install libclang 21
+      shell: bash
+      run: |
+        wget -q https://apt.llvm.org/llvm.sh
+        chmod +x llvm.sh
+        sudo ./llvm.sh 21
+        sudo apt-get install -y -q libclang-21-dev libglib2.0-dev
+        if [ "${{ inputs.arch }}" = arm64 ]; then
+          rustup target add aarch64-unknown-linux-gnu
+        fi
+
+    # Every cargo command below builds against the same V8, so they must all
+    # see the same GN_ARGS (or rusty_v8 regenerates and recompiles V8).
+    - name: Build environment
+      shell: bash
+      run: |
+        {
+          echo "GN_ARGS=$(scripts/gn-args.sh)"
+          echo V8_FROM_SOURCE=1
+          echo LIBCLANG_PATH=/usr/lib/llvm-21/lib
+          # The runner image also has clang 16-18; without this, bindgen
+          # takes /usr/bin/clang's builtin headers, which don't match
+          # libclang 21.
+          echo CLANG_PATH=/usr/lib/llvm-21/bin/clang
+          echo CARGO_INCREMENTAL=0
+        } >>"$GITHUB_ENV"
+        if [ "${{ inputs.arch }}" = x64 ]; then
+          {
+            # Link with lld (several times faster than GNU ld on the V8 archive).
+            echo CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER=/usr/lib/llvm-21/bin/clang
+            echo CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUSTFLAGS=-C link-arg=-fuse-ld=lld
+            echo WORKER_DIR=target/release
+          } >>"$GITHUB_ENV"
+        else
+          # Linked with clang and lld against the Debian bullseye arm64
+          # sysroot that rusty_v8's build installs for V8 itself (glibc 2.31).
+          sysroot=$PWD/build/rusty_v8/build/linux/debian_bullseye_arm64-sysroot
+          {
+            echo CARGO_BUILD_TARGET=aarch64-unknown-linux-gnu
+            echo CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=/usr/lib/llvm-21/bin/clang
+            echo "CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_RUSTFLAGS=-C link-arg=--target=aarch64-linux-gnu -C link-arg=--sysroot=$sysroot -C link-arg=-fuse-ld=lld"
+            # rusty_v8's bindgen would read the host's /usr/include otherwise.
+            echo "BINDGEN_EXTRA_CLANG_ARGS_aarch64_unknown_linux_gnu=--sysroot=$sysroot"
+            echo WORKER_DIR=target/aarch64-unknown-linux-gnu/release
+          } >>"$GITHUB_ENV"
+        fi
+        if [ -n "${{ inputs.snapshot }}" ]; then
+          echo "ISOLANE_WEB_SNAPSHOT=$(realpath "${{ inputs.snapshot }}")" >>"$GITHUB_ENV"
+        fi
+
+    # The rusty_v8 + V8 checkout changes only when its pins or our patches
+    # do, so it's cached: a hit means no traffic to Chromium's git host,
+    # which often fails CI runners with 5xx errors. (The Rust toolchain
+    # inside it is in the V8 build cache instead.)
+    - name: Restore rusty_v8 sources
+      id: v8-src
+      uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+      with:
+        path: |
+          build/rusty_v8
+          !build/rusty_v8/third_party/rust-toolchain
+        key: rusty-v8-src-${{ hashFiles('scripts/fetch-rusty-v8.sh', 'patches/rusty_v8-*.patch') }}
+
+    - name: Fetch rusty_v8 (when not cached)
+      shell: bash
+      run: scripts/fetch-rusty-v8.sh
+
+    - name: Save rusty_v8 sources
+      if: steps.v8-src.outputs.cache-hit != 'true'
+      uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+      with:
+        path: |
+          build/rusty_v8
+          !build/rusty_v8/third_party/rust-toolchain
+        key: rusty-v8-src-${{ hashFiles('scripts/fetch-rusty-v8.sh', 'patches/rusty_v8-*.patch') }}
+
+    - name: Restore V8 build
+      id: v8-cache
+      uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+      with:
+        path: |
+          target
+          build/rusty_v8/third_party/rust-toolchain
+          ~/.cargo/registry/index
+          ~/.cargo/registry/cache
+          ~/.cargo/git/db
+        key: v8-linux-${{ inputs.arch }}-${{ hashFiles('scripts/fetch-rusty-v8.sh', 'scripts/v8.gn', 'patches/rusty_v8-*.patch', 'Cargo.lock', 'Cargo.toml') }}
+        restore-keys: v8-linux-${{ inputs.arch }}-
+
+    - name: Wait for the disk space
+      shell: bash
+      run: |
+        while pgrep -f 'rm -rf /usr/share/dotnet' >/dev/null; do sleep 2; done
+        df -h /
+
+    - name: Build worker (V8 from source, sandbox enabled)
+      shell: bash
+      run: |
+        scripts/sync-mtimes.sh
+        scripts/build-v8.sh || { tail -100 build/logs/linux-*.log; exit 1; }
+        cp "$WORKER_DIR/isolane-worker" "$RUNNER_TEMP/isolane-worker"
+
+    # Saved right after the build, even when the build fails (a failure
+    # in the final steps still leaves hours of compiled V8 worth keeping).
+    - name: Save V8 build
+      if: always() && steps.v8-cache.outputs.cache-hit != 'true'
+      uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+      with:
+        path: |
+          target
+          build/rusty_v8/third_party/rust-toolchain
+          ~/.cargo/registry/index
+          ~/.cargo/registry/cache
+          ~/.cargo/git/db
+        key: v8-linux-${{ inputs.arch }}-${{ hashFiles('scripts/fetch-rusty-v8.sh', 'scripts/v8.gn', 'patches/rusty_v8-*.patch', 'Cargo.lock', 'Cargo.toml') }}
+
+    - name: Lint (every unsafe block documented)
+      if: inputs.snapshot == ''
+      shell: bash
+      run: cargo clippy --release -p isolane-worker --features escape-tests -- -D clippy::undocumented_unsafe_blocks -D unsafe_op_in_unsafe_fn
+
+    - name: Build escape-test worker
+      if: inputs.snapshot == ''
+      # Same V8 build settings as above, so only the isolane crate rebuilds.
+      shell: bash
+      run: |
+        unset ISOLANE_WEB_SNAPSHOT
+        cargo build --release -p isolane-worker --features escape-tests
+        cp "$WORKER_DIR/isolane-worker" "$RUNNER_TEMP/isolane-escape-worker"
