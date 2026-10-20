@@ -74,7 +74,7 @@ jobs:
           path: |
             build/rusty_v8
             !build/rusty_v8/third_party/rust-toolchain
-          key: rusty-v8-src-${{ hashFiles('scripts/fetch-rusty-v8.sh', 'patches/**') }}
+          key: rusty-v8-src-${{ hashFiles('scripts/fetch-rusty-v8.sh', 'patches/rusty_v8-*.patch') }}
 
       - name: Fetch rusty_v8 (when not cached)
         run: scripts/fetch-rusty-v8.sh
@@ -86,7 +86,7 @@ jobs:
           path: |
             build/rusty_v8
             !build/rusty_v8/third_party/rust-toolchain
-          key: rusty-v8-src-${{ hashFiles('scripts/fetch-rusty-v8.sh', 'patches/**') }}
+          key: rusty-v8-src-${{ hashFiles('scripts/fetch-rusty-v8.sh', 'patches/rusty_v8-*.patch') }}
 
       - name: Restore V8 build
         id: v8-cache
@@ -98,7 +98,7 @@ jobs:
             ~/.cargo/registry/index
             ~/.cargo/registry/cache
             ~/.cargo/git/db
-          key: v8-linux-x64-${{ hashFiles('scripts/fetch-rusty-v8.sh', 'scripts/v8.gn', 'patches/**', 'Cargo.lock', 'Cargo.toml') }}
+          key: v8-linux-x64-${{ hashFiles('scripts/fetch-rusty-v8.sh', 'scripts/v8.gn', 'patches/rusty_v8-*.patch', 'Cargo.lock', 'Cargo.toml') }}
           restore-keys: v8-linux-x64-
 
       - name: Wait for the disk space
@@ -124,7 +124,7 @@ jobs:
             ~/.cargo/registry/index
             ~/.cargo/registry/cache
             ~/.cargo/git/db
-          key: v8-linux-x64-${{ hashFiles('scripts/fetch-rusty-v8.sh', 'scripts/v8.gn', 'patches/**', 'Cargo.lock', 'Cargo.toml') }}
+          key: v8-linux-x64-${{ hashFiles('scripts/fetch-rusty-v8.sh', 'scripts/v8.gn', 'patches/rusty_v8-*.patch', 'Cargo.lock', 'Cargo.toml') }}
 
       - name: Lint (every unsafe block documented)
         run: cargo clippy --release -p isolane-worker --features escape-tests -- -D clippy::undocumented_unsafe_blocks -D unsafe_op_in_unsafe_fn
