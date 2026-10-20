@@ -536,7 +536,7 @@
     }),
   );
 
-  // Scripts outside phase 1 that the vendored code only touches lazily:
+  // Scripts isolane doesn't vendor that the vendored code only touches lazily:
   // inspection for Deno's console.
   const stubs = {
     __proto__: null,
