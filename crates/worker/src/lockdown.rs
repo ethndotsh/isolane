@@ -61,6 +61,11 @@ mod linux {
     /// Syscalls a serving worker needs after V8 has initialized: pipe I/O,
     /// memory management (V8's heap, JIT, and sandbox), threads (one per VM
     /// plus its watchdog), and time.
+    ///
+    /// `mmap`/`mprotect` stay unrestricted, PROT_EXEC included: V8's JIT
+    /// maps and flips code pages at run time, so the filter can't tell its
+    /// pages from an attacker's. A `--jitless` quarantine worker (planned)
+    /// is the way to drop PROT_EXEC for tenants that don't need the JIT.
     const ALLOWED: &[i64] = &[
         libc::SYS_read,
         libc::SYS_write,
@@ -90,10 +95,22 @@ mod linux {
         libc::SYS_getrandom,
         libc::SYS_membarrier,
         libc::SYS_pkey_mprotect,
-        libc::SYS_prctl,
+        libc::SYS_prctl, // only the options in PRCTL_ALLOWED; see seccomp()
         libc::SYS_exit,
         libc::SYS_exit_group,
     ];
+
+    /// The `prctl` options a serving worker uses, from the CI syscall audit:
+    /// thread names (Rust's std and V8 name every thread) and V8 naming its
+    /// anonymous mappings (`v8-sandbox`, `v8-pointer-table`). Any other
+    /// option fails with EPERM, and those in PRCTL_KILLED kill the worker.
+    pub const PRCTL_ALLOWED: &[(libc::c_int, Option<libc::c_int>)] =
+        &[(libc::PR_SET_NAME, None), (libc::PR_SET_VMA, Some(libc::PR_SET_VMA_ANON_NAME))];
+
+    /// `prctl` options that only an attacker would use: making the process
+    /// dumpable (so same-user processes could read its memory or ptrace it),
+    /// naming a ptracer, or rewriting the memory map's metadata.
+    const PRCTL_KILLED: &[libc::c_int] = &[libc::PR_SET_DUMPABLE, libc::PR_SET_PTRACER, libc::PR_SET_MM];
 
     /// Filesystem calls fail with EACCES instead of killing the process, as
     /// Landlock would answer them: V8, ICU, and abseil probe files lazily
@@ -130,6 +147,8 @@ mod linux {
     /// - `clone3` returns ENOSYS, so libc falls back to `clone`, whose flags
     ///   the allowlist can inspect (`clone3` passes them in memory).
     /// - filesystem calls return EACCES.
+    /// - `prctl` options outside PRCTL_ALLOWED return EPERM, and the ones in
+    ///   PRCTL_KILLED kill the process.
     /// - the allowlist kills the process on anything else, and allows
     ///   `clone` only for threads: CLONE_THREAD with the memory, files, and
     ///   signal handlers shared, and no new namespace (never a process).
@@ -149,6 +168,36 @@ mod linux {
             FILE_SYSCALLS.iter().map(|&s| (s, vec![])).collect(),
             SeccompAction::Allow,
             SeccompAction::Errno(libc::EACCES as u32),
+            arch,
+        )
+        .map_err(err)?;
+
+        // Each rule is one way to be outside the allowed options (the
+        // conditions in a rule all hold; any rule matching refuses).
+        let arg = |n: u8, op: SeccompCmpOp, v: libc::c_int| SeccompCondition::new(n, SeccompCmpArgLen::Dword, op, v as u64).map_err(err);
+        let mut outside = vec![SeccompRule::new(
+            PRCTL_ALLOWED.iter().map(|&(option, _)| arg(0, SeccompCmpOp::Ne, option)).collect::<Result<_, _>>()?,
+        )
+        .map_err(err)?];
+        for &(option, sub) in PRCTL_ALLOWED {
+            if let Some(sub) = sub {
+                outside.push(SeccompRule::new(vec![arg(0, SeccompCmpOp::Eq, option)?, arg(1, SeccompCmpOp::Ne, sub)?]).map_err(err)?);
+            }
+        }
+        let prctl_options = SeccompFilter::new(
+            BTreeMap::from([(libc::SYS_prctl, outside)]),
+            SeccompAction::Allow,
+            SeccompAction::Errno(libc::EPERM as u32),
+            arch,
+        )
+        .map_err(err)?;
+        let prctl_killed = SeccompFilter::new(
+            BTreeMap::from([(
+                libc::SYS_prctl,
+                PRCTL_KILLED.iter().map(|&o| SeccompRule::new(vec![arg(0, SeccompCmpOp::Eq, o)?]).map_err(err)).collect::<Result<_, _>>()?,
+            )]),
+            SeccompAction::Allow,
+            SeccompAction::KillProcess,
             arch,
         )
         .map_err(err)?;
@@ -174,7 +223,7 @@ mod linux {
         rules.insert(libc::SYS_clone, vec![SeccompRule::new(vec![thread_only, no_namespaces]).map_err(err)?]);
         let allowlist = SeccompFilter::new(rules, SeccompAction::KillProcess, SeccompAction::Allow, arch).map_err(err)?;
 
-        for filter in [no_clone3, no_files, allowlist] {
+        for filter in [no_clone3, no_files, prctl_options, prctl_killed, allowlist] {
             let prog: BpfProgram = filter.try_into().map_err(err)?;
             seccompiler::apply_filter_all_threads(&prog).map_err(|e| format!("seccomp: {e}"))?;
         }

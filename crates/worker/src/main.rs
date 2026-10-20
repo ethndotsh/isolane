@@ -448,6 +448,22 @@ fn escape_test(probe: &str) -> ExitCode {
                 let flags = libc::CLONE_VM | libc::CLONE_SIGHAND | libc::CLONE_THREAD;
                 libc::syscall(libc::SYS_clone, flags as libc::c_ulong, std::ptr::null::<u8>(), 0usize, 0usize, 0usize)
             }
+            // Killed: dumpable would let same-user processes ptrace the
+            // worker or read its memory through /proc.
+            "prctl-dumpable" => libc::prctl(libc::PR_SET_DUMPABLE, 1, 0, 0, 0) as i64,
+            "prctl-other" => {
+                // An option outside the allowlist: EPERM. Allowed ones work.
+                if libc::prctl(libc::PR_SET_NAME, c"probe".as_ptr(), 0, 0, 0) != 0 {
+                    locked("NAME FAILED");
+                    return ExitCode::FAILURE;
+                }
+                let r = libc::prctl(libc::PR_SET_KEEPCAPS, 1, 0, 0, 0);
+                if r == -1 && std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM) {
+                    locked("EPERM");
+                    return ExitCode::SUCCESS;
+                }
+                r as i64
+            }
             "clone3" => {
                 // Must fail with ENOSYS (libc then falls back to clone).
                 let r = libc::syscall(libc::SYS_clone3, std::ptr::null::<u8>(), 0usize);
