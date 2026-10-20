@@ -1,0 +1,62 @@
+name: Bench
+
+# isolane against isolated-vm, node:vm contexts, and worker_threads
+# (bench/compare.mjs): memory for many live sandboxes, cold start, and call
+# latency, on the worker main's CI built (the release build: V8 sandbox and
+# pointer compression). After every green CI run on main, or on demand. The
+# table goes to the job summary; numbers quoted in the README come from here.
+
+on:
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  compare:
+    if: github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          ref: ${{ github.event.workflow_run.head_sha || github.sha }}
+
+      # Node 24: isolated-vm 7 needs it. Every contender runs on this Node.
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 24
+
+      - name: Build TypeScript, install the other contenders
+        run: |
+          npm ci
+          npx tsc
+          npm install --prefix bench --no-audit --no-fund
+
+      - name: Download the worker
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_ID: ${{ github.event.workflow_run.id }}
+        run: |
+          run=${RUN_ID:-$(gh run list -R "$GITHUB_REPOSITORY" -w CI -b main -s success -L 1 --json databaseId --jq '.[0].databaseId')}
+          gh run download "$run" -R "$GITHUB_REPOSITORY" -n worker-linux-x64 -D "$RUNNER_TEMP/bin"
+          chmod +x "$RUNNER_TEMP"/bin/*
+          echo "ISOLANE_WORKER=$RUNNER_TEMP/bin/isolane-worker" >>"$GITHUB_ENV"
+          "$RUNNER_TEMP/bin/isolane-worker" --self-check
+
+      - name: Compare
+        env:
+          ISOLANE_STRICT: '1'
+        run: node bench/compare.mjs --json bench-report.json --summary "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        if: always()
+        with:
+          name: bench
+          path: bench-report.json
+          if-no-files-found: ignore

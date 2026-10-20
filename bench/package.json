@@ -1,0 +1,9 @@
+{
+  "name": "isolane-bench",
+  "private": true,
+  "type": "module",
+  "description": "Comparison contenders for bench/compare.mjs, installed apart from the library: npm install --prefix bench",
+  "dependencies": {
+    "isolated-vm": "7.0.1"
+  }
+}
