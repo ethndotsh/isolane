@@ -7,13 +7,14 @@
 
 import { lookup as dnsLookup, type LookupAddress } from 'node:dns';
 import { constants as fsConstants } from 'node:fs';
-import { lstat, mkdir, open, readdir, realpath, rm, stat } from 'node:fs/promises';
+import { lstat, mkdir, open, readdir, realpath, stat, unlink } from 'node:fs/promises';
 import http from 'node:http';
 import https from 'node:https';
 import { BlockList, connect as netConnect, isIP, type Socket } from 'node:net';
 import { PassThrough } from 'node:stream';
 import { connect as tlsConnect } from 'node:tls';
-import { join, posix, sep } from 'node:path';
+import { posix } from 'node:path';
+import { fsRoot, type FsRoot } from './fs-root.js';
 
 import { internalEntry, type HostEntry } from './host.js';
 
@@ -897,60 +898,56 @@ export function fsBroker(policy: FsPolicy, denied: DenialReporter = () => {}): H
   let written = 0;
   let running = 0;
   let rootReal: Promise<string> | undefined;
-  const root = () => (rootReal ??= realpath(policy.root));
-  const inside = (r: string, p: string) => p === r || p.startsWith(r + sep);
-
-  // The host path for a guest path, with every symlink resolved, refused if
-  // it lands outside the root. Guests can't create symlinks, but the root
-  // may already contain some.
-  const resolveExisting = async (path: string) => {
-    const r = await root();
-    const real = await realpath(join(r, posix.normalize('/' + path)));
-    if (!inside(r, real)) {
-      denied('fs', path, 'outside the root');
-      throw new FsError(`fs: ${JSON.stringify(path)} is outside the root`, 'EACCES');
-    }
-    return real;
+  const outside = (path: string): never => {
+    denied('fs', path, 'outside the root');
+    throw new FsError(`fs: ${JSON.stringify(path)} is outside the root`, 'EACCES');
   };
-  // For creating or removing an entry: its parent must resolve inside the
-  // root, and the entry itself is never followed if it's a symlink.
-  const resolveEntry = async (path: string) => {
-    const guest = posix.normalize('/' + path);
-    if (guest === '/') {
+  // Each operation gets its own view of the root (ts/fs-root.ts), closed
+  // when it's done: on Linux, the directories it walked through, held open.
+  const confined = async <T>(use: (root: FsRoot) => Promise<T>): Promise<T> => {
+    const root = fsRoot(policy.root, (rootReal ??= realpath(policy.root)), outside);
+    try {
+      return await use(root);
+    } finally {
+      await root.close();
+    }
+  };
+  // Creating or removing an entry: never the root itself.
+  const notRoot = (path: string) => {
+    if (posix.normalize('/' + path) === '/') {
       denied('fs', path, 'the root itself cannot be replaced or removed');
       throw new FsError('fs: the root itself cannot be replaced or removed', 'EPERM');
     }
-    const parent = await resolveExisting(posix.dirname(guest));
-    return join(parent, posix.basename(guest));
   };
 
   const ops: Record<string, (path: string, arg: unknown) => Promise<unknown>> = {
-    async readFile(path) {
-      const fh = await open(await resolveExisting(path), fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW);
-      try {
-        const st = await fh.stat();
-        if (!st.isFile()) throw new FsError(`fs.readFile ${JSON.stringify(path)}: not a file`, 'EISDIR');
-        if (st.size > maxBytes) throw new FsError(`fs.readFile ${JSON.stringify(path)}: larger than ${maxBytes} bytes (fs.limits.fileBytes)`, 'EFBIG');
-        return await fh.readFile();
-      } finally {
-        await fh.close();
-      }
-    },
-    async readdir(path) {
-      return (await readdir(await resolveExisting(path))).sort();
-    },
-    async stat(path) {
-      const st = await stat(await resolveExisting(path));
-      return { size: st.size, isFile: st.isFile(), isDirectory: st.isDirectory(), mtimeMs: st.mtimeMs };
-    },
-    async exists(path) {
-      try {
-        await resolveExisting(path);
-        return true;
-      } catch {
-        return false;
-      }
-    },
+    readFile: (path) =>
+      confined(async (root) => {
+        const fh = await open(await root.existing(path), fsConstants.O_RDONLY | fsConstants.O_NONBLOCK);
+        try {
+          const st = await fh.stat();
+          if (!st.isFile()) throw new FsError(`fs.readFile ${JSON.stringify(path)}: not a file`, 'EISDIR');
+          if (st.size > maxBytes) throw new FsError(`fs.readFile ${JSON.stringify(path)}: larger than ${maxBytes} bytes (fs.limits.fileBytes)`, 'EFBIG');
+          return await fh.readFile();
+        } finally {
+          await fh.close();
+        }
+      }),
+    readdir: (path) => confined(async (root) => (await readdir(await root.existing(path))).sort()),
+    stat: (path) =>
+      confined(async (root) => {
+        const st = await stat(await root.existing(path));
+        return { size: st.size, isFile: st.isFile(), isDirectory: st.isDirectory(), mtimeMs: st.mtimeMs };
+      }),
+    exists: (path) =>
+      confined(async (root) => {
+        try {
+          await root.existing(path);
+          return true;
+        } catch {
+          return false;
+        }
+      }),
     async writeFile(path, data) {
       if (!(data instanceof Uint8Array)) throw new FsError('fs.writeFile: malformed data', 'EINVAL');
       const bytes = data;
@@ -958,42 +955,32 @@ export function fsBroker(policy: FsPolicy, denied: DenialReporter = () => {}): H
       if (written + bytes.length > maxWritten) {
         throw new FsError(`fs.writeFile ${JSON.stringify(path)}: this isolate has written its ${maxWritten} bytes (fs.limits.writtenBytes)`, 'EDQUOT');
       }
+      notRoot(path);
       written += bytes.length;
-      const flags = fsConstants.O_WRONLY | fsConstants.O_CREAT | fsConstants.O_TRUNC | fsConstants.O_NOFOLLOW;
-      const fh = await open(await resolveEntry(path), flags, 0o644);
-      try {
-        await fh.writeFile(bytes);
-      } finally {
-        await fh.close();
-      }
+      // O_NOFOLLOW: a symlink at the entry is refused, not written through.
+      const flags = fsConstants.O_WRONLY | fsConstants.O_CREAT | fsConstants.O_TRUNC | fsConstants.O_NOFOLLOW | fsConstants.O_NONBLOCK;
+      await confined(async (root) => {
+        const fh = await open(await root.entry(path), flags, 0o644);
+        try {
+          await fh.writeFile(bytes);
+        } finally {
+          await fh.close();
+        }
+      });
     },
     async mkdir(path, recursive) {
-      if (recursive !== true) {
-        await mkdir(await resolveEntry(path));
-        return;
-      }
-      // Find the deepest existing ancestor, confine it, create the rest.
-      const r = await root();
-      let existing = posix.normalize('/' + path);
-      const missing: string[] = [];
-      for (;;) {
-        try {
-          await lstat(join(r, existing));
-          break;
-        } catch (err) {
-          if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err;
-          missing.unshift(posix.basename(existing));
-          existing = posix.dirname(existing);
-        }
-      }
-      const base = await resolveExisting(existing);
-      if (missing.length) await mkdir(join(base, ...missing), { recursive: true });
+      if (recursive !== true) notRoot(path);
+      await confined(async (root) => (recursive === true ? root.mkdirp(path) : mkdir(await root.entry(path))));
     },
     async rm(path, recursive) {
-      const entry = await resolveEntry(path);
-      const st = await lstat(entry);
-      if (st.isDirectory() && recursive !== true) throw new FsError(`fs.rm ${JSON.stringify(path)}: is a directory`, 'EISDIR');
-      await rm(entry, { recursive: recursive === true });
+      notRoot(path);
+      await confined(async (root) => {
+        const entry = await root.entry(path);
+        const st = await lstat(entry);
+        if (!st.isDirectory()) return unlink(entry);
+        if (recursive !== true) throw new FsError(`fs.rm ${JSON.stringify(path)}: is a directory`, 'EISDIR');
+        await root.rmTree(path);
+      });
     },
   };
   const writes = new Set(['writeFile', 'mkdir', 'rm']);

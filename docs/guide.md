@@ -212,8 +212,16 @@ fs: { root: '/srv/tenants/acme', write: false, limits: { fileBytes: 10 << 20, wr
 
 The guest gets a promise-based `fs` (`readFile`, `writeFile`, `readdir`,
 `stat`, `exists`, `mkdir`, `rm`) confined to `root`, read-only unless
-`write: true`. Symlinks out of the root are refused, errors carry Node-style
-codes (`ENOENT`, `EACCES`, `EROFS`), and they never reveal host paths.
+`write: true`. Symlinks are followed only while they stay inside the root
+(at most 40 per path), and a symlink where a file is written or removed is
+never written through. Errors carry Node-style codes (`ENOENT`, `EACCES`,
+`EROFS`), and they never reveal host paths.
+
+On Linux, paths are walked one directory at a time from descriptors held
+open for the operation, never re-resolved by name, so a symlink created or
+swapped in the root while an operation runs can't redirect it outside, even
+if another process writes to the root. Files need to be readable to be
+`stat`ed.
 `fileBytes` caps each file read or written, `writtenBytes` what the isolate
 writes over its life (`EDQUOT` past it; it doesn't track deletions, so it
 isn't a disk quota: give each tenant its own volume or quota if disk space
@@ -583,9 +591,10 @@ lifts it.
   itself between I/O events, but each host call, fetch, or eval moves the
   clock to the real time, so a guest that makes many calls can still
   measure coarse durations.
-- **An `fs` root must not be writable by anyone else.** Paths are confined
-  by resolving symlinks before each operation; another process creating
-  symlinks inside the root at the same moment could race that check.
+- **On macOS, an `fs` root must not be writable by anyone else.** Paths
+  there are confined by resolving symlinks before each operation, so
+  another process creating symlinks inside the root at the same moment
+  could race that check. Linux walks paths from held descriptors instead.
 - **A seeded isolate's hash seeds are predictable** to its own code (it can
   slow its own hash tables down, within its time limits).
 - **macOS is for development only.** The per-worker memory cap and
