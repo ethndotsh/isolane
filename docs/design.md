@@ -1,7 +1,8 @@
 # isolane: design and threat model
 
-Status: draft for review. Nothing here is built yet. (`isolane` is a working
-name.)
+Status: this describes what's built (Linux x64, tested in CI with the V8
+sandbox and full lockdown), except where it says planned. It isn't cleared
+for untrusted code yet: see the release gate in `SECURITY.md`.
 
 ## Goal
 
