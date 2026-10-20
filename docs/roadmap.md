@@ -416,6 +416,28 @@ Deliberately late, so it can be done properly once the core is settled.
 | Node compatibility (`node:buffer`, `events`, `util`, `stream`, `crypto`, `path`, `url`, `assert`, `string_decoder`, `process`): unenv presets (the layer behind Wrangler's `nodejs_compat` and Nitro) and/or workerd's `src/node` (Apache-2.0), with `node:net`/`node:tls` on our `connect` broker and `node:fs` on our `fs` broker; native addons, `child_process`, and real threads stay unsupported, by design | later |
 | Compatibility target: "anything that runs on Cloudflare Workers with nodejs_compat"; publish a tested-packages list | later |
 
+### Elegance pass, October 2026 (decided, to apply)
+
+From the API-surface review (approved by the owner):
+
+- **Renames:**
+  - `limits.concurrentEvals` → `limits.pendingEvals`;
+  - `limits.hostCallBytes` → `limits.pendingHostCallBytes`;
+  - `fs.limits.operations` → `fs.limits.pendingOperations`;
+  - `WorkerEvent.event` → `WorkerEvent.kind`;
+  - export an `IsolationReport` type;
+  - the worker's `--memory-limit=` flag → `--memory-bytes=`.
+
+  Nothing is released, so there are no deprecation shims.
+- **`ERR_DENIED`** is kind `usage`, not `security`.
+- **New:** `run`/`eval(code, { signal })` cancels an eval, rejecting with `ERR_ABORTED` and aborting its host calls' `ctx.signal`.
+- **Policy limits** (`fetch.limits.requests`, `connect.limits.connections`, the fs limits) also emit `onLimit` with the dotted name; `onPolicyDenial` stays for refused targets.
+- **Also from the review:**
+  - carry worker exit reasons instead of matching message text (a dev worker reported `ERR_WORKER_CRASHED`);
+  - fix the doc mismatches (ERR_LIMIT's list, `Tenant.stop` vs `close`, `FetchPolicy.hosts` JSDoc);
+  - lower the `pendingHostCallBytes` default and/or add a total per tenant;
+  - one table of the error codes the guest sees.
+
 ### API v2 (from `docs/api-review.md`)
 
 Landed in October 2026; the review's "Status" section lists the
