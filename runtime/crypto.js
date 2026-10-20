@@ -1,4 +1,22 @@
 // Copyright 2018-2026 the Deno authors. MIT license.
+//
+// WebCrypto (crypto.subtle, CryptoKey), from Deno's ext/crypto/00_crypto.js
+// at denoland/deno@eb4061f6f367, the last JS implementation before Deno
+// moved SubtleCrypto into Rust objects on deno_core's cppgc (#34966), so
+// no upstream changes will come to it. isolane owns this copy; its changes
+// to Deno's file (see git history for each):
+// - a CryptoKey's internal slots (type, extractable, algorithm, usages,
+//   handle) live in a module-private WeakMap, never on the key, and every
+//   internal read uses them; `algorithm` and `usages` return copies;
+// - key material crosses structuredClone through a V8 private
+//   (core.setHostObject, core.registerPrivateCloneable), not a registered
+//   symbol any code can call;
+// - the Web Crypto standard's and WPT's changes since that commit: buffer
+//   arguments copied after the algorithm is normalized, each usage once,
+//   [EnforceRange] deriveBits lengths, AES-GCM with any IV length, stricter
+//   JWK checks, NotSupportedError for wrapping keys with no export;
+// - Deno's later X448 PKCS#8 fix (denoland/deno#34578).
+// Its Rust ops are ported in crates/worker/src/web/crypto/.
 
 (function () {
 const { core, primordials, internals } = __bootstrap;

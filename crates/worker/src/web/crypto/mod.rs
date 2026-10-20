@@ -1,5 +1,5 @@
 //! Web Crypto (`crypto.subtle`, WinterTC phase 4): the native half of
-//! Deno's ext/crypto. The JS (runtime/deno/ext/crypto/00_crypto.js) is
+//! Deno's ext/crypto. The JS (runtime/crypto.js) is
 //! Deno's, from the last commit before Deno moved SubtleCrypto into
 //! deno_core's cppgc objects; the other files here are that commit's Rust
 //! ops, ported from deno_core's `#[op2]` to plain functions, which this

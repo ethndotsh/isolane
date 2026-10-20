@@ -67,7 +67,8 @@ const EXT: &[(&str, &str)] = &[
     ("ext:deno_fetch/22_body.js", runtime_js!("deno/ext/fetch/22_body.js")),
     ("ext:deno_fetch/23_request.js", runtime_js!("deno/ext/fetch/23_request.js")),
     ("ext:deno_fetch/23_response.js", runtime_js!("deno/ext/fetch/23_response.js")),
-    ("ext:deno_crypto/00_crypto.js", runtime_js!("deno/ext/crypto/00_crypto.js")),
+    // WebCrypto: Deno's JS, owned by isolane since Deno moved it to Rust.
+    ("ext:deno_crypto/00_crypto.js", runtime_js!("crypto.js")),
     // isolane's fetch() over the network broker (in place of 26_fetch.js).
     ("ext:isolane/fetch.js", runtime_js!("fetch.js")),
     // connect(), the Sockets API over the socket broker.
