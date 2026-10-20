@@ -8,6 +8,7 @@
   "scripts": {
     "platform": "node src/platform.ts",
     "deploy": "node src/deployer.ts",
+    "dev": "node src/deployer.ts --watch",
     "typecheck": "tsc -p . && tsc -p app"
   },
   "dependencies": {

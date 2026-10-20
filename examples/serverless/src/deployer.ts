@@ -1,13 +1,16 @@
 // The deployer's side: deploy app/index.ts, then serve its host functions
 // from this process (here, an in-memory "database").
 //
-//   node src/deployer.ts [ws://localhost:8787/connect]
+//   node src/deployer.ts [--watch] [ws://localhost:8787/connect]
+//
+// With --watch, saving app/index.ts deploys it again over the same
+// connection, so the next request runs the new code.
 //
 // The app is TypeScript: its types are stripped here, on the deployer's
 // machine, with Node's own stripper, which replaces them with whitespace,
 // so line numbers in the app's stack traces match app/index.ts.
 
-import { readFileSync } from 'node:fs';
+import { readFileSync, watch } from 'node:fs';
 import { stripTypeScriptTypes } from 'node:module';
 import type { HostApi, User } from './host-api.ts';
 import type { FromDeployer, ToDeployer } from './protocol.ts';
@@ -28,18 +31,33 @@ const host: HostApi = {
   },
 };
 
-const source = readFileSync(new URL('../app/index.ts', import.meta.url), 'utf8');
-const socket = new WebSocket(process.argv[2] ?? 'ws://localhost:8787/connect');
+const args = process.argv.slice(2);
+const watching = args.includes('--watch');
+const appFile = new URL('../app/index.ts', import.meta.url);
+const socket = new WebSocket(args.find((a) => !a.startsWith('--')) ?? 'ws://localhost:8787/connect');
 const send = (message: FromDeployer) => socket.send(JSON.stringify(message));
 
+function deploy(): void {
+  let code: string;
+  try {
+    code = stripTypeScriptTypes(readFileSync(appFile, 'utf8'), { mode: 'strip' });
+  } catch (err) {
+    return console.error(`not deployed: ${err instanceof Error ? err.message : String(err)}`);
+  }
+  send({ type: 'deploy', app: 'hello', code, hostFunctions: Object.keys(host), fetchHosts: [] });
+}
+
 socket.addEventListener('open', () => {
-  send({
-    type: 'deploy',
-    app: 'hello',
-    code: stripTypeScriptTypes(source, { mode: 'strip' }),
-    hostFunctions: Object.keys(host),
-    fetchHosts: [],
+  deploy();
+  if (!watching) return;
+  // Editors save in bursts (write, rename, touch): deploy once they settle.
+  let timer: NodeJS.Timeout | undefined;
+  watch(new URL('../app/', import.meta.url), (_, file) => {
+    if (file !== 'index.ts') return;
+    clearTimeout(timer);
+    timer = setTimeout(deploy, 50);
   });
+  console.log('watching app/index.ts');
 });
 
 socket.addEventListener('message', async (event) => {

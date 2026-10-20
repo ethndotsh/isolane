@@ -32,7 +32,7 @@ directly; no build step).
 ```sh
 npm install
 ISOLANE_WORKER=/path/to/isolane-worker npm run platform   # terminal 1
-npm run deploy                                             # terminal 2
+npm run deploy                                             # terminal 2 (npm run dev redeploys on save)
 curl 'http://localhost:8787/hello/?id=1'                   # terminal 3 (?id=0 shows a 500)
 npm run typecheck
 ```
