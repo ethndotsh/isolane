@@ -1,13 +1,14 @@
-// A deployed app, kept warm: one stateful isolate on the app's tenant runs
-// the app's code once, and each HTTP request calls into it with
-// `isolate.call`, so nothing is compiled per request. The app defines
-// `async function handle(request: Request): Promise<Response>`; a setup shim
-// (the platform's own code, installed once per isolate) adds
-// `__platform_serve`, which builds the Request, calls handle, and returns
-// the Response as plain data, checked against a schema on the way out.
+// A deployed app, kept warm: a program on the app's tenant (`tenant.load`),
+// whose instances evaluate the app's module once and then serve request
+// after request, so nothing is compiled per request. The app exports
+// `async function handle(request: Request): Promise<Response>`; the
+// platform appends its own small export, `__platform_serve`, to the module
+// (after the app's last line, so line numbers stay the app's): it builds
+// the Request, calls handle, and returns the Response as plain data,
+// checked against a schema on the way out.
 
 import type { IncomingMessage } from 'node:http';
-import { IsolaneError, type HostContext, type HostFunction, type Isolate, type Tenant } from 'isolane';
+import type { HostContext, HostFunction, Program, Tenant } from 'isolane';
 import { z } from 'zod';
 import type { DeployerConnection } from './connection.ts';
 import type { Deploy } from './protocol.ts';
@@ -27,27 +28,26 @@ const Outcome = z.union([
 ]);
 export type Outcome = z.infer<typeof Outcome>;
 
-// Runs once, before the app's code. What handle throws is caught here and
+// The platform's end of the module. What handle throws is caught here and
 // reported as data, so the platform can tell the app's errors (a 500 for
-// its caller) from its own.
-const SERVE = {
-  filename: 'platform:serve.js',
-  code: `
-    globalThis.__platform_serve = async (incoming, body) => {
-      const request = new Request(incoming.url, {
-        method: incoming.method,
-        headers: incoming.headers,
-        body: incoming.method === 'GET' || incoming.method === 'HEAD' ? undefined : body,
-      });
-      try {
-        const response = await handle(request);
-        if (!(response instanceof Response)) throw new TypeError('handle() must return a Response');
-        return { response: { status: response.status, headers: [...response.headers], body: await response.text() } };
-      } catch (e) {
-        return { thrown: { name: String(e?.name ?? 'Error'), message: String(e?.message ?? e), stack: String(e?.stack ?? e) } };
-      }
-    };`,
-};
+// its caller) from its own. The check runs in setup, so an app without a
+// handle fails to deploy.
+const SERVE = `
+if (typeof handle !== 'function') throw new TypeError('the app must export async function handle(request)');
+export async function __platform_serve(incoming, body) {
+  const request = new Request(incoming.url, {
+    method: incoming.method,
+    headers: incoming.headers,
+    body: incoming.method === 'GET' || incoming.method === 'HEAD' ? undefined : body,
+  });
+  try {
+    const response = await handle(request);
+    if (!(response instanceof Response)) throw new TypeError('handle() must return a Response');
+    return { response: { status: response.status, headers: [...response.headers], body: await response.text() } };
+  } catch (e) {
+    return { thrown: { name: String(e?.name ?? 'Error'), message: String(e?.message ?? e), stack: String(e?.stack ?? e) } };
+  }
+}`;
 
 export class RequestTooLarge extends Error {}
 
@@ -63,7 +63,7 @@ async function readBody(req: IncomingMessage): Promise<Buffer> {
   return Buffer.concat(chunks);
 }
 
-/** The deployer's host functions, called over its connection. */
+/** The deployer's host functions, called over its connection (the app finds them in `env`). */
 function remoteHost(deploy: Deploy, connection: DeployerConnection): Record<string, HostFunction> {
   return Object.fromEntries(
     deploy.hostFunctions.map((name) => [
@@ -75,51 +75,30 @@ function remoteHost(deploy: Deploy, connection: DeployerConnection): Record<stri
   );
 }
 
-/** Failures after which the isolate can't serve again: the next request starts a fresh one. */
-const gone = (err: unknown) =>
-  err instanceof IsolaneError && (err.code === 'ERR_ISOLATE_RETIRED' || err.code === 'ERR_ISOLATE_CLOSED' || err.kind === 'limit' || err.kind === 'infrastructure');
-
 export class WarmApp {
   readonly deploy: Deploy;
   readonly connection: DeployerConnection;
-  #tenant: Tenant;
-  #origin: string;
-  #isolate: Promise<Isolate> | undefined;
-  /** Requests running on the current isolate, so a redeploy closes it only once they're done. */
-  #inFlight = 0;
-  #closing = false;
+  #program: Program;
 
-  constructor(tenant: Tenant, deploy: Deploy, connection: DeployerConnection, origin: string) {
-    this.#tenant = tenant;
+  private constructor(deploy: Deploy, connection: DeployerConnection, program: Program) {
     this.deploy = deploy;
     this.connection = connection;
-    this.#origin = origin;
+    this.#program = program;
   }
 
-  /** Start the app's isolate and run its code (its "cold start"). Rejects if the code fails to load. */
-  start(): Promise<Isolate> {
-    if (this.#isolate) return this.#isolate;
-    const { deploy, connection } = this;
-    const isolate = this.#tenant.isolate({
-      web: { baseUrl: this.#origin },
+  /** Load the app (its "cold start": its first instance evaluates it). Rejects if its code fails to load. */
+  static async load(tenant: Tenant, deploy: Deploy, connection: DeployerConnection, origin: string): Promise<WarmApp> {
+    const program = await tenant.load(`${deploy.code}\n${SERVE}`, {
+      filename: 'app/index.ts',
+      web: { baseUrl: origin },
       host: remoteHost(deploy, connection),
       fetch: deploy.fetchHosts.length ? { hosts: deploy.fetchHosts } : undefined,
       hooks: { onLog: (e) => connection.send({ type: 'log', level: e.level, message: e.message }) },
-      shims: { setup: SERVE },
     });
-    const started = isolate.eval(deploy.code, { filename: 'app/index.ts' }).then(
-      () => isolate,
-      (err) => {
-        isolate.close();
-        if (this.#isolate === started) this.#isolate = undefined;
-        throw err;
-      },
-    );
-    this.#isolate = started;
-    return started;
+    return new WarmApp(deploy, connection, program);
   }
 
-  /** Run one HTTP request through the app's `handle`. */
+  /** Run one HTTP request through the app's `handle`, in a free instance. */
   async serve(req: IncomingMessage, url: URL): Promise<Outcome> {
     const incoming = {
       method: req.method ?? 'GET',
@@ -127,27 +106,11 @@ export class WarmApp {
       headers: Object.entries(req.headers).flatMap(([k, v]) => (v === undefined ? [] : [[k, String(v)]])),
     };
     const body = await readBody(req);
-    const current = this.start();
-    const isolate = await current;
-    this.#inFlight++;
-    try {
-      return await isolate.call('__platform_serve', [incoming, body], { returns: Outcome });
-    } catch (err) {
-      // Stopped part-way (out of time, say) or gone: start afresh next time.
-      if (gone(err) && this.#isolate === current) {
-        this.#isolate = undefined;
-        isolate.close();
-      }
-      throw err;
-    } finally {
-      this.#inFlight--;
-      if (this.#closing && this.#inFlight === 0) isolate.close();
-    }
+    return this.#program.call('__platform_serve', [incoming, body], { returns: Outcome });
   }
 
-  /** Stop serving: the isolate closes once its requests are done. */
-  close(): void {
-    this.#closing = true;
-    if (this.#inFlight === 0) void this.#isolate?.then((isolate) => isolate.close(), () => {});
+  /** Stop serving: the program closes once its requests are done. */
+  close(): Promise<void> {
+    return this.#program.close();
   }
 }

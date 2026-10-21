@@ -1,4 +1,5 @@
-// What the app can call besides the web platform: the deployer's host API.
-type HostApi = import('../src/host-api.ts').HostApi;
-declare const getUser: HostApi['getUser'];
-declare const track: HostApi['track'];
+// What the app can use besides the web platform: the deployer's host API,
+// as isolane:env's `env`.
+declare module 'isolane:env' {
+  export const env: import('../src/host-api.ts').HostApi;
+}

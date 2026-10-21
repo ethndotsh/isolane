@@ -17,7 +17,7 @@ export const Deploy = z.object({
   app: AppName,
   /** The app's JavaScript (types already stripped). */
   code: z.string().max(4 << 20),
-  /** Host functions the deployer serves; the app calls them as globals. */
+  /** Host functions the deployer serves; the app calls them on `env` (`import { env } from 'isolane:env'`). */
   hostFunctions: z.array(HostName).max(100),
   /** Hosts the app may fetch from. */
   fetchHosts: z.array(z.string()).max(50).default([]),

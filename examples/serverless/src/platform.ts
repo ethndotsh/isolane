@@ -1,8 +1,8 @@
 // A small serverless platform on isolane.
 //
 // Deployers connect over a WebSocket, deploy an app, and serve its host
-// functions from their own process. A deploy loads the app into a warm
-// isolate on the app's own tenant (its own sandboxed worker process), and
+// functions from their own process. A deploy loads the app as a program on
+// the app's own tenant (its own sandboxed worker process), kept warm, and
 // HTTP requests to /<app>/... call the app's `handle(request)` there.
 //
 //   node src/platform.ts          # HTTP on :8787, deployers on ws://localhost:8787/connect
@@ -31,9 +31,9 @@ async function deployed(deploy: Deploy, connection: DeployerConnection): Promise
   if (current && current.connection !== connection) {
     return connection.send({ type: 'error', message: `${deploy.app} belongs to another deployer` });
   }
-  const next = new WarmApp(runtime.tenant(deploy.app), deploy, connection, `http://localhost:${PORT}`);
+  let next: WarmApp;
   try {
-    await next.start();
+    next = await WarmApp.load(runtime.tenant(deploy.app), deploy, connection, `http://localhost:${PORT}`);
   } catch (err) {
     // The app's code didn't load (a syntax error, a top-level throw): the
     // version serving now, if any, keeps serving.
@@ -41,8 +41,8 @@ async function deployed(deploy: Deploy, connection: DeployerConnection): Promise
     return connection.send({ type: 'error', message: `${deploy.app} failed to load: ${e.guest?.stack ?? e.message}` });
   }
   // A deploy from a connection that closed meanwhile goes nowhere.
-  if (!connection.open) return next.close();
-  apps.get(deploy.app)?.close();
+  if (!connection.open) return void next.close();
+  void apps.get(deploy.app)?.close();
   apps.set(deploy.app, next);
   connection.send({ type: 'deployed', app: deploy.app, url: `http://localhost:${PORT}/${deploy.app}/` });
 }
@@ -52,7 +52,7 @@ function disconnected(connection: DeployerConnection): void {
   for (const [name, app] of apps) {
     if (app.connection !== connection) continue;
     apps.delete(name);
-    app.close();
+    void app.close();
   }
 }
 
