@@ -13,10 +13,6 @@
       "category": "by-design",
       "reason": "Temporal is off (--no-harmony-temporal) until it's audited: it exposes the host time zone. See the roadmap's security section; skipped."
     },
-    "no-modules": {
-      "category": "by-design",
-      "reason": "Guest code runs as scripts; ES modules come with deployments (roadmap). Module tests and import() / import.meta need them; skipped."
-    },
     "no-create-realm": {
       "category": "environment",
       "reason": "$262.createRealm needs a second context in the isolate, which isolane doesn't give a guest. Skipped for feature cross-realm; listed for the tests that call it without the feature."
@@ -44,6 +40,10 @@
     "dev-allocation": {
       "category": "environment",
       "reason": "Development builds only (rusty_v8's prebuilt V8, no V8 sandbox): a multi-PiB ArrayBuffer length reaches the allocator and the worker dies (out of memory, or a V8 trap). With the V8 sandbox, V8 refuses lengths above the sandbox's maximum with a RangeError first; skipped in development builds."
+    },
+    "no-script-import": {
+      "category": "environment",
+      "reason": "import() from a classic script: isolane's scripts (run and eval) have no module graph to import from, so import() rejects there; programs (tenant.load) are modules, and their import() tests run. Skipped for script tests with the dynamic-import feature."
     }
   },
   "skip": {
@@ -53,18 +53,12 @@
       "Atomics.waitAsync": "no-shared-memory",
       "Atomics.pause": "no-shared-memory",
       "Temporal": "no-temporal",
-      "dynamic-import": "no-modules",
-      "import-attributes": "no-modules",
-      "import.meta": "no-modules",
-      "json-modules": "no-modules",
-      "top-level-await": "no-modules",
       "cross-realm": "no-create-realm",
       "host-gc-required": "no-host-gc",
       "IsHTMLDDA": "no-is-html-dda",
       "joint-iteration": "v8-unshipped"
     },
     "flags": {
-      "module": "no-modules",
       "CanBlockIsTrue": "no-shared-memory",
       "CanBlockIsFalse": "no-shared-memory"
     },

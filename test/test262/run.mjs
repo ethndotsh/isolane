@@ -161,8 +161,14 @@ for (const path of files) {
   if (filter && !path.includes(filter)) continue;
   const src = readFileSync(join(root, 'test', path), 'utf8');
   const meta = frontmatter(src);
-  const modes = meta.flags.includes('raw') || meta.flags.includes('noStrict') ? ['sloppy'] : meta.flags.includes('onlyStrict') ? ['strict'] : ['sloppy', 'strict'];
-  const rule = skipPaths[path] ?? meta.flags.map((f) => skipFlags[f]).find(Boolean) ?? meta.features.map((f) => skipFeatures[f]).find(Boolean);
+  // A module test runs once (modules are strict), as a program.
+  const isModule = meta.flags.includes('module');
+  const modes = isModule || meta.flags.includes('onlyStrict') ? ['strict'] : meta.flags.includes('raw') || meta.flags.includes('noStrict') ? ['sloppy'] : ['sloppy', 'strict'];
+  const rule =
+    skipPaths[path] ??
+    meta.flags.map((f) => skipFlags[f]).find(Boolean) ??
+    meta.features.map((f) => skipFeatures[f]).find(Boolean) ??
+    (!isModule && meta.features.includes('dynamic-import') ? 'no-script-import' : undefined);
   if (rule) {
     skipped[rule] = (skipped[rule] ?? 0) + modes.length;
     continue;
@@ -220,13 +226,53 @@ function program(run) {
 // Plain ECMAScript, as test262 expects: the web platform's globals off.
 const options = { eval: true, web: false, limits: { timeoutMs: 20_000 } };
 
+// A module test is a program: the test, the fixtures it imports
+// (relative specifiers that name files beside it, followed through the
+// fixtures), and a main module that imports the test and exports how to
+// wait for an async test. The harness is a setup shim, so its functions
+// are globals, as test262 expects.
+const MAIN = 't262-main.mjs';
+
+function moduleFiles(path) {
+  const files = {};
+  const pending = [path];
+  while (pending.length) {
+    const at = pending.pop();
+    if (at in files || at.startsWith('..')) continue;
+    const full = join(root, 'test', at);
+    if (!existsSync(full) || !statSync(full).isFile()) continue;
+    const text = readFileSync(full, 'utf8');
+    files[at] = text;
+    for (const m of text.matchAll(/['"](\.\.?\/[^'"\n]+)['"]/g)) pending.push(join(dirname(at), m[1]).split('\\').join('/'));
+  }
+  return files;
+}
+
+async function runModule(tenant, run) {
+  const { meta, path } = run;
+  const harnessParts = [HOST, harness('assert.js'), harness('sta.js')];
+  if (meta.flags.includes('async')) harnessParts.push(harness('doneprintHandle.js'));
+  for (const inc of meta.includes) harnessParts.push(harness(inc));
+  if (meta.negative?.phase === 'runtime' && meta.negative.type === 'Test262Error') harnessParts.push(NAME_T262_ERROR);
+  const files = { ...moduleFiles(path), [MAIN]: `import './${path}';\nexport const wait = () => globalThis.__t262_async;\n` };
+  const loaded = await tenant.load(
+    { main: MAIN, files },
+    { ...options, shims: { setup: { code: harnessParts.join('\n'), filename: 'harness.js' } }, instances: { max: 1 } },
+  );
+  try {
+    return meta.flags.includes('async') ? await loaded.call('wait') : undefined;
+  } finally {
+    await loaded.close();
+  }
+}
+
 /** Run one test in one mode; returns { status: PASS|FAIL|TIMEOUT|CRASH, message }. */
 async function runOne(run, lane) {
   const tenant = `test262-${lane}`;
   const since = mark();
   const neg = run.meta.negative;
   try {
-    const value = await runtime.tenant(tenant).run(program(run), options);
+    const value = run.meta.flags.includes('module') ? await runModule(runtime.tenant(tenant), run) : await runtime.tenant(tenant).run(program(run), options);
     if (neg) return { status: 'FAIL', message: `expected ${neg.phase} ${neg.type}, but it completed` };
     if (run.meta.flags.includes('async') && value !== 'Test262:AsyncTestComplete') return { status: 'FAIL', message: String(value) };
     return { status: 'PASS' };
