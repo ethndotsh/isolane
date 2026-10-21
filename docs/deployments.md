@@ -1,8 +1,9 @@
 # isolane: deployments research
 
-Status: research, October 2026. Nothing here is built. This document
-surveys how other platforms load and run tenant code, works out what that
-means for isolane's architecture, proposes an API to replace the
+Status: research, October 2026, with the warm setup decided (section 5).
+`isolate.call`, the invoke primitive, is built; programs are not. This
+document surveys how other platforms load and run tenant code, works out
+what that means for isolane's architecture, proposes an API to replace the
 `tenant.deploy()` sketch in the roadmap, and lays out a build order. It is
 step 4 of the order of work in `docs/roadmap.md`.
 
@@ -25,11 +26,11 @@ that:
 - compile caches, so that a new isolate for already-seen code skips parsing
   and compiling.
 
-The serverless example works around the gap today. The app defines a
-global `handle(request)`, and the platform appends an `after` shim that
-builds a `Request`, calls `handle`, and returns the `Response` as plain data
-(`examples/serverless/src/invoke.ts`). Each request gets a fresh isolate,
-and the app's code is parsed and compiled again every time.
+The serverless example worked around the gap with an `after` shim that
+built a `Request`, called the app's global `handle`, and returned the
+`Response` as plain data, in a fresh isolate per request, so the app's code
+was parsed and compiled again every time. With `isolate.call` it now keeps
+one warm isolate per deploy (`examples/serverless/src/warm.ts`).
 
 ## 2. Survey
 
@@ -328,7 +329,7 @@ const program = await tenant.load({
 });
 
 const response = await program.fetch(request);
-await program.call('scheduled', { cron: '*/5 * * * *', scheduledTime: Date.now() });
+await program.call('scheduled', [{ cron: '*/5 * * * *', scheduledTime: Date.now() }]);
 program.usage();
 await program.close();
 ```
@@ -336,7 +337,7 @@ await program.close();
 `load` compiles and evaluates the program once, so syntax, resolution, and
 top-level errors surface there. It resolves to a `Program`, an immutable
 loaded program with a pool of instances. `fetch` is a preset for the common
-`fetch(request, env, ctx)` handler. `call(name, ...args)` calls any
+`fetch(request, env, ctx)` handler. `call(name, args)` calls any
 exported handler. A new version is another `load`, and the host swaps
 references and closes the old program, which waits for in-flight calls.
 The name follows Cloudflare's Worker Loader (`env.LOADER.load()`), the most
@@ -383,7 +384,7 @@ host platform. The pieces fit the existing vocabulary:
 |---|---|
 | Load code for a tenant | `tenant.load(source, options)` → `Program` |
 | One-off call, fresh isolate | `tenant.run(source, { call })` (classic scripts keep `run(code)`) |
-| Call a handler | `program.call(name, ...args)`, `isolate.call(name, ...args)` |
+| Call a handler | `program.call(name, args, options)`, `isolate.call(name, args, options)` |
 | HTTP preset | `program.fetch(request)`, `isolate.fetch(request)` |
 | Usage | `program.usage()` (a slice of `tenant.usage()`) |
 | End | `program.close()` (drains), `[Symbol.asyncDispose]` |
@@ -396,6 +397,105 @@ or import attributes (`with { type: 'json' }`, `'text'`, `'bytes'`). A
 prebuilt bundle is a one-file tree with an optional `.map` beside it.
 
 ## 5. Lifecycle
+
+### Decisions (October 2026)
+
+The warm setup was settled after the survey:
+
+1. `tenant.load()` is warm by default. A program's instances are reused
+   across calls; `instances: { reuse: false }` opts out. Fresh-per-call
+   execution stays what `tenant.run()` is.
+2. Setup does no I/O, as on Workers. A program's top-level code (its module
+   evaluation, including top-level `await`) may not use `fetch`,
+   `connect()`, `fs`, or host functions: each fails at once with a guest
+   `Error` whose `code` is `ERR_SETUP_IO`, and the error says that I/O is
+   allowed only inside handlers. The rule keeps cold starts bounded by CPU
+   alone and makes a load's outcome independent of the network. Clients
+   that connect lazily, as postgres.js does on its first query, still get a
+   warm connection: it is opened by the first invoke and reused by later
+   ones on the same instance.
+3. A call stopped part-way, by `timeoutMs`, `cpuMs`, its signal, or running
+   out of memory, retires its instance, because the program's state may be
+   half-updated. A handler that throws keeps it. Stateful isolates follow
+   the same rule (built: an eval stopped part-way retires its isolate, and
+   its later evals fail with `ERR_ISOLATE_RETIRED`).
+4. A call finishes when the handler's returned promise settles, not when
+   the event loop is idle. Work the handler leaves running continues as
+   background work under `backgroundMs` (built, as for evals).
+   `ctx.waitUntil(promise)` marks work that `close()` and eviction wait
+   for, and reports its rejection through `onGuestError`.
+5. `env` is readable at module scope through
+   `import { env } from 'isolane:env'`, as Workers offers
+   `import { env } from 'cloudflare:workers'`, as well as being the second
+   argument of `fetch`. It lands with ES modules.
+6. `isolate.call` lands first (built), and the serverless example moves to
+   it.
+
+### Setup
+
+Setup is everything an instance runs before it can serve: the web platform
+from the snapshot, host functions and globals, the embedder's `setup`
+shims, and then the program's own top-level code. It happens once per
+instance, under its own budget: `startupCpuMs` (default 1,000) and the
+isolate's `timeoutMs` for wall time. Its I/O ban (decision 2) is enforced in
+the worker: the brokers and host functions check a per-isolate "in setup"
+flag and refuse while it is set. If setup fails, `load` rejects with
+`err.guest` pointing at the failing line when it is the first instance;
+for a later instance, the call that needed it fails with the same error,
+and repeated failures mark the program unhealthy, so later calls fail fast
+until it is loaded again.
+
+Classic-script isolates have no such split: a stateful isolate's first
+`eval` is both its setup and an ordinary eval, and may do I/O. The ban
+applies to programs only.
+
+### Invoke
+
+An invoke is one call of a handler on an instance. It is a protocol
+message of its own, `call { vm, req, name, args }`, not an eval: nothing
+is compiled. For a program it goes through these steps:
+
+1. Pick an instance: a free warm one, else a new one up to `max`, else
+   queue for at most `queueMs`, else fail with `ERR_LIMIT`. At the default
+   `concurrency` of 1, an instance runs one call at a time.
+2. Start the call's budget: the clock advances, and `cpuMs`, `wallMs`,
+   `hostCalls`, and `logBytes` count per call, as they do per eval.
+3. Find the handler: a named export called `name`, then a method of the
+   default export, with the default export as `this`. That covers
+   `export default { fetch }`, Hono apps, and plain exported functions. A
+   name that resolves to neither fails with `ERR_HANDLER_NOT_FOUND`.
+4. Call it with the arguments as data, in the host-call wire format (JSON
+   values, and bytes at the top level). `fetch` is a preset that builds a
+   guest `Request` and calls `fetch(request, env, ctx)`.
+5. Finish when the handler's returned promise settles (decision 4), and
+   free the instance for the next call.
+6. Return the result, checked by an optional `returns` schema, or for
+   `fetch` a host `Response`. A handler that throws rejects with
+   `ERR_GUEST_EXCEPTION` and `err.guest`.
+
+`isolate.call(name, args, options)` is that message on a stateful isolate,
+built ahead of programs. For a classic script, step 3 looks for an own
+property of the global object that is a function (a function declaration,
+or one assigned to `globalThis`); `let` and `const` bindings are not found,
+and neither are inherited properties or isolane's own `__isolane_*`
+functions. Steps 2 and 4 to 6 are as above, and the `before` and `after`
+shims run around the call as around an eval. The signature takes the
+arguments as an array, not as rest parameters, because a trailing options
+object would otherwise be indistinguishable from a final argument; this
+also mirrors `Function.prototype.apply` and keeps the options in the same
+position as `eval(code, options)`. The `beforeCall` and `afterCall` hooks
+and the `call` event observe calls.
+
+### Instance health
+
+An instance stays in service until one of these retires it: a call stopped
+part-way (decision 3), `heapBytes`, `backgroundMs`, worker recycling, a
+quarantine, or `idleMs` eviction. A retired instance is closed by the
+worker as soon as the stopped call's result is sent, so calls queued
+behind it fail with `ERR_ISOLATE_RETIRED`; for a program they are instead
+routed to another instance. A handler's own exception, an unhandled
+rejection reported through `onGuestError`, a schema mismatch, and a refused
+host call all leave the instance in service.
 
 ### Loading
 
@@ -414,15 +514,14 @@ once one instance is ready, or only after the compile check when `min` is
 An instance is an isolate that has evaluated the program. The
 `instances` options describe the policy:
 
-- `reuse: false` (the default, matching today's `run`): each call gets a
-  fresh instance, made from the code cache and evaluated anew. Module state
-  never carries over. This is Fastly's and Supabase `oneshot`'s position,
-  and the safe default when one tenant serves its own end users.
-- `reuse: true`: instances are kept warm and serve call after call, so
-  module state persists, as on Workers. `min` instances are kept ready,
-  `max` caps them, and `idleMs` evicts idle ones. An instance is also
-  retired by the existing rules: a limit hit, `heapBytes`, `backgroundMs`,
-  worker recycling, and quarantine.
+- `reuse: true` (the default, decision 1): instances are kept warm and
+  serve call after call, so module state persists, as on Workers. `min`
+  instances are kept ready, `max` caps them, and `idleMs` evicts idle ones.
+  Instances are retired as "Instance health" describes.
+- `reuse: false`: each call gets a fresh instance, made from the code cache
+  and evaluated anew. Module state never carries over. This is Fastly's and
+  Supabase `oneshot`'s position, for a tenant whose end users must not
+  share state.
 - `concurrency` (only with `reuse`, default 1): calls that may run in one
   instance at once. At 1, a call waits for a free instance or a new one,
   up to `max`, then queues up to `queueMs`, like Supabase's
@@ -434,7 +533,7 @@ instances are busy without asking the worker.
 
 ### Calls and their arguments
 
-`call(name, ...args)` sends arguments in the host-call wire format: JSON
+`call(name, args)` sends arguments in the host-call wire format: JSON
 values with top-level bytes. When binary frames are extended to nested
 values (planned, section 5 of the roadmap), arguments become structured
 data. The handler is the named export, or a method of the default export
@@ -468,28 +567,42 @@ per tenant, `queueMs`, and `bodyBytes`.
 
 ### The serverless example
 
-The example's own deploy protocol stays its own. On a deploy message the
-platform calls `tenant.load({ main, files })` with `reuse: true` and keeps
-the `Program` in its app table. Each HTTP request becomes
-`program.fetch(request)`. A redeploy loads the new tree, swaps the table
-entry, and closes the old program. The `INVOKE` shim and its `Outcome`
-schema go away. The deployer's watch mode keeps working unchanged, and
-redeploys of an unchanged file reuse the cache by hash.
+The example's own deploy protocol stays its own. Today, with
+`isolate.call`, a deploy creates one stateful isolate for the app, whose
+`setup` shim installs a small adapter (`__platform_serve`) once, and
+evaluates the app's code there; each HTTP request is
+`isolate.call('__platform_serve', [incoming, body])`, which builds the
+`Request`, calls `handle`, and returns the `Response` as data. A deploy
+whose code fails to load is reported to the deployer and the running
+version keeps serving; a redeploy swaps the app table entry and closes the
+old isolate once its requests finish; a request stopped by a limit retires
+the isolate, and the next request loads the app again. Warm requests take
+about 1.5 to 2 ms on the dev build, against about 13 ms for the cold first
+one.
+
+With programs, a deploy will call `tenant.load({ main, files })` and keep
+the `Program` in the app table. Each HTTP request becomes
+`program.fetch(request)`, the adapter shim and its `Outcome` schema go
+away, and redeploys of an unchanged file reuse the cache by hash.
 
 ## 6. Build plan
 
+0. `isolate.call` on classic scripts, the retirement of isolates whose
+   eval was stopped part-way, and the serverless example on one warm
+   isolate per deploy. Done.
 1. ES modules and `Program`, for single files. A single-file source is
    compiled as a module with `import.meta.url` set to its path.
-   `tenant.load`, `program.call` and `program.close` land, with
-   `isolate.call` underneath and `reuse: false` only. The `startupCpuMs`
-   limit, filenames in errors, and `programLoad` events come with it.
-   The serverless example moves to `call('fetch', ...)` on buffered data.
+   `tenant.load`, `program.call` and `program.close` land on `isolate.call`,
+   with one warm instance (`reuse: true`, `max: 1`) and `reuse: false`.
+   The setup I/O ban, `isolane:env`, the `startupCpuMs` limit, filenames in
+   errors, and `programLoad` events come with it. The serverless example
+   moves to `call('fetch', ...)` on buffered data.
 2. Multi-file programs: in-worker resolution with `oxc_resolver` over the
    tree, JSON, text, and bytes modules through synthetic modules, dynamic
    `import()`, TypeScript type stripping, and the `modules` and
    `moduleBytes` limits.
-3. Warm instances and `fetch`: `reuse`, `min`, `max`, `idleMs`, and
-   `queueMs`, with supervisor routing. `program.fetch` with buffered
+3. Warm pools and `fetch`: `min`, `max`, `idleMs`, and `queueMs`, with
+   supervisor routing. `program.fetch` with buffered
    bodies, `env` with host functions mounted, and `ctx.waitUntil`. The
    serverless example switches to `export default { fetch }`.
 4. Caches: per-worker code cache by content hash, a per-tenant compiled

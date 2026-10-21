@@ -44,7 +44,7 @@ Agreed October 2026:
    - code and wasm caches;
    - shims.
    The API shape is open: `tenant.deploy()` reads oddly, so find a better surface first.
-   Researched (October 2026): `docs/deployments.md` surveys other platforms and recommends `tenant.load()` returning a `Program` (`call`, `fetch`, `close`), with `isolate.call` and `isolate.fetch` beneath it, plus a six-phase build plan. Awaiting a decision before building.
+   Researched (October 2026): `docs/deployments.md` surveys other platforms and recommends `tenant.load()` returning a `Program` (`call`, `fetch`, `close`), with `isolate.call` and `isolate.fetch` beneath it, plus a six-phase build plan. The warm setup was decided in October 2026 (`docs/deployments.md`, section 5): `tenant.load()` is warm by default (`instances: { reuse: false }` opts out); setup does no I/O (`ERR_SETUP_IO`, as on Workers); a call stopped part-way retires its instance, and stateful isolates follow the same rule (done); a call finishes when its handler's promise settles, with what it leaves running as background work and `ctx.waitUntil` for work `close()` waits for; `env` is readable at module scope through `isolane:env`; and `isolate.call` lands first (done, with the serverless example on one warm isolate per deploy).
 5. **Soon after, in no fixed order**:
    - the security gates (Fuzzilli, Temporal audit, external review);
    - more limits and worker recycling;
@@ -374,8 +374,11 @@ in `patches/deno-*.patch`, applied by `scripts/vendor-deno.sh`.
 | Resolve the worker binary automatically (per-platform optional package) instead of `ISOLANE_WORKER` | done (`ts/worker-binary.ts`) |
 | Standard Schema (Zod, Valibot, ArkType, ...) for host functions (`hostFunction({ args, result, fn })`: guest arguments validated before `fn` runs, results validated before they reach the guest, parameter types inferred) and for eval results (`run`/`eval` `{ result }`, typed; `ERR_INVALID_RESULT`) | done |
 | Standard Schema everywhere else a user defines a shape: deployment entrypoint inputs/outputs and `env`, `globals`, host-function errors, `sockets`/`fetch` message bodies where useful; generate guest-side `.d.ts` from host-function schemas (via JSON Schema) so guest code type-checks against its host API | planned |
-| `vm.call(name, ...args)` for stateful isolates (call an exported/global function with schema-checked args) | idea |
-| **Deployments with user-defined entrypoints** (Workers-style, customizable): `tenant.deploy(code, { entrypoints: ['fetch', 'scheduled', 'onMessage', ...] })` evaluates the module once (its "cold start": top-level code, user-defined init), then `deployment.invoke(name, ...args)` calls an exported handler in a warm isolate. Host-defined handler names and argument shapes (`fetch(request, env, ctx)` is just one preset); warm-isolate pool per deployment with `minWarm`/`maxIsolates`/`idleMs`; `isolation: 'per-invoke' \| 'reuse'` (reuse keeps module state between invocations, like Workers); cold-start hooks (`onColdStart`); V8 code cache per deployment so re-creating an isolate skips parsing | planned |
+| `isolate.call(name, args, { returns, signal })` for stateful isolates: a `call` protocol message (protocol 6) that invokes a global function with arguments as data, nothing compiled, budgeted as an eval; top-level bytes both ways; `ERR_HANDLER_NOT_FOUND`; `beforeCall`/`afterCall` hooks and the `call` event | done |
+| An eval or call stopped part-way (`timeoutMs`, `cpuMs`, its signal) retires its isolate; the worker reports it in the result and the supervisor frees the isolate at once | done |
+| An eval whose signal aborted while it waited for the worker to start is stopped (the abort was missed before) | done |
+| Programs (`tenant.load()`): ES modules, the setup I/O ban (`ERR_SETUP_IO`), `isolane:env`, `startupCpuMs`, warm instances by default, then pools, `fetch` with `env` and `ctx.waitUntil`, caches (`docs/deployments.md`, section 6) | planned |
+| (Superseded by programs, `tenant.load()`, above.) **Deployments with user-defined entrypoints** (Workers-style, customizable): `tenant.deploy(code, { entrypoints: ['fetch', 'scheduled', 'onMessage', ...] })` evaluates the module once (its "cold start": top-level code, user-defined init), then `deployment.invoke(name, ...args)` calls an exported handler in a warm isolate. Host-defined handler names and argument shapes (`fetch(request, env, ctx)` is just one preset); warm-isolate pool per deployment with `minWarm`/`maxIsolates`/`idleMs`; `isolation: 'per-invoke' \| 'reuse'` (reuse keeps module state between invocations, like Workers); cold-start hooks (`onColdStart`); V8 code cache per deployment so re-creating an isolate skips parsing | planned |
 
 ### Web conformance pass (done, except the URL parser decision)
 
@@ -571,7 +574,8 @@ Linux 2-core $0.006/min, Linux arm64 2-core $0.005/min, macOS $0.062/min.
 | Item | Status |
 |---|---|
 | Serverless platform (`examples/serverless`): deployers connect over a WebSocket, deploy guest code, and serve its host functions from their own process; each app is a tenant, each request a fresh isolate; console streams back. ~2.4 ms per warm request including two remote host calls (dev build, macOS) | done |
-| Serverless example, next: `export default { fetch(request) }` handlers with spec Request/Response (after WinterTC phase 3); warm isolates; deployer auth; deploy persistence | planned |
+| Serverless example: one warm isolate per deploy, each request an `isolate.call`; load failures reported to the deployer while the running version keeps serving | done |
+| Serverless example, next: `export default { fetch(request) }` handlers on programs (`program.fetch`); a pool so an app's requests run in parallel; deployer auth; deploy persistence | planned |
 
 ## 9. What we're borrowing
 
