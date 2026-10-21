@@ -292,11 +292,11 @@ test('close() waits for running calls, and refuses new and queued ones', async (
   assert.equal(await running, 150);
   await closed;
   assert.equal(program.usage().instances, 0);
-  // await using closes it too.
-  {
-    await using disposable = await load('export const f = () => 2;');
-    assert.equal(await disposable.call('f'), 2);
-  }
+  // Symbol.asyncDispose (what `await using` calls; Node 22 lacks the syntax) closes it too.
+  const disposable = await load('export const f = () => 2;');
+  assert.equal(await disposable.call('f'), 2);
+  await disposable[Symbol.asyncDispose]();
+  await assert.rejects(disposable.call('f'), code('ERR_PROGRAM_CLOSED'));
 });
 
 test('usage counts calls, failures, loads, and CPU', async (t) => {
