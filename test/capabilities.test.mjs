@@ -1,21 +1,22 @@
-// Network and fs brokers, and the guest-side prelude, without a worker: the
-// prelude runs in a node:vm context whose host functions cross a JSON
-// boundary as they would over the protocol. The context has a stand-in for
-// the web platform: TextEncoder/TextDecoder, a minimal fetch over the
-// broker (WEB_FETCH below) where the real one is runtime/fetch.js, tested
-// end to end in web.test.mjs, and the real runtime/fs.js on a stand-in for
-// the bootstrap it's given.
+// Network and fs brokers, and the guest-side prelude, without a worker. The
+// fetch and connect brokers are called directly, as the web platform's
+// fetch (runtime/fetch.js) and Sockets API (runtime/sockets.js) call them,
+// both tested end to end in web.test.mjs and sockets.test.mjs. The prelude
+// runs in a node:vm context whose host functions cross a JSON boundary as
+// they would over the protocol, with TextEncoder/TextDecoder standing in
+// for the web platform and the real runtime/fs.js on a stand-in for the
+// bootstrap it's given.
 import { test, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
-import { createServer } from 'node:http';
 import { createServer as createTcpServer } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import vm from 'node:vm';
 import { splitBytes } from '../dist/binary.js';
-import { capabilities, connectBroker, isPublicAddress } from '../dist/capabilities.js';
+import { capabilities, connectBroker, fetchBroker, isPublicAddress } from '../dist/capabilities.js';
 import { parseWorkerMessage } from '../dist/worker.js';
+import { base } from './http-server.mjs';
 
 /**
  * How a value crosses the protocol: bytes as bytes (top-level byte
@@ -48,50 +49,6 @@ const limitsHit = [];
 const NO_REPORT = { denied: () => {}, limit: () => {} };
 const reporter = { denied: (api, target, reason) => denials.push({ api, target, reason }), limit: (limit, message) => limitsHit.push({ limit, message }) };
 
-/**
- * The web platform's fetch hook, minimally: Headers, Response (whole bodies),
- * and fetch() over the raw broker function the prelude hands it.
- */
-const WEB_FETCH = String.raw`(rawFetch) => {
-  const g = globalThis;
-  const encoder = new TextEncoder();
-  const decoder = new TextDecoder();
-  const toBytes = (data) => (ArrayBuffer.isView(data) ? new Uint8Array(data.buffer, data.byteOffset, data.byteLength) : encoder.encode(String(data)));
-  class Headers {
-    #map = new Map();
-    constructor(init) {
-      if (init == null) return;
-      const pairs = init instanceof Headers ? [...init] : Array.isArray(init) ? init : Object.entries(init);
-      for (const [k, v] of pairs) this.append(k, v);
-    }
-    append(k, v) {
-      k = String(k).toLowerCase();
-      this.#map.set(k, this.#map.has(k) ? this.#map.get(k) + ', ' + v : String(v));
-    }
-    get(k) { return this.#map.get(String(k).toLowerCase()) ?? null; }
-    *[Symbol.iterator]() { yield* this.#map; }
-  }
-  class Response {
-    #body;
-    constructor(r, body) {
-      Object.assign(this, { status: r.status, ok: r.status >= 200 && r.status < 300, url: r.url, redirected: r.redirected, headers: new Headers(r.headers) });
-      this.#body = body;
-      this.bodyUsed = false;
-    }
-    text() { this.bodyUsed = true; return Promise.resolve(decoder.decode(this.#body)); }
-    json() { return this.text().then(JSON.parse); }
-  }
-  let next = 1;
-  g.fetch = async (url, init = {}) => {
-    const id = next++;
-    const body = init.body == null ? undefined : toBytes(init.body);
-    const head = await rawFetch('open', id, { url: String(url), method: String(init.method ?? 'GET'), headers: [...new Headers(init.headers)] }, body);
-    const chunks = [];
-    for (let chunk; (chunk = await rawFetch('read', id)) !== null; ) chunks.push(...chunk);
-    return new Response(head, new Uint8Array(chunks));
-  };
-}`;
-
 /** runtime/fs.js's `createFs`, with what it uses of the web platform's bootstrap. */
 const WEB_FS = String.raw`((__bootstrap) => (
 ${readFileSync(new URL('../runtime/fs.js', import.meta.url), 'utf8').trim().replace(/;$/, '')}
@@ -121,7 +78,6 @@ function guest(policies, track) {
   const caps = capabilities({ globals: {}, ...policies }, new Set(), reporter);
   track?.(caps);
   const ctx = vm.createContext({ TextEncoder, TextDecoder });
-  ctx.__isolane_web_fetch = vm.runInContext(WEB_FETCH, ctx);
   const createFs = vm.runInContext(WEB_FS, ctx);
   ctx.__isolane_web_fs = (raw) => (ctx.fs = createFs(raw));
   const GuestError = vm.runInContext('Error', ctx);
@@ -146,25 +102,22 @@ function guest(policies, track) {
 
 // ---- network ----
 
-const server = createServer((req, res) => {
-  const chunks = [];
-  req.on('data', (c) => chunks.push(c));
-  req.on('end', () => {
-    const body = Buffer.concat(chunks);
-    if (req.url === '/json') return res.writeHead(200, { 'content-type': 'application/json', 'x-a': '1' }).end('{"hi":"wörld"}');
-    if (req.url === '/echo') return res.writeHead(200).end(JSON.stringify({ method: req.method, headers: req.headers, body: body.toString('base64') }));
-    if (req.url === '/big') return res.writeHead(200).end(Buffer.alloc(2048));
-    if (req.url === '/to-json') return res.writeHead(302, { location: '/json' }).end();
-    if (req.url === '/to-echo') return res.writeHead(307, { location: '/echo' }).end();
-    if (req.url === '/to-other-origin') return res.writeHead(307, { location: `http://127.0.0.1:${server.address().port}/echo` }).end();
-    if (req.url === '/to-evil') return res.writeHead(302, { location: 'http://evil.example/' }).end();
-    if (req.url === '/slow') return setTimeout(() => res.end('late'), 2000);
-    res.writeHead(404).end('nope');
-  });
-});
-await new Promise((r) => server.listen(0, '127.0.0.1', r));
-after(() => server.close());
-const base = `http://localhost:${server.address().port}`;
+/**
+ * fetch() over the broker, as runtime/fetch.js drives it: `open` with the
+ * request's head and whole body, then `read` until the body ends. Resolves
+ * with the response's head and its body as text.
+ */
+function brokerFetch(policy) {
+  const { fn } = fetchBroker(policy, reporter);
+  let next = 1;
+  return async (url, { method = 'GET', headers = {}, body } = {}) => {
+    const id = next++;
+    const head = await fn('open', id, { url, method, headers: Object.entries(headers) }, body === undefined ? undefined : Buffer.from(body));
+    const chunks = [];
+    for (let chunk; (chunk = await fn('read', id)) !== null; ) chunks.push(chunk);
+    return { ...head, headers: new Headers(head.headers), text: Buffer.concat(chunks).toString() };
+  };
+}
 const local = { hosts: ['localhost:*'], privateNetworks: true };
 
 test('public and non-public addresses', () => {
@@ -174,85 +127,82 @@ test('public and non-public addresses', () => {
   }
 });
 
-test('fetch: text, json, status, headers', async () => {
-  const run = guest({ fetch: local });
-  assert.deepEqual(
-    await run(`const r = await fetch('${base}/json'); return [r.status, r.ok, r.headers.get('X-A'), (await r.json()).hi, r.bodyUsed];`),
-    [200, true, '1', 'wörld', true],
-  );
-  assert.deepEqual(await run(`const r = await fetch('${base}/missing'); return [r.status, r.ok, await r.text()];`), [404, false, 'nope']);
+test('fetch: status, headers, body', async () => {
+  const fetch = brokerFetch(local);
+  const r = await fetch(`${base}/json`);
+  assert.deepEqual([r.status, r.headers.get('X-A'), JSON.parse(r.text).hi, r.redirected], [200, '1', 'wörld', false]);
+  const missing = await fetch(`${base}/missing`);
+  assert.deepEqual([missing.status, missing.text], [404, 'nope']);
 });
 
 test('fetch: request bodies and headers cross intact, and the broker controls Host', async () => {
-  const run = guest({ fetch: local });
-  const out = await run(`
-    const bytes = new Uint8Array([0, 255, 128, 10]);
-    const r = await fetch('${base}/echo', { method: 'post', headers: { 'X-Thing': 'é', Host: 'evil.example' }, body: bytes });
-    const s = await r.json();
-    return [s.method, s.headers['x-thing'], s.headers.host, s.body];`);
-  assert.deepEqual(out.slice(0, 2), ['POST', 'é']);
-  assert.match(out[2], /^localhost:\d+$/);
-  assert.equal(out[3], Buffer.from([0, 255, 128, 10]).toString('base64'));
-  const text = await run(`const r = await fetch('${base}/echo', { method: 'PUT', body: 'héllo 🌍' }); return (await r.json()).body;`);
+  const fetch = brokerFetch(local);
+  const r = await fetch(`${base}/echo`, { method: 'POST', headers: { 'x-thing': 'é', host: 'evil.example' }, body: new Uint8Array([0, 255, 128, 10]) });
+  const s = JSON.parse(r.text);
+  assert.deepEqual([s.method, s.headers['x-thing']], ['POST', 'é']);
+  assert.match(s.headers.host, /^localhost:\d+$/);
+  assert.equal(s.body, Buffer.from([0, 255, 128, 10]).toString('base64'));
+  const text = JSON.parse((await fetch(`${base}/echo`, { method: 'PUT', body: 'héllo 🌍' })).text).body;
   assert.equal(Buffer.from(text, 'base64').toString(), 'héllo 🌍');
 });
 
 test('fetch: a bare host allows only its scheme\'s default port', async () => {
   const port = new URL(base).port;
-  await assert.rejects(guest({ fetch: { hosts: ['localhost'], privateNetworks: true } })(`await fetch('${base}/json')`), /not allowed by the fetch policy/);
+  await assert.rejects(brokerFetch({ hosts: ['localhost'], privateNetworks: true })(`${base}/json`), /not allowed by the fetch policy/);
   for (const hosts of [[`localhost:${port}`], ['localhost:*']]) {
-    assert.equal(await guest({ fetch: { hosts, privateNetworks: true } })(`return (await fetch('${base}/json')).status`), 200, hosts[0]);
+    assert.equal((await brokerFetch({ hosts, privateNetworks: true })(`${base}/json`)).status, 200, hosts[0]);
   }
-  await assert.rejects(guest({ fetch: { hosts: ['localhost:1'], privateNetworks: true } })(`await fetch('${base}/json')`), /not allowed by the fetch policy/);
-  await assert.rejects(guest({ fetch: { hosts: ['api.example.com'] } })(`await fetch('https://api.example.com:8443/')`), /not allowed by the fetch policy/);
+  await assert.rejects(brokerFetch({ hosts: ['localhost:1'], privateNetworks: true })(`${base}/json`), /not allowed by the fetch policy/);
+  await assert.rejects(brokerFetch({ hosts: ['api.example.com'] })('https://api.example.com:8443/'), /not allowed by the fetch policy/);
 });
 
 test('fetch: hosts outside the allowlist are refused', async () => {
-  const run = guest({ fetch: { hosts: ['api.example.com', '*.example.org'] } });
-  await assert.rejects(run(`await fetch('${base}/json')`), /not allowed by the fetch policy/);
-  await assert.rejects(run(`await fetch('https://example.org/')`), /not allowed by the fetch policy/);
-  await assert.rejects(run(`await fetch('file:///etc/passwd')`), /not supported/);
+  const fetch = brokerFetch({ hosts: ['api.example.com', '*.example.org'] });
+  await assert.rejects(fetch(`${base}/json`), /not allowed by the fetch policy/);
+  await assert.rejects(fetch('https://example.org/'), /not allowed by the fetch policy/);
+  await assert.rejects(fetch('file:///etc/passwd'), /not supported/);
 });
 
 test('fetch: private addresses are refused unless allowed, even for allowed names', async () => {
-  const run = guest({ fetch: { hosts: ['localhost:*', '127.0.0.1:*', '169.254.169.254'] } });
-  await assert.rejects(run(`await fetch('${base}/json')`), /no public address/);
-  await assert.rejects(run(`await fetch('http://127.0.0.1:1/')`), /not a public address/);
-  await assert.rejects(run(`await fetch('http://169.254.169.254/latest/meta-data/')`), /not a public address/);
-  await assert.rejects(run(`await fetch('http://[::ffff:127.0.0.1]:1/')`), /not a public address/);
+  const fetch = brokerFetch({ hosts: ['localhost:*', '127.0.0.1:*', '169.254.169.254'] });
+  await assert.rejects(fetch(`${base}/json`), /no public address/);
+  await assert.rejects(fetch('http://127.0.0.1:1/'), /not a public address/);
+  await assert.rejects(fetch('http://169.254.169.254/latest/meta-data/'), /not a public address/);
+  await assert.rejects(fetch('http://[::ffff:127.0.0.1]:1/'), /not a public address/);
 });
 
 test('fetch: redirects are followed and re-checked', async () => {
-  const run = guest({ fetch: local });
-  assert.deepEqual(await run(`const r = await fetch('${base}/to-json'); return [r.redirected, r.url.endsWith('/json'), (await r.json()).hi];`), [true, true, 'wörld']);
-  await assert.rejects(run(`await fetch('${base}/to-evil')`), /evil\.example is not allowed/);
-  const kept = await run(`const r = await fetch('${base}/to-echo', { method: 'POST', body: 'x', headers: { authorization: 'secret' } }); return await r.json();`);
+  const fetch = brokerFetch(local);
+  const r = await fetch(`${base}/to-json`);
+  assert.deepEqual([r.redirected, r.url.endsWith('/json'), JSON.parse(r.text).hi], [true, true, 'wörld']);
+  await assert.rejects(fetch(`${base}/to-evil`), /evil\.example is not allowed/);
+  const kept = JSON.parse((await fetch(`${base}/to-echo`, { method: 'POST', body: 'x', headers: { authorization: 'secret' } })).text);
   assert.equal(kept.method, 'POST'); // 307 keeps the method
   assert.equal(kept.headers.authorization, 'secret'); // same origin: credentials stay
-  const both = guest({ fetch: { hosts: ['localhost:*', '127.0.0.1:*'], privateNetworks: true } });
-  const moved = await both(`const r = await fetch('${base}/to-other-origin', { headers: { authorization: 'secret' } }); return await r.json();`);
+  const both = brokerFetch({ hosts: ['localhost:*', '127.0.0.1:*'], privateNetworks: true });
+  const moved = JSON.parse((await both(`${base}/to-other-origin`, { headers: { authorization: 'secret' } })).text);
   assert.equal(moved.headers.authorization, undefined); // another origin: dropped
 });
 
 test('fetch: limits', async () => {
-  await assert.rejects(guest({ fetch: { ...local, limits: { responseBytes: 1000 } } })(`await fetch('${base}/big')`), /larger than 1000 bytes/);
-  await assert.rejects(guest({ fetch: { ...local, methods: ['GET'] } })(`await fetch('${base}/echo', { method: 'DELETE' })`), /method DELETE is not allowed/);
-  await assert.rejects(guest({ fetch: { ...local, limits: { timeoutMs: 200 } } })(`await fetch('${base}/slow')`), /timed out/);
-  const counted = guest({ fetch: { ...local, limits: { requests: 1 } } });
-  await counted(`await fetch('${base}/json')`);
-  await assert.rejects(counted(`await fetch('${base}/json')`), /used its 1 requests/);
+  await assert.rejects(brokerFetch({ ...local, limits: { responseBytes: 1000 } })(`${base}/big`), /larger than 1000 bytes/);
+  await assert.rejects(brokerFetch({ ...local, methods: ['GET'] })(`${base}/echo`, { method: 'DELETE' }), /method DELETE is not allowed/);
+  await assert.rejects(brokerFetch({ ...local, limits: { timeoutMs: 200 } })(`${base}/slow`), /timed out/);
+  const counted = brokerFetch({ ...local, limits: { requests: 1 } });
+  await counted(`${base}/json`);
+  await assert.rejects(counted(`${base}/json`), /used its 1 requests/);
   assert.deepEqual(limitsHit.at(-1), { limit: 'fetch.limits.requests', message: 'fetch: this isolate has used its 1 requests (fetch.limits.requests)' });
   // Body bytes over the isolate's life, both ways, across fetches.
-  const moved = guest({ fetch: { ...local, limits: { transferBytes: 40 } } });
-  await moved(`await (await fetch('${base}/json')).text()`);
-  await assert.rejects(moved(`await (await fetch('${base}/big')).text()`), /moved its 40 bytes \(fetch.limits.transferBytes\)/);
-  await assert.rejects(guest({ fetch: { ...local, limits: { transferBytes: 4 } } })(`await fetch('${base}/echo', { method: 'POST', body: 'hello' })`), /fetch.limits.transferBytes/);
+  const moved = brokerFetch({ ...local, limits: { transferBytes: 40 } });
+  await moved(`${base}/json`);
+  await assert.rejects(moved(`${base}/big`), /moved its 40 bytes \(fetch.limits.transferBytes\)/);
+  await assert.rejects(brokerFetch({ ...local, limits: { transferBytes: 4 } })(`${base}/echo`, { method: 'POST', body: 'hello' }), /fetch.limits.transferBytes/);
 });
 
 test('fetch: a policy function decides each hop', async () => {
   const seen = [];
-  const run = guest({ fetch: { hosts: (url, method) => (seen.push(`${method} ${url.pathname}`), url.pathname !== '/json'), privateNetworks: true } });
-  await assert.rejects(run(`await fetch('${base}/to-json')`), /not allowed/);
+  const fetch = brokerFetch({ hosts: (url, method) => (seen.push(`${method} ${url.pathname}`), url.pathname !== '/json'), privateNetworks: true });
+  await assert.rejects(fetch(`${base}/to-json`), /not allowed/);
   assert.deepEqual(seen, ['GET /to-json', 'GET /json']);
 });
 
@@ -445,7 +395,7 @@ test('policy names are reserved', () => {
 
 test('refusals are reported as policy denials', async () => {
   denials.length = 0;
-  await assert.rejects(guest({ fetch: { hosts: ['api.example.com'] } })(`await fetch('https://nope.example/x')`), /not allowed/);
+  await assert.rejects(brokerFetch({ hosts: ['api.example.com'] })('https://nope.example/x'), /not allowed/);
   const sockets = capabilities({ globals: {}, connect: { hosts: ['db.example.com:5432'] } }, new Set(), reporter);
   await assert.rejects(Promise.resolve(sockets.entries[0].run({}, ['open', { hostname: '10.0.0.1', port: 5432 }])), /not a public address/);
   await assert.rejects(guest({ fs: { root } })(`await fs.writeFile('/x', 'y')`), /read-only/);

@@ -2,11 +2,11 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
-import { createServer } from 'node:http';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { DEFAULT_LIMITS, Runtime } from '../dist/index.js';
 import { pool, T, code, isolate, strict } from './helpers.mjs';
+import { base } from './http-server.mjs';
 
 test('the clock is frozen while guest code runs', { skip: process.env.ISOLANE_DEV_INSECURE === '1' && 'the dev build has no clock patch' }, async () => {
   // A busy loop can't measure itself, by Date, Intl, or new Date().
@@ -71,24 +71,18 @@ test('eval: true opts in to eval and new Function', async () => {
 });
 
 test('fetch and fs policies reach the guest through the worker', async () => {
-  const server = createServer((req, res) => res.end(JSON.stringify({ path: req.url })));
-  await new Promise((r) => server.listen(0, '127.0.0.1', r));
   const dir = mkdtempSync(join(tmpdir(), 'isolane-root-'));
   writeFileSync(join(dir, 'a.txt'), 'from disk');
-  try {
-    const url = `http://localhost:${server.address().port}/hi`;
-    const fetch = { hosts: ['localhost:*'], privateNetworks: true };
-    assert.deepEqual(await pool.run(`fetch('${url}').then((r) => r.json())`, { ...T, fetch }), { path: '/hi' });
-    assert.equal(await pool.run(`fs.readFile('/a.txt', 'utf8')`, { ...T, fs: { root: dir } }), 'from disk');
-    assert.deepEqual(
-      await pool.run('[typeof fetch, typeof fs, typeof __isolane_fetch, typeof __isolane_fs]', { ...T, fetch, fs: { root: dir } }),
-      ['function', 'object', 'undefined', 'undefined'],
-    );
-    await assert.rejects(pool.run(`fetch('${url}')`, { ...T, fetch: { hosts: ['localhost:*'] } }), /no public address/);
-    await assert.rejects(pool.run(`fs.writeFile('/b.txt', 'x')`, { ...T, fs: { root: dir } }), /read-only/);
-  } finally {
-    server.close();
-  }
+  const url = `${base}/json`;
+  const fetch = { hosts: ['localhost:*'], privateNetworks: true };
+  assert.deepEqual(await pool.run(`fetch('${url}').then((r) => r.json())`, { ...T, fetch }), { hi: 'wörld' });
+  assert.equal(await pool.run(`fs.readFile('/a.txt', 'utf8')`, { ...T, fs: { root: dir } }), 'from disk');
+  assert.deepEqual(
+    await pool.run('[typeof fetch, typeof fs, typeof __isolane_fetch, typeof __isolane_fs]', { ...T, fetch, fs: { root: dir } }),
+    ['function', 'object', 'undefined', 'undefined'],
+  );
+  await assert.rejects(pool.run(`fetch('${url}')`, { ...T, fetch: { hosts: ['localhost:*'] } }), /no public address/);
+  await assert.rejects(pool.run(`fs.writeFile('/b.txt', 'x')`, { ...T, fs: { root: dir } }), /read-only/);
 });
 
 test('globals pass inputs without touching the code string', async () => {

@@ -2,7 +2,7 @@
 // to 4, end to end through a real worker. Needs ISOLANE_WORKER.
 import { test, after } from 'node:test';
 import assert from 'node:assert/strict';
-import { createServer } from 'node:http';
+import { base, hung } from './http-server.mjs';
 import { Runtime } from '../dist/index.js';
 
 const logs = [];
@@ -817,41 +817,6 @@ test('Blob.text() strips one UTF-8 byte order mark', async () => {
 
 // ---- fetch (phase 3) ----
 
-const opened = [];
-let closedEarly = 0;
-const server = createServer((req, res) => {
-  const chunks = [];
-  req.on('data', (c) => chunks.push(c));
-  req.on('end', () => {
-    const body = Buffer.concat(chunks);
-    if (req.url === '/json') return res.writeHead(200, { 'content-type': 'application/json', 'x-a': '1' }).end('{"hi":"wörld"}');
-    if (req.url === '/echo') {
-      return res.writeHead(200, { 'content-type': 'application/json' }).end(
-        JSON.stringify({ method: req.method, headers: req.headers, body: body.toString('base64') }),
-      );
-    }
-    if (req.url === '/redir') return res.writeHead(302, { location: '/json' }).end();
-    if (req.url === '/redir307') return res.writeHead(307, { location: '/echo' }).end();
-    if (req.url === '/no-content') return res.writeHead(204).end();
-    if (req.url === '/bytes') return res.end(Buffer.from([0, 1, 2, 254, 255]));
-    if (req.url === '/stream') {
-      res.write('one ');
-      setTimeout(() => res.write('two '), 30);
-      setTimeout(() => res.end('three'), 60);
-      return;
-    }
-    if (req.url === '/hang') {
-      opened.push(req.url);
-      res.write('start');
-      res.on('close', () => closedEarly++);
-      return; // never ends
-    }
-    res.writeHead(404).end('nope');
-  });
-});
-await new Promise((r) => server.listen(0, '127.0.0.1', r));
-after(() => server.close());
-const base = `http://localhost:${server.address().port}`;
 const NET = { fetch: { hosts: ['localhost:*'], privateNetworks: true }, limits: { timeoutMs: 5000 } };
 const fetchRun = (body, opts = {}) => run(`(async () => { ${body} })()`, { ...NET, ...opts });
 
@@ -926,7 +891,7 @@ test('fetch: a ReadableStream request body streams to the server', async () => {
       .then(() => 'ok', (e) => e.name);
     const big = await fetch('${base}/echo', { method: 'POST', body: new ReadableStream({ pull(c) { c.enqueue(new Uint8Array(1024)); } }), duplex: 'half' })
       .then(() => 'ok', (e) => [e.name, e.message]);
-    const redirected = await fetch('${base}/redir307', { method: 'POST', body: new ReadableStream({ start(c) { c.close(); } }), duplex: 'half' })
+    const redirected = await fetch('${base}/to-echo', { method: 'POST', body: new ReadableStream({ start(c) { c.close(); } }), duplex: 'half' })
       .then(() => 'ok', (e) => e.name);
     return [atob(r.body), r.headers['transfer-encoding'], r.headers['content-length'] ?? null, bad, big, redirected];`,
     { fetch: { ...NET.fetch, limits: { requestBytes: 8192 } } },
@@ -966,9 +931,9 @@ test('fetch: the response body streams', async () => {
 test('fetch: redirect modes', async () => {
   assert.deepEqual(
     await fetchRun(`
-      const follow = await fetch('${base}/redir');
-      const manual = await fetch('${base}/redir', { redirect: 'manual' });
-      const error = await fetch('${base}/redir', { redirect: 'error' }).catch((e) => e);
+      const follow = await fetch('${base}/to-json');
+      const manual = await fetch('${base}/to-json', { redirect: 'manual' });
+      const error = await fetch('${base}/to-json', { redirect: 'error' }).catch((e) => e);
       return [follow.status, follow.redirected, follow.url.endsWith('/json'), manual.status, manual.headers.get('location'),
         error instanceof TypeError];`),
     [200, true, true, 302, '/json', true],
@@ -976,7 +941,7 @@ test('fetch: redirect modes', async () => {
 });
 
 test('fetch: aborting cancels the request at the broker', async () => {
-  const before = closedEarly;
+  const before = hung.closedEarly;
   assert.deepEqual(
     await fetchRun(`
       const early = new AbortController();
@@ -992,8 +957,8 @@ test('fetch: aborting cancels the request at the broker', async () => {
     ['AbortError', 'AbortError'],
   );
   // The broker's connection to the server is gone.
-  for (let i = 0; i < 50 && closedEarly === before; i++) await new Promise((r) => setTimeout(r, 20));
-  assert.equal(closedEarly, before + 1);
+  for (let i = 0; i < 50 && hung.closedEarly === before; i++) await new Promise((r) => setTimeout(r, 20));
+  assert.equal(hung.closedEarly, before + 1);
 });
 
 test('fetch: the fetch policy still decides, and failures are TypeErrors', async () => {

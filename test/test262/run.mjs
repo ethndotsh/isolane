@@ -25,12 +25,11 @@
 // proposal in test262's features.txt: those tests don't run, and count in
 // their reason's category.
 
-import { execFileSync } from 'node:child_process';
 import { existsSync, readFileSync, readdirSync, statSync, writeFileSync } from 'node:fs';
 import { availableParallelism, tmpdir } from 'node:os';
 import { dirname, join, relative } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { Runtime } from '../../dist/index.js';
+import { UNCLASSIFIED, args, gateRuntime, inLanes, pct, problemLines, problems as gateProblems, sparseCheckout, writeReports } from '../gate.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
 // The commit V8's DEPS pins for test/test262/data, so V8's own
@@ -43,15 +42,7 @@ const DIRS = ['built-ins', 'language', 'annexB', 'intl402'];
 
 // ---- arguments ----
 
-const argv = process.argv.slice(2);
-const opt = (name) => {
-  const i = argv.indexOf(name);
-  return i < 0 ? undefined : argv.splice(i, 2)[1];
-};
-const has = (name) => {
-  const i = argv.indexOf(name);
-  return i >= 0 && argv.splice(i, 1).length > 0;
-};
+const { opt, has, rest } = args();
 const verbose = has('--verbose');
 const update = has('--update');
 const concurrency = Number(opt('--concurrency') ?? Math.min(8, availableParallelism()));
@@ -60,10 +51,7 @@ const reportPath = opt('--report');
 const summaryPath = opt('--summary');
 const expectationsPath = opt('--expectations') ?? join(here, 'expectations.json');
 let root = opt('--test262');
-if (argv.length) {
-  console.error(`unknown arguments: ${argv.join(' ')}`);
-  process.exit(2);
-}
+rest();
 
 // ---- the test262 checkout ----
 
@@ -74,33 +62,10 @@ if (existsSync(v8Deps)) {
   if (pinned && pinned !== TEST262_COMMIT) console.error(`warning: V8's DEPS pins test262 ${pinned}, the runner ${TEST262_COMMIT}; V8's known failures may not match`);
 }
 
-function retry(what, f) {
-  for (let attempt = 1; ; attempt++) {
-    try {
-      return f();
-    } catch (e) {
-      if (attempt === 5) throw e;
-      console.error(`${what} failed (attempt ${attempt}); retrying in ${attempt * 20}s`);
-      execFileSync('sleep', [String(attempt * 20)]);
-    }
-  }
-}
-
 const sparse = () => ['/harness', '/features.txt', ...DIRS.map((d) => `/test/${d}`)];
 if (!root) {
   root = process.env.ISOLANE_TEST262_DIR ?? join(tmpdir(), `isolane-test262-${TEST262_COMMIT.slice(0, 12)}`);
-  if (!existsSync(join(root, 'harness/assert.js'))) {
-    retry('cloning test262', () => {
-      execFileSync('rm', ['-rf', root]);
-      execFileSync('git', ['clone', '-q', '--filter=blob:none', '--no-checkout', 'https://github.com/tc39/test262.git', root]);
-    });
-    execFileSync('git', ['-C', root, 'sparse-checkout', 'set', '--no-cone', ...sparse()]);
-    retry('checking out test262', () => execFileSync('git', ['-C', root, 'checkout', '-q', TEST262_COMMIT]));
-  } else {
-    const have = new Set(execFileSync('git', ['-C', root, 'sparse-checkout', 'list'], { encoding: 'utf8' }).split('\n'));
-    const missing = sparse().filter((d) => !have.has(d));
-    if (missing.length) retry('extending the test262 checkout', () => execFileSync('git', ['-C', root, 'sparse-checkout', 'add', ...missing]));
-  }
+  sparseCheckout({ name: 'test262', repo: 'https://github.com/tc39/test262.git', commit: TEST262_COMMIT, root, paths: sparse(), marker: 'harness/assert.js' });
 }
 
 // ---- tests ----
@@ -170,25 +135,15 @@ const skipFlags = Object.assign(Object.create(null), expectations.skip?.flags);
 
 // Development builds (rusty_v8's prebuilt V8: no V8 sandbox) differ from
 // the real worker in a few tests, which skip.devBuild lists by path.
-const crashes = [];
-const runtime = new Runtime({
-  strict: process.env.ISOLANE_STRICT === '1',
-  quarantineMs: null,
-  hooks: { onSecurityEvent: (e) => crashes.push(e) },
-});
+const { runtime, mark, crashed } = gateRuntime();
 const devBuild = !(await runtime.isolationReport()).sandboxEnabled;
 const skipPaths = Object.assign(Object.create(null), devBuild ? expectations.skip?.devBuild : undefined);
 const CATEGORIES = ['by-design', 'draft', 'v8', 'environment', 'bug'];
 
-const problems = [];
-const problem = (kind, key, detail) => problems.push({ kind, key, detail });
-if (expectations.test262Commit !== TEST262_COMMIT && !update) {
-  problem('commit', expectationsPath, `expectations are for test262 ${expectations.test262Commit}, the runner pins ${TEST262_COMMIT}`);
-}
-for (const [id, r] of Object.entries(reasons)) {
-  if (id === 'unclassified') continue;
-  if (!CATEGORIES.includes(r.category) || !r.reason) problem('reason', id, `reason "${id}" needs a category (${CATEGORIES.join(', ')}) and a reason`);
-}
+const gate = gateProblems(CATEGORIES);
+const { list: problems, problem } = gate;
+if (!update) gate.commit(expectationsPath, expectations.test262Commit, TEST262_COMMIT, 'test262');
+gate.reasons(reasons);
 for (const [what, rules] of [['feature', skipFeatures], ['flag', skipFlags], ['path', expectations.skip?.devBuild ?? {}]]) {
   for (const [name, why] of Object.entries(rules)) if (!reasons[why]) problem('reason', `${what} ${name}`, `skip rule names undefined reason "${why}"`);
 }
@@ -268,7 +223,7 @@ const options = { eval: true, web: false, limits: { timeoutMs: 20_000 } };
 /** Run one test in one mode; returns { status: PASS|FAIL|TIMEOUT|CRASH, message }. */
 async function runOne(run, lane) {
   const tenant = `test262-${lane}`;
-  const crashesBefore = crashes.length;
+  const since = mark();
   const neg = run.meta.negative;
   try {
     const value = await runtime.tenant(tenant).run(program(run), options);
@@ -276,8 +231,8 @@ async function runOne(run, lane) {
     if (run.meta.flags.includes('async') && value !== 'Test262:AsyncTestComplete') return { status: 'FAIL', message: String(value) };
     return { status: 'PASS' };
   } catch (e) {
-    const crash = crashes.slice(crashesBefore).find((c) => c.tenant === tenant);
-    if (crash) return { status: 'CRASH', message: `${crash.kind}: ${crash.detail ?? ''}`.slice(0, 300) };
+    const crash = crashed(tenant, since);
+    if (crash) return { status: 'CRASH', message: crash };
     if (e.code === 'ERR_LIMIT' && e.limit === 'timeoutMs') return { status: 'TIMEOUT', message: e.message };
     const name = e.guest?.name;
     if (neg && e.code === 'ERR_GUEST_EXCEPTION' && name === neg.type) return { status: 'PASS' };
@@ -288,19 +243,13 @@ async function runOne(run, lane) {
 
 const started = Date.now();
 const results = {}; // path → { mode → result }
-let next = 0;
 let finished = 0;
 const progress = setInterval(() => console.error(`test262: ${finished} of ${runs.length}`), 30_000);
 try {
-  await Promise.all(
-    Array.from({ length: concurrency }, async (_, lane) => {
-      while (next < runs.length) {
-        const run = runs[next++];
-        (results[run.path] ??= {})[run.mode] = await runOne(run, lane);
-        finished++;
-      }
-    }),
-  );
+  await inLanes(runs, concurrency, runOne, (run, result) => {
+    (results[run.path] ??= {})[run.mode] = result;
+    finished++;
+  });
 } finally {
   clearInterval(progress);
   runtime.close();
@@ -367,7 +316,7 @@ if (update) {
     unclassified += ids.filter((w) => w === 'unclassified').length;
     out.files[path] = failing.length === Object.keys(modes).length && ids.every((w) => w === ids[0]) ? ids[0] : whys;
   }
-  if (unclassified) out.reasons.unclassified = { category: 'unclassified', reason: 'New since the last update: read the test and classify it.' };
+  if (unclassified) out.reasons.unclassified = UNCLASSIFIED;
   else delete out.reasons.unclassified;
   writeFileSync(expectationsPath, JSON.stringify(out, null, 2) + '\n');
   console.error(`wrote ${expectationsPath} (${Object.keys(out.files).length} tests with expected failures, ${unclassified} unclassified)`);
@@ -379,7 +328,6 @@ const skippedRuns = Object.values(skipped).reduce((a, b) => a + b, 0);
 const total = tally.runs + skippedRuns;
 const excluded = tally.expected['by-design'] + tally.expected.draft;
 const applicable = total - excluded;
-const pct = (n, d) => (d ? `${((100 * n) / d).toFixed(1)}%` : 'n/a');
 const report = {
   test262Commit: TEST262_COMMIT,
   devBuild,
@@ -397,8 +345,6 @@ const report = {
   problemCount: problems.length,
   ...(verbose ? { results } : {}),
 };
-if (reportPath) writeFileSync(reportPath, JSON.stringify(report, null, 2) + '\n');
-
 const lines = [
   `### test262 (${TEST262_COMMIT.slice(0, 12)}${devBuild ? ', development build' : ''})`,
   '',
@@ -415,14 +361,7 @@ const lines = [
     .map(([id, n]) => `| ${id} (${reasons[id]?.category ?? '?'}) | ${n} |`),
   '',
 ];
-if (problems.length) {
-  lines.push(`**${problems.length} problems**:`, '');
-  for (const p of problems.slice(0, 100)) lines.push(`- ${p.kind}: \`${p.key}\`${p.detail ? `: ${p.detail}` : ''}`);
-  lines.push('');
-} else lines.push('No problems: every test matches its expectation.', '');
-lines.push(`${seconds.toFixed(0)} s.`);
-const summary = lines.join('\n') + '\n';
-if (summaryPath) writeFileSync(summaryPath, summary, { flag: 'a' });
-console.log(summary);
+lines.push(...problemLines(problems, { none: 'No problems: every test matches its expectation.', limit: 100 }), '', `${seconds.toFixed(0)} s.`);
+writeReports({ reportPath, report, summaryPath, lines, append: true });
 
 process.exit(update || !problems.length ? 0 : 1);

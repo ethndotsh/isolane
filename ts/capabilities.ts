@@ -17,6 +17,7 @@ export type { FsPolicy } from './brokers/fs.js';
 export type { BrokerReporter } from './brokers/net.js';
 // For tests, which drive the brokers directly.
 export { connectBroker } from './brokers/connect.js';
+export { fetchBroker } from './brokers/fetch.js';
 export { fsBroker } from './brokers/fs.js';
 export { isPublicAddress } from './brokers/net.js';
 

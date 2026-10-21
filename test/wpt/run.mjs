@@ -21,14 +21,14 @@
 // --update rewrites the expectations from this run, keeping existing
 // reasons; new entries get the reason "unclassified", which the gate
 // refuses until someone classifies them.
-import { execFileSync, spawn } from 'node:child_process';
+import { spawn } from 'node:child_process';
 import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { createServer } from 'node:http';
 import { createServer as createNetServer } from 'node:net';
 import { tmpdir } from 'node:os';
 import { dirname, join, posix, relative } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { Runtime } from '../../dist/index.js';
+import { UNCLASSIFIED, args, gateRuntime, inLanes, pct, problemLines, problems as gateProblems, sparseCheckout, writeReports } from '../gate.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
 export const WPT_COMMIT = 'c47791d69da614474168c0f6c1ad9a1dbd0cf0d3';
@@ -75,15 +75,7 @@ const STATIC_ALIASES = { '/resources/WebIDLParser.js': '/resources/webidl2/lib/w
 
 // ---- arguments ----
 
-const argv = process.argv.slice(2);
-const opt = (name) => {
-  const i = argv.indexOf(name);
-  return i < 0 ? undefined : argv.splice(i, 2)[1];
-};
-const has = (name) => {
-  const i = argv.indexOf(name);
-  return i >= 0 && argv.splice(i, 1).length > 0;
-};
+const { opt, has, rest } = args();
 const verbose = has('--verbose');
 const update = has('--update');
 const staticMode = has('--static');
@@ -93,42 +85,14 @@ const reportPath = opt('--report');
 const summaryPath = opt('--summary');
 const expectationsPath = opt('--expectations') ?? join(here, 'expectations.json');
 let root = opt('--wpt');
-if (argv.length) {
-  console.error(`unknown arguments: ${argv.join(' ')}`);
-  process.exit(2);
-}
+rest();
 
 // ---- the WPT checkout ----
-
-function retry(what, f) {
-  for (let attempt = 1; ; attempt++) {
-    try {
-      return f();
-    } catch (e) {
-      if (attempt === 5) throw e;
-      console.error(`${what} failed (attempt ${attempt}); retrying in ${attempt * 20}s`);
-      execFileSync('sleep', [String(attempt * 20)]);
-    }
-  }
-}
 
 const sparse = () => [...SUPPORT, ...DIRS.map((d) => `/${d}`)];
 if (!root) {
   root = process.env.ISOLANE_WPT_DIR ?? join(tmpdir(), `isolane-wpt-${WPT_COMMIT.slice(0, 12)}`);
-  if (!existsSync(join(root, 'resources/testharness.js'))) {
-    retry('cloning WPT', () => {
-      execFileSync('rm', ['-rf', root]);
-      execFileSync('git', ['clone', '-q', '--filter=blob:none', '--no-checkout', 'https://github.com/web-platform-tests/wpt.git', root]);
-    });
-    execFileSync('git', ['-C', root, 'sparse-checkout', 'set', '--no-cone', ...sparse()]);
-    retry('checking out WPT', () => execFileSync('git', ['-C', root, 'checkout', '-q', WPT_COMMIT]));
-  } else {
-    // Patterns the cached checkout wasn't made with (a directory can exist
-    // with only the single files an earlier DIRS listed in it).
-    const have = new Set(execFileSync('git', ['-C', root, 'sparse-checkout', 'list'], { encoding: 'utf8' }).split('\n'));
-    const missing = sparse().filter((d) => !have.has(d));
-    if (missing.length) retry('extending the WPT checkout', () => execFileSync('git', ['-C', root, 'sparse-checkout', 'add', ...missing]));
-  }
+  sparseCheckout({ name: 'WPT', repo: 'https://github.com/web-platform-tests/wpt.git', commit: WPT_COMMIT, root, paths: sparse(), marker: 'resources/testharness.js' });
 }
 
 // ---- servers ----
@@ -339,13 +303,7 @@ const TEST_STATUS = ['PASS', 'FAIL', 'TIMEOUT', 'NOTRUN', 'PRECONDITION_FAILED']
 const HARNESS_STATUS = ['OK', 'ERROR', 'TIMEOUT', 'PRECONDITION_FAILED'];
 
 const server = staticMode ? await startStatic() : await startWptserve();
-const crashes = [];
-const runtime = new Runtime({
-  strict: process.env.ISOLANE_STRICT === '1',
-  defaults: { limits: { idleMs: 5000 } },
-  quarantineMs: null,
-  hooks: { onSecurityEvent: (e) => crashes.push(e) },
-});
+const { runtime, mark, crashed } = gateRuntime({ defaults: { limits: { idleMs: 5000 } } });
 
 /** Fetch a script the way the test page would (wptserve substitutes .sub.js). */
 async function getScript(path, base) {
@@ -365,7 +323,7 @@ async function getScript(path, base) {
 async function runOne(run, lane) {
   const testUrl = `${server.origin}/${run.rel}${run.variant}`;
   const tenant = `wpt-${lane}`;
-  const crashesBefore = crashes.length;
+  const since = mark();
   let isolate;
   let step = 'create';
   try {
@@ -408,8 +366,8 @@ async function runOne(run, lane) {
     }
     return { status: HARNESS_STATUS[outcome.status], message: outcome.message ?? undefined, subtests };
   } catch (e) {
-    const crash = crashes.slice(crashesBefore).find((c) => c.tenant === tenant);
-    if (crash) return { status: 'CRASH', message: `${crash.kind}: ${crash.detail ?? ''}`.slice(0, 300), subtests: {} };
+    const crash = crashed(tenant, since);
+    if (crash) return { status: 'CRASH', message: crash, subtests: {} };
     const status = e.code === 'ERR_LIMIT' && e.limit === 'timeoutMs' ? 'TIMEOUT' : 'ERROR';
     return { status, message: `${step}: ${e.code ?? ''} ${e.message}`.slice(0, 300), subtests: {} };
   } finally {
@@ -419,16 +377,8 @@ async function runOne(run, lane) {
 
 const started = Date.now();
 const results = {};
-let next = 0;
 try {
-  await Promise.all(
-    Array.from({ length: concurrency }, async (_, lane) => {
-      while (next < runs.length) {
-        const run = runs[next++];
-        results[run.key] = await runOne(run, lane);
-      }
-    }),
-  );
+  await inLanes(runs, concurrency, runOne, (run, result) => (results[run.key] = result));
 } finally {
   runtime.close();
   server.stop();
@@ -449,14 +399,10 @@ function expectedSubtests(entry) {
   return out;
 }
 
-const problems = [];
-const problem = (kind, key, detail) => problems.push({ kind, key, detail });
-if (expectations.wptCommit !== WPT_COMMIT && !update) problem('commit', expectationsPath, `expectations are for WPT ${expectations.wptCommit}, the runner pins ${WPT_COMMIT}`);
-
-for (const [id, r] of Object.entries(reasons)) {
-  if (id === 'unclassified') continue;
-  if (!CATEGORIES.includes(r.category) || !r.reason) problem('reason', id, `reason "${id}" needs a category (${CATEGORIES.join(', ')}) and a reason`);
-}
+const gate = gateProblems(CATEGORIES);
+const { list: problems, problem } = gate;
+if (!update) gate.commit(expectationsPath, expectations.wptCommit, WPT_COMMIT, 'WPT');
+gate.reasons(reasons);
 
 // Tally: passes, and expected non-passes by category.
 const tally = { subtests: 0, pass: 0, expected: Object.fromEntries(CATEGORIES.map((c) => [c, 0])), unexpected: 0, files: Object.keys(results).length, skippedFiles: skipped.length };
@@ -533,7 +479,7 @@ if (update) {
     for (const w of [entry.why, ...whys]) if (w === 'unclassified') unclassified++;
     out.files[key] = entry;
   }
-  if (unclassified) out.reasons.unclassified = { category: 'unclassified', reason: 'New since the last update: read the test and classify it.' };
+  if (unclassified) out.reasons.unclassified = UNCLASSIFIED;
   else delete out.reasons.unclassified;
   writeFileSync(expectationsPath, JSON.stringify(out, null, 2) + '\n');
   console.error(`wrote ${expectationsPath} (${Object.keys(out.files).length} files with expected failures, ${unclassified} unclassified)`);
@@ -543,7 +489,6 @@ if (update) {
 
 const excluded = tally.expected['by-design'] + tally.expected.draft + tally.expected['browser-only'];
 const applicable = tally.subtests - excluded;
-const pct = (n, d) => (d ? `${((100 * n) / d).toFixed(1)}%` : 'n/a');
 const bugs = Object.entries(reasons)
   .filter(([id, r]) => r.category === 'bug' && byReason[id])
   .map(([id, r]) => ({ id, subtests: byReason[id], reason: r.reason, tracking: r.tracking }));
@@ -565,8 +510,6 @@ const report = {
   problemCount: problems.length,
   ...(verbose ? { results } : {}),
 };
-if (reportPath) writeFileSync(reportPath, JSON.stringify(report, null, 2) + '\n');
-
 const lines = [
   `### web-platform-tests (WPT ${WPT_COMMIT.slice(0, 12)}, ${report.server})`,
   '',
@@ -582,16 +525,10 @@ if (bugs.length) {
   for (const b of bugs) lines.push(`- \`${b.id}\` (${b.subtests}): ${b.reason}${b.tracking ? ` (${b.tracking})` : ''}`);
   lines.push('');
 }
-if (problems.length) {
-  lines.push(`**${problems.length} problems** (the gate fails):`, '');
-  for (const p of problems.slice(0, 50)) lines.push(`- ${p.kind}: \`${p.key}\`${p.detail ? ` — ${p.detail}` : ''}`);
-  if (problems.length > 50) lines.push(`- … and ${problems.length - 50} more (see the JSON report)`);
-} else lines.push('No problems: every subtest matches its expectation.');
-const markdown = lines.join('\n') + '\n';
-if (summaryPath) writeFileSync(summaryPath, markdown);
-console.log(markdown);
+lines.push(...problemLines(problems, { none: 'No problems: every subtest matches its expectation.' }));
+writeReports({ reportPath, report, summaryPath, lines });
 
 // --static can't run the tests that need wptserve, so it reports but
 // doesn't gate; --update reports what it wrote.
-const gate = !staticMode && !update;
-process.exit(gate && problems.length ? 1 : 0);
+const gated = !staticMode && !update;
+process.exit(gated && problems.length ? 1 : 0);
