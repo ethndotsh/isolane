@@ -98,8 +98,9 @@ Programs, `tenant.load()`, build warm pools on this primitive.
 
 ### Programs
 
-`tenant.load(source, options?)` loads a program: `source` is an ES module,
-and the program's calls invoke its exports. It resolves to a `Program` once
+`tenant.load(source, options?)` loads a program: `source` is an ES module's
+code, or `{ main, files }` for a program of several files (see
+[Modules](#modules)), and the program's calls invoke its exports. It resolves to a `Program` once
 the first instance (an isolate that has evaluated the module) is ready, so
 a syntax error or an exception in the module's top-level code rejects
 `load` itself, with `err.guest` saying where.
@@ -124,10 +125,12 @@ await program.close();
 ```
 
 The options are an isolate's configuration for the instances (`limits`,
-`web`, `fetch`, `hooks`, and the rest), and three of the program's own:
+`web`, `fetch`, `hooks`, and the rest), and the program's own:
 
-- `filename`: the main module's path, its name in stack traces. Default
-  `main.js`.
+- `filename`: for a single-module source, its path, and its name in stack
+  traces. Default `main.js`.
+- `modules`, `ts`, `jsx`, `define`: how its modules resolve and compile
+  (see [Modules](#modules)).
 - `env`: a JSON object, which the module imports as
   `import { env } from 'isolane:env'`. The `host` functions are mounted in
   it (`env.db.getUser`) instead of on the global.
@@ -155,7 +158,6 @@ It runs under `limits.startupCpuMs` (default 1 s, Linux) in place of
 `load` rejects with `ERR_SETUP_IO` (kind `guest`). Timers work, and clients
 that connect lazily, on their first query, keep their connection from call
 to call. The clock advances when setup starts and when each call starts.
-A module can import only `isolane:env` for now; `import()` is refused.
 
 Each call is an eval, as for `isolate.call`. A handler that throws rejects
 with `ERR_GUEST_EXCEPTION`, and its instance stays in service. A call
@@ -169,6 +171,111 @@ and closes the instances; `await using` does the same. Events from a
 program's instances (`call`, `log`, `limit`, `guestError`, `policyDenial`)
 carry its `program` id, and `programLoad` (`onProgramLoad`) reports each
 instance's load, with `durationMs` and, if it failed, `error`.
+
+#### Modules
+
+A program of several files names its entry and gives every file by path:
+
+```js
+const program = await tenant.load({
+  main: 'src/index.ts',
+  files: {
+    'src/index.ts': `import { route } from './routes'; ...`,
+    'src/routes.ts': '...',
+    'src/messages.json': '{ "hello": "hi" }',
+    'node_modules/hono/package.json': '...',
+    'node_modules/hono/dist/index.js': '...',
+  },
+});
+```
+
+Paths are relative (`src/index.ts`, with no `.` or `..` segments) and
+become the modules' names in stack traces; a file is a string or a
+`Uint8Array`. The worker resolves every import over these files and
+nothing else, with `oxc_resolver`: relative specifiers, with or without
+their extension (`./routes` finds `routes.ts`, and `./routes.js` names
+`routes.ts` as TypeScript's convention has it), and bare specifiers from
+`node_modules`, by a package's `exports` and `imports`, matching the
+conditions `workerd`, `worker`, `browser`, `import`, and `default` in that
+order (as bundlers for Workers do), then its `browser`, `module`, and
+`main` fields. Packages must be ES modules; CommonJS needs bundling first.
+An import that resolves to nothing, a Node.js built-in (`node:fs`), or a
+URL fails the load with a TypeError that names the importing file.
+`import()` works for the program's files and the built-in modules, during
+setup and in calls; scripts run with `run` and `eval` still can't import.
+`import.meta.url` is the module's path as a `file:` URL.
+
+Files that aren't JavaScript import as data: a `.json` file (or any file
+`with { type: 'json' }`) as its parsed value, any file
+`with { type: 'text' }` as a string, and `with { type: 'bytes' }` as a
+`Uint8Array`, each as the default export.
+
+TypeScript (`.ts`, `.mts`, `.tsx`) is compiled in the worker with oxc.
+By default its types are stripped and nothing else changes, as Node.js
+does it: syntax with runtime behaviour (enums, namespaces with values,
+parameter properties, `import =`, `export =`) fails the load with a
+SyntaxError at that line, which suggests the alternative,
+`ts: { mode: 'transform' }`, which compiles that syntax too, and, with
+`experimentalDecorators` (and `emitDecoratorMetadata`), legacy decorators.
+Types are not checked. JSX (`.jsx`, `.tsx`) uses the automatic runtime
+from `react/jsx-runtime` in the program's files unless
+`jsx: { importSource }` names another package; `jsx: { runtime: 'classic',
+factory, fragment }` calls a factory instead. `define` replaces
+compile-time constants in every module, as esbuild's does:
+`define: { 'process.env.NODE_ENV': '"production"' }`, where each value is
+JSON or an identifier or member expression.
+
+Errors point at the original files. A transformed module keeps a source
+map, and so does a bundle that has one, from a `//# sourceMappingURL=`
+comment (a `data:` URL or a path in the program) or a `.map` file beside
+it: stacks in `err.guest`, `onGuestError`, and logs, and the locations of
+syntax errors, are mapped back to the sources before the worker reports
+them. (The guest's own `error.stack` keeps V8's positions.)
+
+The `modules` option resolves specifiers to something else. A path
+(`'node:fs': './shims/fs.js'`) aliases a specifier to one of the
+program's files; another specifier (`pg: 'postgres'`) is resolved in its
+place; and an object of host functions makes a module the guest imports
+them from, as named exports and together as the default:
+
+```js
+await tenant.load(source, {
+  modules: {
+    'node:events': './shims/events.js',
+    'isolane:kv': { get: (key) => store.get(key), put: (key, value) => store.set(key, value) },
+  },
+});
+// in the program: import { get } from 'isolane:kv';
+```
+
+Host modules' functions are host functions in every other way (hooks,
+schemas, limits, and the setup rule against I/O). Two modules are built
+in: `isolane:env`, and `cloudflare:sockets`, which exports the Sockets
+API's `connect` (one that throws without a `connect` policy), so
+libraries written for Workers, postgres.js among them, run unchanged.
+
+A prebuilt bundle is a one-file program, with its map beside it. To
+bundle for isolane, target ES modules and the worker conditions, as for
+Cloudflare Workers:
+
+```sh
+esbuild src/index.ts --bundle --format=esm --platform=neutral \
+  --conditions=workerd,worker,browser --main-fields=browser,module,main \
+  --sourcemap --outfile=dist/index.js
+```
+
+```js
+await tenant.load({ main: 'dist/index.js', files: { 'dist/index.js': code, 'dist/index.js.map': map } });
+```
+
+Rolldown takes the same settings (`platform: 'neutral'`,
+`resolve.conditionNames`). `limits.modules` (default 1,000) bounds the
+number of files and `limits.moduleBytes` (default 32 MiB) their size
+together. Parsing, resolving, and transforming all happen in the
+locked-down worker, on the instance's thread, so they count against
+`startupCpuMs` (or a call's `cpuMs`, for `import()` later), and the worker
+keeps what it transformed by content hash, so a program's later
+instances don't transform its files again.
 
 Runtime-only options: `workerPath` (default: the installed
 `@isolane/worker-*` package, or `$ISOLANE_WORKER`), `strict` (default
@@ -433,9 +540,11 @@ removed, Temporal off, the frozen clock, no code generation unless `eval`
 allows it), is checked against [test262](https://github.com/tc39/test262):
 `built-ins`, `language`, `annexB`, and `intl402`, about 50,000 tests, each
 run in non-strict and strict mode unless its flags say otherwise, for about
-100,400 runs. It's pinned to the commit V8's own sources pin, so V8's list
-of its known failures applies as is. **98.8% of the runs that apply pass**
-(80.1% of all of them; most of the rest are Temporal and module tests).
+99,600 runs. Module tests run once each, as programs: the test, the
+fixtures it imports, and the harness as a setup shim. It's pinned to the
+commit V8's own sources pin, so V8's list of its known failures applies as
+is. **97.5% of the runs that apply pass** (81.5% of all of them; most of
+the rest are Temporal tests).
 
 Every run that doesn't pass is listed in `test/test262/expectations.json`
 with a reason, or covered by a skip rule there (by feature, by flag, or, for
@@ -443,10 +552,10 @@ development builds only, by path):
 
 | Category | Runs | What it means |
 |---|---|---|
-| by-design | 17,380 | isolane's choices: no Temporal until it's audited (13,378), no ES modules yet (2,792; they come with deployments), no SharedArrayBuffer or Atomics (1,210) |
+| by-design | 14,588 | isolane's choices: no Temporal until it's audited (13,378), no SharedArrayBuffer or Atomics (1,210) |
 | draft | 1,662 | stage-3 proposals, from test262's own list |
 | v8 | 455 | V8's own: failures V8's test262 status lists for d8 too (291), and joint iteration (`Iterator.zip`), which V8 15.2 ships only behind a flag (164) |
-| environment | about 490 | host hooks isolane doesn't give a guest: `$262.createRealm` (a second realm), `$262.evalScript`, `$262.IsHTMLDDA`; and, in development builds only, 8 runs whose huge ArrayBuffer lengths kill a worker without the V8 sandbox |
+| environment | about 1,620 | host hooks isolane doesn't give a guest: `$262.createRealm` (a second realm), `$262.evalScript`, `$262.IsHTMLDDA`; `import()` from a classic script (1,134 runs: scripts have no module graph, and programs are modules); and, in development builds only, 8 runs whose huge ArrayBuffer lengths kill a worker without the V8 sandbox |
 | bug | 0 | |
 
 The applicable rate leaves out by-design and draft. Each run is a fresh
@@ -557,6 +666,7 @@ await acme.run(app.code, {
 | `backgroundMs` | 1 s per minute | isolate, work between evals (retires the isolate) |
 | `logBytes` / `logLineBytes` | 1 MiB / 16 KiB | isolate, per eval / per line (cut before it leaves V8) |
 | `codeBytes` / `resultBytes` | 16 MiB each | isolate, per eval (at most a frame, 64 MiB) |
+| `modules` / `moduleBytes` | 1,000 / 32 MiB | a program's files, and their size together (at most a frame) |
 | `pendingHostCalls` | 1,000 | isolate: async host calls waiting for replies at once |
 | `hostCalls` | 10,000 | isolate, per eval (isolane's own `fetch`, `connect`, and `fs` calls aside) |
 | `pendingHostCallBytes` | 16 MiB | isolate: bytes of host calls waiting for replies at once (held in your process) |
@@ -643,7 +753,7 @@ three effects:
 
 | Effect | Limits |
 |---|---|
-| The eval fails with `ERR_LIMIT` (`err.limit` names it) | `timeoutMs`, `cpuMs`, `startupCpuMs`, `heapBytes`, `backgroundMs`, `codeBytes`, `resultBytes`, `pendingHostCalls`, `hostCalls`, `pendingHostCallBytes`, `isolates`, `pendingEvals`, `workerMemoryBytes`, `tenants`, and a program's `instances.queueMs` |
+| The eval fails with `ERR_LIMIT` (`err.limit` names it) | `timeoutMs`, `cpuMs`, `startupCpuMs`, `heapBytes`, `backgroundMs`, `codeBytes`, `modules`, `moduleBytes`, `resultBytes`, `pendingHostCalls`, `hostCalls`, `pendingHostCallBytes`, `isolates`, `pendingEvals`, `workerMemoryBytes`, `tenants`, and a program's `instances.queueMs` |
 | The guest's operation fails, and the eval continues | `timers` (a `RangeError`), `decompressedBytes` (the stream errors), and the policies' limits, named by their path (`fetch.limits.requests`, `connect.limits.connections`, `fs.limits.writtenBytes`, ...) |
 | Output is cut | `logBytes`, `logLineBytes` |
 

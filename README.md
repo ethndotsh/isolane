@@ -40,7 +40,10 @@ A program's top-level code is its setup: it runs once per instance, under
 its own CPU budget, and can't do I/O, which belongs in its handlers.
 Instances serve one call at a time and keep module state between calls;
 the pool starts more as calls need them, queues calls when all are busy,
-and replaces an instance that a limit stopped. See
+and replaces an instance that a limit stopped. A program can be many
+files, `{ main, files }`, with packages under `node_modules`, TypeScript,
+JSX, and JSON; the worker resolves its imports over those files and
+compiles them, and errors point at the original sources. See
 [Programs](docs/guide.md#programs).
 
 ## Security model

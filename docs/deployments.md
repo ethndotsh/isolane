@@ -621,7 +621,11 @@ away, and redeploys of an unchanged file reuse the cache by hash.
 2. Multi-file programs: in-worker resolution with `oxc_resolver` over the
    tree, JSON, text, and bytes modules through synthetic modules, dynamic
    `import()`, TypeScript type stripping, and the `modules` and
-   `moduleBytes` limits.
+   `moduleBytes` limits. Done. `import()` runs in a microtask, so an
+   import made while the graph evaluates can't evaluate a module ahead of
+   its turn. Type stripping refuses syntax with runtime behaviour, as
+   Node.js does, rather than compiling it, and the worker keeps what it
+   transformed by content hash, so a program's later instances reuse it.
 3. `fetch`: `program.fetch` with buffered bodies, and `ctx.waitUntil`. The
    serverless example switches to `export default { fetch }`. (The pools
    and `env` landed in phase 1.)
@@ -631,7 +635,14 @@ away, and redeploys of an unchanged file reuse the cache by hash.
 5. Transforms and bundles: JSX and TypeScript transform mode through oxc,
    source maps for transformed code and supplied bundles, `isolane:`
    virtual modules backed by host functions, and the `modules` aliases for
-   shims.
+   shims. Done, with `define`, `cloudflare:sockets`, and test262's module
+   tests (run as programs with their fixtures). Host modules may use any
+   specifier, not only `isolane:` ones, so a program can be given
+   `node:events` or a package by name. The source maps apply to what the
+   worker reports (`err.guest`, logged errors, syntax-error locations); the
+   guest's own `error.stack` keeps V8's positions. Phases 2 and 5 left
+   phase 4 a seam: `module::compile` is where a code cache is consumed and
+   made.
 6. Later: streaming bodies both ways, `concurrency` above 1, deploy-time
    type checking, RPC stubs for functions passed as arguments, and a V8
    snapshot taken after module evaluation. That last one is the V8
