@@ -49,8 +49,9 @@ export class WarmApp {
 
   /** Load the app (its "cold start": its first instance evaluates it). Rejects if its code fails to load. */
   static async load(tenant: Tenant, deploy: Deploy, connection: DeployerConnection, origin: string): Promise<WarmApp> {
-    const program = await tenant.load(deploy.code, {
-      filename: 'app/index.ts',
+    // Under app/, so stack traces name the files as the deployer has them.
+    const files = Object.fromEntries(Object.entries(deploy.files).map(([path, code]) => [`app/${path}`, code]));
+    const program = await tenant.load({ main: `app/${deploy.main}`, files }, {
       web: { baseUrl: origin },
       host: remoteHost(deploy, connection),
       fetch: deploy.fetchHosts.length ? { hosts: deploy.fetchHosts } : undefined,

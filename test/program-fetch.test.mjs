@@ -262,3 +262,19 @@ test('instances options are checked', async () => {
     await assert.rejects(load('export function f() {}', { instances }), code('ERR_INVALID_CONFIG'), JSON.stringify(instances));
   }
 });
+
+test('a multi-file TypeScript program serves fetch, with errors pointing at its sources', async (t) => {
+  const program = await load(
+    {
+      main: 'src/index.ts',
+      files: {
+        'src/index.ts': `import { greet } from './greet';\nexport default {\n  async fetch(request: Request): Promise<Response> {\n    return new Response(greet(new URL(request.url).searchParams.get('who')));\n  },\n};\n`,
+        'src/greet.ts': `export function greet(who: string | null): string {\n  if (!who) throw new TypeError('who?');\n  return 'hello ' + who;\n}\n`,
+      },
+    },
+    { instances: { concurrency: 2 } },
+  );
+  t.after(() => program.close());
+  assert.equal(await (await program.fetch('https://example.com/?who=ada')).text(), 'hello ada');
+  await assert.rejects(program.fetch('https://example.com/'), (err) => code('ERR_GUEST_EXCEPTION')(err) && /src\/greet\.ts:2/.test(err.guest.stack));
+});

@@ -626,8 +626,9 @@ about 1.5 to 2 ms on the dev build, against about 13 ms for the cold first
 one.
 
 Since phase 3, the app is `export default { fetch(request, env, ctx) }`,
-a deploy calls `tenant.load(code)` and keeps the `Program` in the app
-table, and each HTTP request becomes `program.fetch(request)`, its body
+a deploy sends the app's TypeScript files as they are and the platform
+calls `tenant.load({ main, files })` (the worker strips the types, and
+errors point at the files), keeping the `Program` in the app table, and each HTTP request becomes `program.fetch(request)`, its body
 streamed from the socket into the request and bounded by `bodyBytes` (a
 413 past 1 MiB). The adapter and its `Outcome` schema are gone. Each app
 has up to two instances running eight requests each, since an app mostly

@@ -16,7 +16,9 @@ running after the response with `ctx.waitUntil`. It has the web platform,
 with relative URLs resolved against its own origin.
 
 Every app is a tenant, kept warm. Each app runs in its own sandboxed worker
-process. A deploy loads the app as a program (`tenant.load()`), and each
+process. A deploy sends the app's TypeScript files as they are, and the
+platform loads them as a program (`tenant.load({ main, files })`), whose
+worker strips their types, so errors point at lines in `app/`. Each
 HTTP request goes to it with `program.fetch(request)`. Its instances
 evaluate the module once and serve request after request, eight at a time
 in each of up to two instances, since an app mostly waits on its deployer.
@@ -37,7 +39,7 @@ untrusted, so the platform parses them with Zod schemas
 | `src/connection.ts` | One deployer's connection: remote host calls, timeouts, cancellation |
 | `src/protocol.ts` | The wire protocol, as schemas |
 | `src/host-api.ts` | The host API, shared by the deployer and the app |
-| `src/deployer.ts` | The deployer: strips the app's types, deploys it, serves the host API |
+| `src/deployer.ts` | The deployer: sends the app's files, serves the host API |
 | `app/index.ts`, `app/env.d.ts` | The app, and the host API as it sees it |
 
 ```sh

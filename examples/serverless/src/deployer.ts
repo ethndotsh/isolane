@@ -3,15 +3,13 @@
 //
 //   node src/deployer.ts [--watch] [ws://localhost:8787/connect]
 //
-// With --watch, saving app/index.ts deploys it again over the same
+// With --watch, saving a file in app/ deploys it again over the same
 // connection, so the next request runs the new code.
 //
-// The app is TypeScript: its types are stripped here, on the deployer's
-// machine, with Node's own stripper, which replaces them with whitespace,
-// so line numbers in the app's stack traces match app/index.ts.
+// The app is TypeScript, sent as it is: the platform's worker strips its
+// types (and errors still point at the lines in app/).
 
-import { readFileSync, watch } from 'node:fs';
-import { stripTypeScriptTypes } from 'node:module';
+import { readFileSync, readdirSync, watch } from 'node:fs';
 import type { HostApi, User } from './host-api.ts';
 import type { FromDeployer, ToDeployer } from './protocol.ts';
 
@@ -33,18 +31,21 @@ const host: HostApi = {
 
 const args = process.argv.slice(2);
 const watching = args.includes('--watch');
-const appFile = new URL('../app/index.ts', import.meta.url);
+const appDir = new URL('../app/', import.meta.url);
 const socket = new WebSocket(args.find((a) => !a.startsWith('--')) ?? 'ws://localhost:8787/connect');
 const send = (message: FromDeployer) => socket.send(JSON.stringify(message));
 
+/** The app's modules: its .ts files, without the type declarations (env.d.ts). */
+const isModule = (file: string) => file.endsWith('.ts') && !file.endsWith('.d.ts');
+
 function deploy(): void {
-  let code: string;
+  let files: Record<string, string>;
   try {
-    code = stripTypeScriptTypes(readFileSync(appFile, 'utf8'), { mode: 'strip' });
+    files = Object.fromEntries(readdirSync(appDir).filter(isModule).map((file) => [file, readFileSync(new URL(file, appDir), 'utf8')]));
   } catch (err) {
     return console.error(`not deployed: ${err instanceof Error ? err.message : String(err)}`);
   }
-  send({ type: 'deploy', app: 'hello', code, hostFunctions: Object.keys(host), fetchHosts: [] });
+  send({ type: 'deploy', app: 'hello', main: 'index.ts', files, hostFunctions: Object.keys(host), fetchHosts: [] });
 }
 
 socket.addEventListener('open', () => {
@@ -52,12 +53,12 @@ socket.addEventListener('open', () => {
   if (!watching) return;
   // Editors save in bursts (write, rename, touch): deploy once they settle.
   let timer: NodeJS.Timeout | undefined;
-  watch(new URL('../app/', import.meta.url), (_, file) => {
-    if (file !== 'index.ts') return;
+  watch(appDir, (_, file) => {
+    if (!file || !isModule(file)) return;
     clearTimeout(timer);
     timer = setTimeout(deploy, 50);
   });
-  console.log('watching app/index.ts');
+  console.log('watching app/');
 });
 
 socket.addEventListener('message', async (event) => {
