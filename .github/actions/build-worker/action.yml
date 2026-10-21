@@ -124,7 +124,12 @@ runs:
       shell: bash
       run: |
         scripts/sync-mtimes.sh
-        scripts/build-v8.sh || { tail -100 build/logs/linux-*.log; exit 1; }
+        scripts/build-v8.sh || {
+          # rustc's errors, not the last lines of -vv build-script noise.
+          grep -nE -A20 '^error|^thread .* panicked|FAILED:' build/logs/linux-*.log | head -300
+          tail -40 build/logs/linux-*.log
+          exit 1
+        }
         cp "$WORKER_DIR/isolane-worker" "$RUNNER_TEMP/isolane-worker"
 
     # Saved right after the build, even when the build fails (a failure
