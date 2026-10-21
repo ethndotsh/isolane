@@ -7,7 +7,7 @@ use serde_json::value::RawValue;
 
 /// The protocol version. The worker reports it in `ready`; a supervisor
 /// that speaks another version refuses the worker.
-pub const PROTOCOL_VERSION: u32 = 5;
+pub const PROTOCOL_VERSION: u32 = 6;
 
 /// Supervisor → worker.
 #[derive(Deserialize)]
@@ -30,6 +30,20 @@ pub enum In {
         /// once the result is sent, and pending timers never run.
         #[serde(default)]
         last: bool,
+    },
+    /// Call the function the isolate's code defined as `name`, with
+    /// arguments as data: nothing is compiled. Runs and is budgeted as an
+    /// eval (`req` names it in `result` and `abort`).
+    Call {
+        vm: u64,
+        req: u64,
+        name: String,
+        /// The arguments as a JSON array (text, as for `HostReply::value`).
+        args: String,
+        /// Arguments sent as bytes, in the order their bytes follow the
+        /// frame's JSON: `[argument index, length]`. `args` has null there.
+        #[serde(default)]
+        bin: Vec<(u32, usize)>,
     },
     #[serde(rename_all = "camelCase")]
     HostReply {
@@ -136,6 +150,9 @@ pub enum ErrorCode {
     /// The supervisor aborted the eval (its `signal`).
     #[serde(rename = "ERR_ABORTED")]
     Aborted,
+    /// A call named no function the isolate's code defined.
+    #[serde(rename = "ERR_HANDLER_NOT_FOUND")]
+    HandlerNotFound,
     #[serde(rename = "ERR_INTERNAL")]
     Internal,
 }
@@ -236,10 +253,19 @@ pub enum Out<'a> {
         lockdown: crate::lockdown::Report,
     },
     Result {
+        vm: u64,
         req: u64,
         ok: bool,
         #[serde(skip_serializing_if = "Option::is_none")]
         value: Option<&'a RawValue>,
+        /// A call's result is bytes, attached after the frame's JSON: their
+        /// length (`value` is absent).
+        #[serde(skip_serializing_if = "Option::is_none")]
+        bin: Option<usize>,
+        /// This eval retired its isolate (it was stopped part-way, or ran out
+        /// of memory): what the isolate's later evals fail with.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        retired: Option<&'a str>,
         #[serde(skip_serializing_if = "Option::is_none")]
         code: Option<ErrorCode>,
         #[serde(skip_serializing_if = "Option::is_none")]

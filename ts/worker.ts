@@ -32,6 +32,16 @@ export type WorkerCommand =
     }
   | { t: 'eval'; vm: number; req: number; code: string; filename: string; last?: true }
   | {
+      t: 'call';
+      vm: number;
+      req: number;
+      name: string;
+      /** The arguments as a JSON array (text). */
+      args: string;
+      /** Byte arguments: `[argument index, length]`, their bytes attached in order. */
+      bin?: [number, number][];
+    }
+  | {
       t: 'hostReply';
       vm: number;
       call: number;
@@ -48,7 +58,7 @@ export type WorkerCommand =
   | { t: 'dispose'; vm: number };
 
 /** The protocol version this library speaks; a worker reporting another is refused. */
-export const PROTOCOL_VERSION = 5;
+export const PROTOCOL_VERSION = 6;
 
 /**
  * Input queued for a worker that it hasn't read. A worker reads its input
@@ -77,8 +87,20 @@ export interface IsolationInfo {
 
 export type WorkerMessage =
   | ({ t: 'ready'; protocol: number } & IsolationInfo)
-  | ({ t: 'result'; req: number; ok: true; value: unknown } & WorkerUsage)
-  | ({ t: 'result'; req: number; ok: false; code: string; message: string; guest?: GuestErrorInfo; limit?: string; shim?: { phase: 'setup' | 'before' | 'after'; index: number } } & WorkerUsage)
+  | ({ t: 'result'; vm: number; req: number; retired?: string; ok: true; value: unknown } & WorkerUsage)
+  | ({
+      t: 'result';
+      vm: number;
+      req: number;
+      /** This eval retired its isolate: what its later evals fail with. */
+      retired?: string;
+      ok: false;
+      code: string;
+      message: string;
+      guest?: GuestErrorInfo;
+      limit?: string;
+      shim?: { phase: 'setup' | 'before' | 'after'; index: number };
+    } & WorkerUsage)
   | ({ t: 'usage'; vm: number; limit?: string; message?: string } & WorkerUsage)
   | { t: 'hostCall'; vm: number; call: number; fn: number; args: unknown[]; /** The frame's body length. */ size: number }
   | { t: 'log'; vm: number; level: LogLevel; message: string }
@@ -141,12 +163,13 @@ function attachArgs(args: unknown[], bin: unknown, bytes: Buffer): unknown[] | n
 
 /** Validate a decoded frame's shape; null if it isn't a message we accept.
  * `bytes` are the frame's attached bytes, if it is a binary frame: only a
- * host call may have them, and it must claim them all. */
+ * host call or a call's result may have them, and it must claim them all. */
 export function parseWorkerMessage(raw: unknown, bytes?: Buffer): WorkerMessage | null {
   if (raw === null || typeof raw !== 'object') return null;
   const m = raw as Record<string, unknown>;
-  if (m.bin !== undefined && (m.t !== 'hostCall' || bytes === undefined)) return null;
-  if (bytes !== undefined && m.t !== 'hostCall') return null;
+  const binary = m.t === 'hostCall' || (m.t === 'result' && m.ok === true);
+  if (m.bin !== undefined && (!binary || bytes === undefined)) return null;
+  if (bytes !== undefined && !binary) return null;
   switch (m.t) {
     case 'ready': {
       const l = m.lockdown as Record<string, unknown> | null;
@@ -170,14 +193,25 @@ export function parseWorkerMessage(raw: unknown, bytes?: Buffer): WorkerMessage 
           }
         : null;
     }
-    case 'result':
-      if (!isUint(m.req) || typeof m.ok !== 'boolean') return null;
-      if (m.ok) return { t: 'result', req: m.req, ok: true, value: m.value ?? null, ...parseUsage(m) };
+    case 'result': {
+      if (!isUint(m.vm) || !isUint(m.req) || typeof m.ok !== 'boolean') return null;
+      if (m.retired !== undefined && typeof m.retired !== 'string') return null;
+      const retired = m.retired as string | undefined;
+      if (m.ok) {
+        // A call's bytes result: the frame's bytes, all of them.
+        if (bytes !== undefined) {
+          if (m.bin !== bytes.length || m.value !== undefined) return null;
+          return { t: 'result', vm: m.vm, req: m.req, retired, ok: true, value: new Uint8Array(bytes), ...parseUsage(m) };
+        }
+        return { t: 'result', vm: m.vm, req: m.req, retired, ok: true, value: m.value ?? null, ...parseUsage(m) };
+      }
       if (typeof m.code !== 'string' || typeof m.message !== 'string') return null;
       if (m.limit !== undefined && typeof m.limit !== 'string') return null;
       return {
         t: 'result',
+        vm: m.vm,
         req: m.req,
+        retired,
         ok: false,
         code: m.code,
         message: m.message,
@@ -186,6 +220,7 @@ export function parseWorkerMessage(raw: unknown, bytes?: Buffer): WorkerMessage 
         shim: parseShimRef(m.shim),
         ...parseUsage(m),
       };
+    }
     case 'usage':
       // `limit`: work between evals hit it (and the isolate is retired).
       if (!isUint(m.vm)) return null;

@@ -18,25 +18,31 @@
  *     `pendingHostCallBytes`;
  *   - tenant limits: `isolates`, `pendingEvals`, `workerMemoryBytes`;
  *   - the runtime's: `tenants`.
- *   After `heapBytes` and `backgroundMs` the isolate is retired; after
- *   `workerMemoryBytes` the tenant's worker restarts on the next call;
- *   after the others the isolate stays usable. Some limits don't fail the
- *   eval: `timers` throws a RangeError in the guest, `decompressedBytes`
- *   errors the stream, the log limits truncate output, and the policies'
- *   limits (`fetch.limits.requests`, ...) fail the guest's call. All of
- *   them emit `onLimit`.
- * - `ERR_ISOLATE_RETIRED`: an earlier failure retired this isolate; create
- *   a new one.
+ *   After `timeoutMs`, `cpuMs`, `heapBytes`, and `backgroundMs` the
+ *   isolate is retired (an eval stopped part-way may have left its state
+ *   half-updated); after `workerMemoryBytes` the tenant's worker restarts
+ *   on the next call; after the others the isolate stays usable. Some
+ *   limits don't fail the eval: `timers` throws a RangeError in the guest,
+ *   `decompressedBytes` errors the stream, the log limits truncate output,
+ *   and the policies' limits (`fetch.limits.requests`, ...) fail the
+ *   guest's call. All of them emit `onLimit`.
+ * - `ERR_ISOLATE_RETIRED`: an earlier failure retired this isolate (an
+ *   eval that was stopped part-way, by a limit or its signal, or one that
+ *   ran out of memory); create a new one.
  *
  * usage (the calling code's doing):
  * - `ERR_INVALID_CONFIG`: the configuration is malformed (the message names
  *   the field). Thrown synchronously.
  * - `ERR_ISOLATE_CLOSED`: the isolate was closed (or its tenant stopped).
  * - `ERR_RUNTIME_CLOSED`: the runtime was closed.
- * - `ERR_ABORTED`: the eval's `signal` was aborted (`reason`).
+ * - `ERR_ABORTED`: the eval's `signal` was aborted (`reason`). An eval
+ *   stopped while it ran retires its isolate; one that hadn't started
+ *   doesn't.
+ * - `ERR_HANDLER_NOT_FOUND`: `isolate.call(name)` named no function the
+ *   isolate's code defined.
  * - `ERR_SHIM`: one of the embedder's `shims` threw (or, for `after`,
  *   rejected or never settled). See `shim`; the message has its error.
- * - `ERR_DENIED`: a `beforeEval` hook refused the eval (`reason`). (A
+ * - `ERR_DENIED`: a `beforeEval` or `beforeCall` hook refused it (`reason`). (A
  *   `beforeHostCall` denial reaches the guest as an error with this
  *   `code`, and doesn't fail the eval.)
  *
@@ -65,6 +71,7 @@ export type IsolaneErrorCode =
   | 'ERR_RUNTIME_CLOSED'
   | 'ERR_SHIM'
   | 'ERR_ABORTED'
+  | 'ERR_HANDLER_NOT_FOUND'
   | 'ERR_DENIED'
   | 'ERR_TENANT_QUARANTINED'
   | 'ERR_WORKER_CRASHED'
@@ -87,6 +94,7 @@ const KINDS: Record<IsolaneErrorCode, IsolaneErrorKind> = {
   ERR_RUNTIME_CLOSED: 'usage',
   ERR_SHIM: 'usage',
   ERR_ABORTED: 'usage',
+  ERR_HANDLER_NOT_FOUND: 'usage',
   ERR_DENIED: 'usage',
   ERR_TENANT_QUARANTINED: 'security',
   ERR_WORKER_CRASHED: 'infrastructure',

@@ -29,7 +29,7 @@ use std::sync::Arc;
 
 use frame::{read_frame, Writer};
 use proto::{fail, limit, ErrorCode, Failure, In, Out};
-use vm::{Output, VmConfig, VmMsg};
+use vm::{Job, Output, VmConfig, VmMsg};
 
 unsafe extern "C" {
     // rusty_v8's binding for v8::internal::SandboxIsEnabled().
@@ -323,7 +323,7 @@ impl Worker {
                     continue;
                 }
             };
-            if !attached.is_empty() && !matches!(msg, In::HostReply { .. }) {
+            if !attached.is_empty() && !matches!(msg, In::HostReply { .. } | In::Call { .. }) {
                 return Err(bad_message("bytes attached to a message that takes none"));
             }
             self.handle(msg, attached)?;
@@ -334,22 +334,15 @@ impl Worker {
     fn handle(&mut self, msg: In, attached: &[u8]) -> Result<(), Exit> {
         match msg {
             In::Create { vm, config } => self.create(vm, config),
-            In::Eval { vm, req, code, filename, last } => self.eval(vm, req, VmMsg::Eval { req, code, filename, last }),
+            In::Eval { vm, req, code, filename, last } => {
+                self.eval(vm, req, VmMsg::Eval { req, job: Job::Code { code, filename }, last });
+            }
+            In::Call { vm, req, name, args, bin } => {
+                let bytes = split_attached(attached, bin).ok_or_else(|| bad_message("call bytes don't match the frame"))?;
+                self.eval(vm, req, VmMsg::Eval { req, job: Job::Call { name, args, bytes }, last: false });
+            }
             In::HostReply { vm, call, ok, value, error, error_name, error_code, bin } => {
-                // The attached bytes, split as `bin` says, all of them.
-                let mut bytes = Vec::with_capacity(bin.len());
-                let mut rest = attached;
-                for (path, len) in bin {
-                    if len > rest.len() {
-                        return Err(bad_message("host reply bytes overrun the frame"));
-                    }
-                    let (b, r) = rest.split_at(len);
-                    bytes.push((path, b.to_vec()));
-                    rest = r;
-                }
-                if !rest.is_empty() {
-                    return Err(bad_message("unclaimed bytes in a host reply"));
-                }
+                let bytes = split_attached(attached, bin).ok_or_else(|| bad_message("host reply bytes don't match the frame"))?;
                 if let Some((tx, _)) = self.vms.get(&vm) {
                     let reply = vm::Reply { ok, value, error, error_name, error_code, bytes };
                     let _ = tx.send(VmMsg::HostReply { call, reply });
@@ -396,9 +389,12 @@ impl Worker {
             },
         };
         self.out.send(&Out::Result {
+            vm,
             req,
             ok: false,
             value: None,
+            bin: None,
+            retired: None,
             code: Some(failure.code),
             message: Some(&failure.message),
             guest: None,
@@ -407,6 +403,22 @@ impl Worker {
             usage: Default::default(),
         });
     }
+}
+
+/// A frame's attached bytes, split as `bin` says (each part's place and
+/// length, in order). None unless the parts claim exactly all of them.
+fn split_attached<P>(attached: &[u8], bin: Vec<(P, usize)>) -> Option<Vec<(P, Vec<u8>)>> {
+    let mut parts: Vec<(P, Vec<u8>)> = Vec::with_capacity(bin.len());
+    let mut rest = attached;
+    for (place, len) in bin {
+        if len > rest.len() {
+            return None;
+        }
+        let (part, after) = rest.split_at(len);
+        parts.push((place, part.to_vec()));
+        rest = after;
+    }
+    rest.is_empty().then_some(parts)
 }
 
 /// The isolate id of a `create` message that didn't parse as one.

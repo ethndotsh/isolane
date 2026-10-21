@@ -12,13 +12,15 @@
 //   worker.ts       one worker process and its protocol
 
 export { Runtime, Tenant, Isolate } from './runtime.js';
-export type { EvalOptions, IsolationReport, RunConfig, RuntimeOptions } from './runtime.js';
+export type { CallOptions, EvalOptions, IsolationReport, RunConfig, RuntimeOptions } from './runtime.js';
 export { DEFAULT_LIMITS, DEFAULT_POLICY_LIMITS } from './config.js';
 export type { IsolateConfig, IsolateLimits, Limits, RuntimeLimits, TenantLimits, Shim, ShimsConfig, TimeConfig, WebConfig } from './config.js';
 export { hostFunction } from './host.js';
 export type { HostContext, HostFunction, HostFunctionDefinition, HostTree } from './host.js';
 export { deny } from './hooks.js';
 export type {
+  CallEvent,
+  CallOutcome,
   Denial,
   EvalEvent,
   EvalOutcome,

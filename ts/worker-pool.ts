@@ -4,7 +4,7 @@
 // module dispatches it.
 
 import { readFileSync } from 'node:fs';
-import { splitBytes, type BinaryPart } from './binary.js';
+import { asUint8Array, isBytes, splitBytes, type BinaryPart } from './binary.js';
 import { capabilities } from './capabilities.js';
 import { workerLimits, type ResolvedConfig, type ResolvedLimits, type ResolvedShims } from './config.js';
 import { IsolaneError, abortedError, invalidConfig, isIsolaneErrorCode, limitError, type IsolaneErrorCode } from './errors.js';
@@ -226,6 +226,8 @@ export interface IsolateState {
   readonly calls: Map<number, Call>;
   /** The frame bytes of `calls`. */
   callBytes: number;
+  /** Set once the worker retired it (an eval was stopped part-way, or it ran out of memory): what its evals fail with. */
+  retired?: string;
   readonly dispose: () => void;
 }
 
@@ -425,6 +427,50 @@ export class TenantWorker {
    * worker drops it as soon as the result is sent and its pending timers
    * never run. */
   eval(state: IsolateState, req: number, code: string, filename: string, last = false, signal?: AbortSignal): Promise<unknown> {
+    // A frame carries at most 64 MiB: a frame the worker can't take
+    // would end it as if it had crashed.
+    const codeBytes = Math.min(state.limits.codeBytes, MAX_FRAME - 64 * 1024);
+    if (Buffer.byteLength(code, 'utf8') > codeBytes) {
+      return Promise.reject(this.#limit('codeBytes', `the code is larger than ${codeBytes} bytes`, state.id));
+    }
+    const frame: WorkerCommand = last ? { t: 'eval', vm: state.id, req, code, filename, last } : { t: 'eval', vm: state.id, req, code, filename };
+    return this.#submit(state, req, frame, [], signal);
+  }
+
+  /**
+   * Call the function the isolate's code defined as `name`. Arguments that
+   * are bytes cross as bytes; the rest as JSON (`undefined` becomes null,
+   * as in an array).
+   */
+  call(state: IsolateState, req: number, name: string, args: readonly unknown[], signal?: AbortSignal): Promise<unknown> {
+    let json: string | undefined;
+    const parts: BinaryPart[] = [];
+    try {
+      const split = splitBytes(args.map((a) => (isBytes(a) ? null : a)));
+      json = split.json;
+      args.forEach((a, i) => {
+        if (isBytes(a)) parts.push({ path: [i], bytes: asUint8Array(a) });
+      });
+    } catch (err) {
+      return Promise.reject(invalidConfig('args', `must be JSON values or bytes: ${(err as Error).message}`));
+    }
+    const bytes = parts.reduce((n, p) => n + p.bytes.length, 0);
+    if (json === undefined || !fits(Buffer.byteLength(json, 'utf8') + Buffer.byteLength(name, 'utf8') + 1024, bytes)) {
+      return Promise.reject(invalidConfig('args', 'are larger than a frame carries (64 MiB)'));
+    }
+    const frame: WorkerCommand = { t: 'call', vm: state.id, req, name, args: json };
+    if (parts.length) frame.bin = parts.map((p) => [p.path[0] as number, p.bytes.length]);
+    return this.#submit(
+      state,
+      req,
+      frame,
+      parts.map((p) => p.bytes),
+      signal,
+    );
+  }
+
+  /** Send an eval or call, and wait for its result. */
+  #submit(state: IsolateState, req: number, frame: WorkerCommand, attached: Uint8Array[], signal?: AbortSignal): Promise<unknown> {
     return new Promise((resolve, reject) => {
       if (!this.#proc.alive) {
         reject(
@@ -436,13 +482,6 @@ export class TenantWorker {
               })
             : new IsolaneError('ERR_WORKER_CRASHED', `worker for tenant ${this.tenant} is gone`, { tenant: this.tenant }),
         );
-        return;
-      }
-      // A frame carries at most 64 MiB: a frame the worker can't take
-      // would end it as if it had crashed.
-      const codeBytes = Math.min(state.limits.codeBytes, MAX_FRAME - 64 * 1024);
-      if (Buffer.byteLength(code, 'utf8') > codeBytes) {
-        reject(this.#limit('codeBytes', `the code is larger than ${codeBytes} bytes`, state.id));
         return;
       }
       if (this.#requests.size >= this.limits.pendingEvals) {
@@ -478,7 +517,7 @@ export class TenantWorker {
       }
       this.#requests.set(req, pending);
       this.#touch();
-      this.#proc.send(last ? { t: 'eval', vm: state.id, req, code, filename, last } : { t: 'eval', vm: state.id, req, code, filename });
+      this.#proc.send(frame, attached);
       if (signal) this.#abortOn(signal, req, pending);
       const most = this.limits.workerEvals;
       if (most !== null && ++this.#evals >= most) this.#recycle(`it ran limits.workerEvals (${most}) evals`);
@@ -507,21 +546,22 @@ export class TenantWorker {
       signal.removeEventListener('abort', onAbort);
       reject(err);
     };
+    // Aborted while the eval waited to be sent (for the worker to start).
+    if (signal.aborted) onAbort();
   }
 
-  closeIsolate(state: IsolateState): void {
+  closeIsolate(state: IsolateState, closed = new IsolaneError('ERR_ISOLATE_CLOSED', 'isolane: the isolate was closed', { tenant: this.tenant })): void {
     if (!this.#isolates.delete(state.id)) return;
     // Its evals, running or queued, end now. The worker stops whatever is
     // running and drops the rest; a late result is ignored, and no eval
     // timer is left to call the worker unresponsive.
-    const closed = new IsolaneError('ERR_ISOLATE_CLOSED', 'isolane: the isolate was closed', { tenant: this.tenant });
     for (const [req, p] of this.#requests) {
       if (p.isolate !== state) continue;
       this.#requests.delete(req);
       clearTimeout(p.timer);
       p.reject(closed);
     }
-    this.#abandonCalls(state, new Error('the isolate was closed'));
+    this.#abandonCalls(state, new Error(closed.message));
     state.dispose();
     this.#proc.send({ t: 'dispose', vm: state.id });
     this.#touch();
@@ -558,6 +598,14 @@ export class TenantWorker {
       drainMs,
     );
     this.#drainTimer.unref();
+  }
+
+  /** The worker retired isolate `vm`: close it, failing what it still runs with `why`. */
+  #retire(vm: number, why: string): void {
+    const state = this.#isolates.get(vm);
+    if (!state || state.retired !== undefined) return;
+    state.retired = why;
+    this.closeIsolate(state, new IsolaneError('ERR_ISOLATE_RETIRED', `isolane: ${why}`, { tenant: this.tenant }));
   }
 
   /** Nobody waits for these calls any more: abort their signals. */
@@ -609,6 +657,17 @@ export class TenantWorker {
       if (!msg.ok) this.#usage.failures++;
       this.#count(msg);
       const pending = this.#requests.get(msg.req);
+      if (pending && pending.isolate.id !== msg.vm) {
+        this.#proc.kill('protocol-violation', `a result for isolate ${msg.vm} answered an eval of isolate ${pending.isolate.id}`);
+        return;
+      }
+      // The eval retired its isolate, which can't run again (even if the
+      // eval was abandoned here, by an abort): free it, once the eval's own
+      // result is handled; its other evals fail with why.
+      if (msg.retired !== undefined) {
+        const retired = msg.retired;
+        queueMicrotask(() => this.#retire(msg.vm, retired));
+      }
       if (!pending) return;
       this.#requests.delete(msg.req);
       clearTimeout(pending.timer);

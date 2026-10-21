@@ -38,7 +38,7 @@ pub use console::guest_log;
 pub use errors::{report as report_guest_error, RejectionReporter};
 use context::{allow_wasm, deny_wasm, new_context, Shims};
 use background::Background;
-use eval::{eval, refuse_all, run_idle_timers, send_result, usage, EvalEnd};
+use eval::{eval, refuse_all, run_idle_timers, send_result, usage, EvalEnd, Outcome};
 use host_call::{apply_host_reply, Bridge};
 use mailbox::Mailbox;
 use watchdog::{CpuClock, Fired, Watchdog};
@@ -149,9 +149,19 @@ pub fn out_of_time() -> bool {
 pub enum VmMsg {
     /// `last`: the VM is disposed right after (a one-shot run), so timers
     /// left pending never run.
-    Eval { req: u64, code: String, filename: Option<String>, last: bool },
+    Eval { req: u64, job: Job, last: bool },
     HostReply { call: u64, reply: Reply },
     Dispose,
+}
+
+/// What an eval runs.
+pub enum Job {
+    /// Compile `code` and run it.
+    Code { code: String, filename: Option<String> },
+    /// Call the function the isolate's code defined as `name` (see
+    /// `eval::handler`), with `args` (a JSON array) and the byte arguments
+    /// at their indices.
+    Call { name: String, args: String, bytes: Vec<(u32, Vec<u8>)> },
 }
 
 /// The supervisor's answer to a host call.
@@ -345,6 +355,16 @@ impl Guard<'_> {
     }
 }
 
+/// Why a failed eval was stopped before its code finished (out of time or
+/// CPU, or aborted), if it was.
+fn stopped_part_way(result: &Result<Outcome, Failure>) -> Option<&'static str> {
+    match result {
+        Err(Failure { code: ErrorCode::Limit, limit: Some(limit @ ("timeoutMs" | "cpuMs")), .. }) => Some(if *limit == "cpuMs" { "limits.cpuMs" } else { "limits.timeoutMs" }),
+        Err(Failure { code: ErrorCode::Aborted, .. }) => Some("its signal was aborted"),
+        _ => None,
+    }
+}
+
 fn vm_main(id: u64, config: VmConfig, rx: Receiver<VmMsg>, out: Output, stopper: Arc<StopperState>) {
     crate::limits::set(config.limits);
     crate::clock::set_mode(config.time);
@@ -375,7 +395,7 @@ fn vm_main(id: u64, config: VmConfig, rx: Receiver<VmMsg>, out: Output, stopper:
     let handle = isolate.thread_safe_handle();
     let watchdog = match Watchdog::start(handle.clone()) {
         Ok(w) => w,
-        Err(e) => return refuse_all(&rx, &out, format!("vm could not start: {e}")),
+        Err(e) => return refuse_all(id, &rx, &out, format!("vm could not start: {e}")),
     };
     WATCHDOG.with(|w| *w.borrow_mut() = Some(watchdog.clone()));
     stopper.started(watchdog.clone());
@@ -482,19 +502,19 @@ fn vm_main(id: u64, config: VmConfig, rx: Receiver<VmMsg>, out: Output, stopper:
         };
         match msg {
             VmMsg::Dispose => break,
-            VmMsg::Eval { req, code, filename, last } => {
+            VmMsg::Eval { req, job, last } => {
                 // Usage from before this eval goes out first.
                 background.report(&out, id, /* force */ true, None);
                 if let Some(cause) = background_hit.take() {
-                    send_result(&out, req, Err(cause), Usage::default());
+                    send_result(&out, (id, req), Err(cause), Usage::default(), None);
                     continue;
                 }
                 if let Some(cause) = &retired {
-                    send_result(&out, req, Err(cause.clone()), Usage::default());
+                    send_result(&out, (id, req), Err(cause.clone()), Usage::default(), None);
                     continue;
                 }
                 if !watchdog.begin_eval(req) {
-                    send_result(&out, req, Err(fail(ErrorCode::Aborted, "the eval was aborted")), Usage::default());
+                    send_result(&out, (id, req), Err(fail(ErrorCode::Aborted, "the eval was aborted")), Usage::default(), None);
                     continue;
                 }
                 let cpu_start = cpu_clock.map(|c| c.now()).unwrap_or_default();
@@ -502,7 +522,7 @@ fn vm_main(id: u64, config: VmConfig, rx: Receiver<VmMsg>, out: Output, stopper:
                 bridge.host_calls.set(0);
                 bridge.limit_hit.replace(None);
                 let (end, fired) = guard.run(&mut isolate, timeout, cpu, |isolate, deadline| {
-                    let end = eval(isolate, &context, &shims, &code, filename.as_deref(), &bridge.mailbox, deadline);
+                    let end = eval(isolate, &context, &shims, &job, &bridge.mailbox, deadline);
                     pump_tasks(isolate);
                     end
                 });
@@ -528,6 +548,17 @@ fn vm_main(id: u64, config: VmConfig, rx: Receiver<VmMsg>, out: Output, stopper:
                 } else {
                     result
                 };
+                // An eval stopped part-way (out of time or CPU, or aborted)
+                // may have left the isolate's state half-updated: retire the
+                // isolate, as running out of memory does. A guest throw
+                // leaves it usable.
+                if retired.is_none() {
+                    if let Some(why) = stopped_part_way(&result) {
+                        retired = Some(retire(format!(
+                            "the isolate was retired: an earlier eval was stopped part-way ({why}), so its state may be inconsistent; create a new one"
+                        )));
+                    }
+                }
                 // An eval that ran out of a limit (or was aborted) leaves its isolate's host
                 // calls with no one waiting (the supervisor abandons them
                 // too): free their slots, or they'd count against
@@ -538,7 +569,8 @@ fn vm_main(id: u64, config: VmConfig, rx: Receiver<VmMsg>, out: Output, stopper:
                     bridge.pending_bytes.set(0);
                 }
                 let spent = usage(&mut isolate, cpu_clock, cpu_start);
-                send_result(&out, req, result, spent);
+                // Only an eval that ran gets here, so a retirement is this one's.
+                send_result(&out, (id, req), result, spent, retired.as_ref());
                 if last {
                     break;
                 }

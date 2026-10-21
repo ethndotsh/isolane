@@ -26,6 +26,11 @@ await acme.run('order.items.length', { globals: { order } });
 await acme.run('db.getUser(42).then((u) => u.plan)', {
   host: { db: { getUser: async (id) => users.find(id) } },
 });
+
+// A stateful isolate loads code once; each call invokes it with data.
+using app = acme.isolate();
+await app.eval('async function handle(request) { return { path: request.path } }');
+await app.call('handle', [{ path: '/users/1' }]); // { path: '/users/1' }
 ```
 
 ## Security model
@@ -164,7 +169,8 @@ await runtime.tenant('acme').run(code, { limits: { timeoutMs: 500 } });
 Every resource has a limit with a default, such as 30 seconds per
 evaluation, 128 MiB of heap, and 100 isolates per tenant. Exceeding most
 limits fails the evaluation with `ERR_LIMIT`, and every limit reached emits
-`onLimit`. The [guide](docs/guide.md#limits) lists every limit and its
+`onLimit`. An evaluation stopped part-way by a time or CPU limit, or by its
+abort signal, retires its isolate, since its state may be inconsistent. The [guide](docs/guide.md#limits) lists every limit and its
 effect.
 
 ## Hooks

@@ -21,7 +21,7 @@ returns the tenant's handle:
 | Method | |
 |---|---|
 | `run(code, config?)` | Evaluate in a fresh isolate, then close it |
-| `isolate(config?)` | A stateful isolate: `eval(code, options?)` keeps globals between calls |
+| `isolate(config?)` | A stateful isolate: `eval(code, options?)` keeps globals between evals, and `call(name, args?, options?)` calls a function it defined (see [Calls](#calls)) |
 | `usage()` / `resetUsage()` | Evals, failures, CPU ms, host calls, log bytes, peak memory, security events, and the worker's CPU ms as the kernel counts it (see [usage](#usage)) |
 | `release()` | Lift a quarantine early |
 | `stop()` | Stop the tenant's worker and its isolates |
@@ -38,8 +38,15 @@ Besides the configuration, `run` and `eval` take options for the one call:
   `<tenant>/eval-<n>.js`, where n counts the isolate's evals from 1.
 - `signal`: an `AbortSignal`. Aborting it terminates the eval if it is
   running, or skips it if it hasn't started; the eval rejects with
-  `ERR_ABORTED`, and its host calls' `ctx.signal` aborts. The isolate stays
-  usable.
+  `ERR_ABORTED`, and its host calls' `ctx.signal` aborts. An eval terminated
+  while it ran retires its isolate (see below); one that never started
+  leaves it usable.
+
+An eval stopped part-way, by `timeoutMs`, `cpuMs`, or its signal, retires
+its isolate, as running out of memory does: the code may have been stopped
+in the middle of updating its state, so the isolate's later evals and calls
+fail with `ERR_ISOLATE_RETIRED`, and the worker frees it. An eval whose code
+throws leaves the isolate usable. Create a new isolate to carry on.
 
 Tenant names are yours to choose, not the guest's: the runtime keeps each
 name's usage until `resetUsage()` (a few hundred bytes each), so a platform
@@ -50,6 +57,44 @@ using vm = runtime.tenant('acme').isolate();
 await vm.eval('globalThis.count = 0');
 await vm.eval('++count'); // 1
 ```
+
+### Calls
+
+`isolate.call(name, args?, options?)` calls a function that the isolate's
+code defined, with the arguments as data. Nothing is compiled, so it is the
+way to invoke a handler on a warm isolate: an eval loads the code once, and
+each request is a call.
+
+```js
+using app = runtime.tenant('acme').isolate();
+await app.eval('async function handle(request) { return { echo: request.path } }');
+await app.call('handle', [{ path: '/users/1' }]); // { echo: '/users/1' }
+```
+
+- `name` is a function declaration of a classic script, or a function set
+  on `globalThis`; `let` and `const` bindings and inherited properties are
+  not found. A name the isolate doesn't define fails with
+  `ERR_HANDLER_NOT_FOUND` and leaves the isolate usable. Names starting
+  with `__isolane_` are isolane's own and refused.
+- `args` is an array of JSON values. Bytes (ArrayBuffers and their views)
+  at the top level cross as bytes and arrive as `Uint8Array`s; nested
+  inside other values they cross as JSON. `undefined` arrives as `null`.
+  The result crosses the same way: a function that returns bytes resolves
+  to a `Uint8Array`.
+- `options` takes `returns` and `signal`, as for an eval.
+
+A call is an eval for everything else. The clock advances when it starts
+and is frozen while it runs; `timeoutMs`, `cpuMs`, `hostCalls`, and
+`logBytes` apply to each call; `before` and `after` shims run around it;
+it counts in `usage().evals` and toward `workerEvals`. It settles when the
+function's returned value or promise settles. Timers and other work it
+leaves running continue between evals under `backgroundMs`. A function that
+throws rejects with `ERR_GUEST_EXCEPTION`, and the isolate keeps its state;
+a call stopped part-way retires the isolate. The `beforeCall` and
+`afterCall` hooks and the `call` event observe calls.
+
+Programs, `tenant.load()`, will build warm pools on this primitive; see
+`docs/deployments.md`.
 
 Runtime-only options: `workerPath` (default: the installed
 `@isolane/worker-*` package, or `$ISOLANE_WORKER`), `strict` (default
@@ -386,6 +431,7 @@ hooks run.
 |---|---|---|
 | `beforeHostCall` / `afterHostCall` | interceptor | can `deny()` (`ERR_DENIED`) or replace the arguments / result |
 | `beforeEval` / `afterEval` | interceptor | can `deny()` or replace the code / result |
+| `beforeCall` / `afterCall` | interceptor | can `deny()` or replace the arguments / result of an `isolate.call` |
 | `onLog` | event | guest `console` output (up to `limits.logBytes` per eval) |
 | `onGuestError` | event | an exception in a timer or task, or a promise rejected with no handler (see [Errors](#errors)) |
 | `onLimit` | event | any limit hit |
@@ -427,8 +473,8 @@ await acme.run(app.code, {
 
 | Limit | Default | Scope |
 |---|---|---|
-| `timeoutMs` | 30 s | isolate, per eval |
-| `cpuMs` | none | isolate, per eval (Linux) |
+| `timeoutMs` | 30 s | isolate, per eval or call (retires the isolate) |
+| `cpuMs` | none | isolate, per eval or call (Linux; retires the isolate) |
 | `heapBytes` | 128 MiB | isolate |
 | `timers` | 10,000 | isolate (a `RangeError` in the guest) |
 | `backgroundMs` | 1 s per minute | isolate, work between evals (retires the isolate) |
@@ -568,7 +614,7 @@ Every failure is an `IsolaneError` with `code`, `kind`, `retryable`, and
 |---|---|
 | `guest` | `ERR_GUEST_EXCEPTION` (see `err.guest`), `ERR_UNSETTLED`, `ERR_NOT_SERIALIZABLE`, `ERR_INVALID_RETURN` |
 | `limit` | `ERR_LIMIT` (see `err.limit`), `ERR_ISOLATE_RETIRED` |
-| `usage` | `ERR_INVALID_CONFIG`, `ERR_ISOLATE_CLOSED`, `ERR_RUNTIME_CLOSED`, `ERR_ABORTED`, `ERR_DENIED`, `ERR_SHIM` |
+| `usage` | `ERR_INVALID_CONFIG`, `ERR_ISOLATE_CLOSED`, `ERR_RUNTIME_CLOSED`, `ERR_ABORTED`, `ERR_DENIED`, `ERR_SHIM`, `ERR_HANDLER_NOT_FOUND` |
 | `security` | `ERR_TENANT_QUARANTINED` |
 | `infrastructure` | `ERR_WORKER_CRASHED`, `ERR_WORKER_UNRESPONSIVE`, `ERR_WORKER_INCOMPATIBLE`, `ERR_ISOLATION_UNAVAILABLE`, `ERR_INTERNAL` |
 

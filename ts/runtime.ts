@@ -38,10 +38,26 @@ export interface EvalOptions<S extends AnySchema | undefined = undefined> {
   filename?: string;
   /**
    * Aborting it stops the eval: a running one is terminated (as a timeout
-   * would), one that hasn't started never does, and it rejects with `ERR_ABORTED`.
-   * Its host calls' `ctx.signal` aborts too. The isolate stays usable.
+   * would) and its isolate retired, one that hasn't started never does,
+   * and it rejects with `ERR_ABORTED`. Its host calls' `ctx.signal` aborts
+   * too.
    */
   signal?: AbortSignal;
+}
+
+/** Options for one call (`isolate.call`). */
+export interface CallOptions<S extends AnySchema | undefined = undefined> {
+  /** A Standard Schema the function's result must match (`ERR_INVALID_RETURN` if not); the result is typed by it. */
+  returns?: S;
+  /** Aborting it stops the call, as for an eval (`EvalOptions.signal`). */
+  signal?: AbortSignal;
+}
+
+/** A function name for `isolate.call`: not one of isolane's own (`__isolane_*`). */
+function checkName(name: unknown): string {
+  if (typeof name !== 'string' || name === '' || name.length > 1024) throw invalidConfig('name', 'must be a non-empty string of at most 1024 characters');
+  if (name.startsWith('__isolane_')) throw invalidConfig('name', "must not start with __isolane_ (isolane's own functions)");
+  return name;
 }
 
 function checkSignal(signal: unknown): AbortSignal | undefined {
@@ -521,12 +537,10 @@ export class Isolate {
     const filename = checkFilename(options.filename) ?? `${filenameSafe(this.tenant)}/eval-${this.#evals + 1}.js`;
     const signal = checkSignal(options.signal);
     this.#evals++;
-    if (this.#closed) throw new IsolaneError('ERR_ISOLATE_CLOSED', 'isolane: the isolate has been closed', { tenant: this.tenant });
+    this.#checkOpen();
     if (signal?.aborted) throw abortedError(signal, this.tenant);
     if (typeof code !== 'string') throw invalidConfig('code', 'must be a string');
-    await this.#worker.ready.catch((err: Error & { exit?: WorkerExit }) => {
-      throw new IsolaneError(err.exit ? exitCode(err.exit) : 'ERR_WORKER_CRASHED', err.message, { tenant: this.tenant });
-    });
+    await this.#ready();
     const chain = this.#chain;
     if (!chain.observesEvals) {
       const value = await this.#worker.eval(this.#state, this.#nextReq(), code, filename, last, signal);
@@ -547,6 +561,69 @@ export class Isolate {
     }
     value = await chain.afterEval({ ...event, code: before.code, durationMs: performance.now() - started, result: value });
     return (returns ? await checkReturn(returns, value, this.tenant) : value) as ResultOf<S>;
+  }
+
+  /**
+   * Call a function the isolate's code defined, with arguments as data:
+   * nothing is compiled, so this is the way to invoke a handler that an
+   * earlier eval set up (warm). `name` is a function declaration of a
+   * classic script, or a property set on `globalThis`. Arguments and the
+   * result are JSON values, or bytes (ArrayBuffers and views, which arrive
+   * as Uint8Arrays) at the top level. The call settles when the function's
+   * returned value (or promise) does; work it leaves running continues
+   * between evals under `limits.backgroundMs`. Each call is an eval for
+   * the clock and for limits (`timeoutMs`, `cpuMs`, `hostCalls`, ...).
+   * A function that throws rejects with `ERR_GUEST_EXCEPTION` and the
+   * isolate stays usable; a call stopped part-way (a time or CPU limit,
+   * or its signal) retires it.
+   */
+  call<S extends AnySchema | undefined = undefined>(name: string, args: readonly unknown[] = [], options: CallOptions<S> = {}): Promise<ResultOf<S>> {
+    return this.#call(name, args, options);
+  }
+
+  async #call<S extends AnySchema | undefined>(name: string, args: readonly unknown[], options: CallOptions<S>): Promise<ResultOf<S>> {
+    checkName(name);
+    if (!Array.isArray(args)) throw invalidConfig('args', 'must be an array');
+    const { returns } = options;
+    if (returns !== undefined && !isStandardSchema(returns)) throw invalidConfig('returns', 'must be a Standard Schema');
+    const signal = checkSignal(options.signal);
+    this.#checkOpen();
+    if (signal?.aborted) throw abortedError(signal, this.tenant);
+    await this.#ready();
+    const chain = this.#chain;
+    if (!chain.observesCalls) {
+      const value = await this.#worker.call(this.#state, this.#nextReq(), name, args, signal);
+      return (returns ? await checkReturn(returns, value, this.tenant) : value) as ResultOf<S>;
+    }
+    const event = { tenant: this.tenant, isolate: this.id, name, args: [...args] };
+    const before = await chain.beforeCall(event);
+    if ('denied' in before) {
+      throw new IsolaneError('ERR_DENIED', `isolane: the call was denied: ${before.denied}`, { tenant: this.tenant, reason: before.denied });
+    }
+    const started = performance.now();
+    let value: unknown;
+    try {
+      value = await this.#worker.call(this.#state, this.#nextReq(), name, before.args, signal);
+    } catch (err) {
+      await chain.afterCall({ ...event, args: before.args, durationMs: performance.now() - started, error: err as IsolaneError });
+      throw err;
+    }
+    value = await chain.afterCall({ ...event, args: before.args, durationMs: performance.now() - started, result: value });
+    return (returns ? await checkReturn(returns, value, this.tenant) : value) as ResultOf<S>;
+  }
+
+  /** Throws if the isolate can't run anything: closed, or retired by the worker. */
+  #checkOpen(): void {
+    if (this.#closed) throw new IsolaneError('ERR_ISOLATE_CLOSED', 'isolane: the isolate has been closed', { tenant: this.tenant });
+    const retired = this.#state.retired;
+    if (retired !== undefined) throw new IsolaneError('ERR_ISOLATE_RETIRED', `isolane: ${retired}`, { tenant: this.tenant });
+  }
+
+  /** Wait for the worker to start; its failure as this isolate's. */
+  async #ready(): Promise<void> {
+    await this.#worker.ready.catch((err: Error & { exit?: WorkerExit }) => {
+      throw new IsolaneError(err.exit ? exitCode(err.exit) : 'ERR_WORKER_CRASHED', err.message, { tenant: this.tenant });
+    });
   }
 
   /** Free the isolate. Idempotent. Its host calls' signals abort. */

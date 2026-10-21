@@ -75,6 +75,12 @@ pub fn copy_bytes(scope: &mut v8::PinScope, value: v8::Local<v8::Value>) -> Opti
     with_bytes(scope, value, <[u8]>::to_vec)
 }
 
+/// `copy_bytes`, refusing more than `max` bytes: Some(Err(length)) then,
+/// before anything is copied.
+pub fn copy_bytes_max(scope: &mut v8::PinScope, value: v8::Local<v8::Value>, max: usize) -> Option<Result<Vec<u8>, usize>> {
+    with_bytes(scope, value, |b| if b.len() > max { Err(b.len()) } else { Ok(b.to_vec()) })
+}
+
 /// A new Uint8Array with a copy of `data`, allocated by V8 (inside the V8
 /// sandbox, unlike a backing store handed over from Rust).
 pub fn new_u8array<'s>(scope: &mut v8::PinScope<'s, '_>, data: &[u8]) -> v8::Local<'s, v8::Uint8Array> {

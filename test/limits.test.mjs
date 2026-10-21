@@ -19,12 +19,25 @@ test('the guest cannot catch termination', async () => {
   );
 });
 
-test('a timed-out isolate keeps its state', async () => {
-  const vm = isolate({ ...T, limits: { timeoutMs: 50 } });
-  await vm.eval('globalThis.kept = "yes"');
-  for (let i = 0; i < 5; i++) await assert.rejects(vm.eval('while (true) {}'), limit('timeoutMs'));
-  assert.equal(await vm.eval('kept'), 'yes');
-  vm.close();
+test('an eval stopped by a time or CPU limit retires its isolate; a throw does not', async () => {
+  // (CPU time is measured on Linux only.)
+  for (const limits of process.platform === 'linux' ? [{ timeoutMs: 50 }, { cpuMs: 50 }] : [{ timeoutMs: 50 }]) {
+    const vm = isolate({ ...T, limits });
+    await vm.eval('globalThis.kept = "yes"');
+    await assert.rejects(vm.eval('throw new Error("no")'), code('ERR_GUEST_EXCEPTION'));
+    assert.equal(await vm.eval('kept'), 'yes');
+    // Stopped part-way: its state may be half-updated.
+    await assert.rejects(vm.eval('globalThis.kept = "half"; while (true) {}'), limit(Object.keys(limits)[0]));
+    await assert.rejects(vm.eval('kept'), (err) => code('ERR_ISOLATE_RETIRED')(err) && err.message.includes('stopped part-way'));
+    vm.close();
+  }
+  // So does a timeout that comes while the eval waits (no termination).
+  const waiting = isolate({ ...T, limits: { timeoutMs: 50 } });
+  await assert.rejects(waiting.eval('new Promise((r) => setTimeout(r, 10_000))'), limit('timeoutMs'));
+  await assert.rejects(waiting.eval('1'), code('ERR_ISOLATE_RETIRED'));
+  waiting.close();
+  // The tenant's other isolates carry on.
+  assert.equal(await pool.run('1 + 1', T), 2);
 });
 
 test('runaway recursion is a catchable RangeError', async () => {
@@ -87,10 +100,10 @@ test('limits.cpuMs bounds CPU time, not time spent waiting', { skip: process.pla
   assert.equal(await pool.run('wait().then(() => "waited")', opts), 'waited');
   const err = await pool.run('for (;;) {}', opts).catch((e) => e);
   assert.deepEqual([err.code, err.kind], ['ERR_LIMIT', 'limit']);
-  // The isolate stays usable after a CPU-limit termination.
+  // A CPU-limit termination retires the isolate.
   const vm = isolate(opts);
   await vm.eval('globalThis.n = 1').then(() => vm.eval('for (;;) {}')).catch(() => {});
-  assert.equal(await vm.eval('n + 1'), 2);
+  await assert.rejects(vm.eval('n + 1'), code('ERR_ISOLATE_RETIRED'));
   vm.close();
 });
 
@@ -181,10 +194,16 @@ test('limits.tenants evicts the least recently used idle tenant', async () => {
 
 test('queued evals on one isolate are not mistaken for an unresponsive worker', async () => {
   const vm = isolate({ ...T, limits: { timeoutMs: 400 } });
-  const loops = Array.from({ length: 4 }, () => vm.eval('for (;;) {}'));
-  for (const r of await Promise.allSettled(loops)) assert.equal(r.reason?.code, 'ERR_LIMIT');
-  assert.equal(await vm.eval('2'), 2);
+  // Each takes most of its timeout, so the last waits about 900ms for the others.
+  const waits = Array.from({ length: 4 }, () => vm.eval('new Promise((r) => setTimeout(() => r(1), 300))'));
+  assert.deepEqual(await Promise.all(waits), [1, 1, 1, 1]);
+  // Queued behind one that times out: it retires the isolate, and they fail with that.
+  const loops = Array.from({ length: 3 }, () => vm.eval('for (;;) {}'));
+  const [first, ...rest] = await Promise.allSettled(loops);
+  assert.equal(first.reason?.code, 'ERR_LIMIT');
+  for (const r of rest) assert.equal(r.reason?.code, 'ERR_ISOLATE_RETIRED');
   vm.close();
+  assert.equal(await pool.run('2', T), 2);
 });
 
 // ---- work between evals (limits.backgroundMs) ----
@@ -422,8 +441,13 @@ test('limits.pendingHostCalls and limits.hostCalls bound host-call floods', asyn
     signals.push(this.signal);
     return new Promise(() => {});
   }
+  // (One that runs out of time retires its isolate instead.)
+  const timedOut = isolate({ ...T, host: { hang, one: host.one }, limits: { timeoutMs: 100, pendingHostCalls: 5 } });
+  await assert.rejects(timedOut.eval('(async () => { for (let i = 0; i < 5; i++) hang(); await new Promise(() => {}) })()'), limit('timeoutMs'));
+  assert.ok(signals.length === 5 && signals.every((s) => s.aborted), 'abandoned calls are aborted');
+  await assert.rejects(timedOut.eval('one()'), code('ERR_ISOLATE_RETIRED'));
+  timedOut.close();
   for (const [limits, code] of [
-    [{ timeoutMs: 100, pendingHostCalls: 5 }, 'for (let i = 0; i < 5; i++) hang(); await new Promise(() => {})'],
     [{ pendingHostCalls: 5 }, 'for (let i = 0; i < 6; i++) hang()'],
     [{ pendingHostCallBytes: 3 << 20 }, 'for (let i = 0; i < 4; i++) hang(new Uint8Array(1 << 20))'],
   ]) {

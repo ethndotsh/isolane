@@ -212,7 +212,7 @@ test('closing an isolate rejects its in-flight evals at once, and the worker sta
   rt.close();
 });
 
-test('an eval stops when its signal aborts, and the isolate stays usable', async (ctx) => {
+test('an eval stops when its signal aborts and its isolate is retired; one that never started leaves it usable', async (ctx) => {
   const rt = new Runtime({ strict });
   ctx.after(() => rt.close());
   const security = [];
@@ -247,12 +247,23 @@ test('an eval stops when its signal aborts, and the isolate stays usable', async
   assert.deepEqual(await waiting, ['ERR_ABORTED', 'gone']);
   assert.ok(Date.now() - started < 1000, 'rejected promptly');
   assert.equal(hostSignal?.aborted, true);
-  // The queued eval never ran; the isolate keeps its state.
-  assert.equal(await vm.eval('n'), 1);
+  // Stopped part-way: both isolates are retired.
+  await assert.rejects(vm.eval('n'), code('ERR_ISOLATE_RETIRED'));
+  await assert.rejects(host.eval('1'), code('ERR_ISOLATE_RETIRED'));
+  // Aborted before it started: it never runs, and the isolate keeps its state.
+  const idle = t.isolate();
+  await idle.eval('globalThis.n = 1');
+  const slow = idle.eval('new Promise((r) => setTimeout(r, 100))');
+  const skipped = new AbortController();
+  const behind = idle.eval('n += 1', { signal: skipped.signal }).catch((e) => e.code);
+  skipped.abort();
+  assert.equal(await behind, 'ERR_ABORTED');
+  await slow;
+  assert.equal(await idle.eval('n'), 1);
   // Already aborted: rejected without running.
-  await assert.rejects(vm.eval('n = 99', { signal: AbortSignal.abort() }), code('ERR_ABORTED'));
+  await assert.rejects(idle.eval('n = 99', { signal: AbortSignal.abort() }), code('ERR_ABORTED'));
   assert.equal(await t.run('2', { signal: new AbortController().signal }), 2);
-  assert.equal(await vm.eval('n'), 1);
+  assert.equal(await idle.eval('n'), 1);
   assert.deepEqual(security, []);
   rt.close();
 });

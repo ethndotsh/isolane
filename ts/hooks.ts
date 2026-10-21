@@ -45,6 +45,22 @@ export interface EvalOutcome extends EvalEvent {
   durationMs: number;
 }
 
+/** A call (`isolate.call`), before it runs. */
+export interface CallEvent {
+  tenant: string;
+  isolate: number;
+  /** The function called. */
+  name: string;
+  args: unknown[];
+}
+
+/** A call, after it ran. */
+export interface CallOutcome extends CallEvent {
+  result?: unknown;
+  error?: IsolaneError;
+  durationMs: number;
+}
+
 export interface LogEvent {
   tenant: string;
   isolate?: number;
@@ -130,6 +146,10 @@ export interface Hooks {
   beforeEval?(event: EvalEvent): Awaitable<void | Denial | { code: string }>;
   /** After it ran: `{ result }` replaces the result (when it succeeded). */
   afterEval?(event: EvalOutcome): Awaitable<void | { result: unknown }>;
+  /** Before a call: `deny(reason)` refuses it (`ERR_DENIED`); `{ args }` replaces its arguments. */
+  beforeCall?(event: CallEvent): Awaitable<void | Denial | { args: unknown[] }>;
+  /** After it ran: `{ result }` replaces the result (when it succeeded). */
+  afterCall?(event: CallOutcome): Awaitable<void | { result: unknown }>;
   onLog?(event: LogEvent): void;
   /** An uncaught exception or unhandled rejection in guest code (see `GuestErrorEvent`). */
   onGuestError?(event: GuestErrorEvent): void;
@@ -145,6 +165,7 @@ export interface Hooks {
 export interface RuntimeEvents {
   hostCall: HostCallOutcome;
   eval: EvalOutcome;
+  call: CallOutcome;
   log: LogEvent;
   guestError: GuestErrorEvent;
   limit: LimitEvent;
@@ -158,6 +179,8 @@ const HOOK_KEYS = new Set([
   'afterHostCall',
   'beforeEval',
   'afterEval',
+  'beforeCall',
+  'afterCall',
   'onLog',
   'onGuestError',
   'onLimit',
@@ -225,12 +248,14 @@ export class HookChain {
   /** Whether host calls need the interceptor path at all. */
   readonly interceptsHostCalls: boolean;
   readonly interceptsEvals: boolean;
+  readonly interceptsCalls: boolean;
 
   constructor(levels: readonly Hooks[], emitter: Emitter) {
     this.levels = levels;
     this.emitter = emitter;
     this.interceptsHostCalls = levels.some((h) => h.beforeHostCall || h.afterHostCall);
     this.interceptsEvals = levels.some((h) => h.beforeEval || h.afterEval);
+    this.interceptsCalls = levels.some((h) => h.beforeCall || h.afterCall);
   }
 
   /** Whether anything observes host-call outcomes (interceptors or listeners). */
@@ -240,6 +265,10 @@ export class HookChain {
 
   get observesEvals(): boolean {
     return this.interceptsEvals || this.emitter.has('eval');
+  }
+
+  get observesCalls(): boolean {
+    return this.interceptsCalls || this.emitter.has('call');
   }
 
   emit<K extends keyof typeof EVENT_HOOK>(event: K, payload: RuntimeEvents[K]): void {
@@ -296,6 +325,29 @@ export class HookChain {
       if (outcome.error === undefined && r && typeof r === 'object' && 'result' in r) result = (r as { result: unknown }).result;
     }
     this.emitter.emit('eval', { ...outcome, result });
+    return result;
+  }
+
+  async beforeCall(event: CallEvent): Promise<{ args: unknown[] } | { denied: string }> {
+    let args = event.args;
+    for (const level of this.levels) {
+      if (!level.beforeCall) continue;
+      const r = await level.beforeCall({ ...event, args });
+      if (isDenial(r)) return { denied: r.reason };
+      if (r && typeof r === 'object' && Array.isArray((r as { args?: unknown }).args)) args = (r as { args: unknown[] }).args;
+    }
+    return { args };
+  }
+
+  async afterCall(outcome: CallOutcome): Promise<unknown> {
+    let result = outcome.result;
+    for (let i = this.levels.length - 1; i >= 0; i--) {
+      const level = this.levels[i];
+      if (!level.afterCall) continue;
+      const r = await level.afterCall({ ...outcome, result });
+      if (outcome.error === undefined && r && typeof r === 'object' && 'result' in r) result = (r as { result: unknown }).result;
+    }
+    this.emitter.emit('call', { ...outcome, result });
     return result;
   }
 }

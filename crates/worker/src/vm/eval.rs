@@ -1,6 +1,7 @@
-//! Running guest code: one eval (compile, run, drive microtasks, timers, and
-//! host replies until its value settles), idle timers between evals, and the
-//! results sent back.
+//! Running guest code: one eval (compile and run code, or call a function
+//! the isolate defined; then drive microtasks, timers, and host replies
+//! until its value settles), idle timers between evals, and the results
+//! sent back.
 
 use std::rc::Rc;
 use std::sync::mpsc::{Receiver, RecvTimeoutError};
@@ -12,7 +13,7 @@ use super::context::Shims;
 use super::host_call::{apply_host_reply, Bridge};
 use super::mailbox::Mailbox;
 use super::watchdog::CpuClock;
-use super::{pump_tasks, Output, VmMsg};
+use super::{pump_tasks, Job, Output, VmMsg};
 use super::errors;
 use crate::proto::{fail, limit, ErrorCode, Failure, Out, ShimRef, Usage};
 use crate::js;
@@ -26,9 +27,17 @@ const BACKGROUND_POLL: Duration = Duration::from_millis(1);
 const FRAME_SLACK: usize = 1 << 20;
 
 pub(super) enum EvalEnd {
-    Done(Result<String, Failure>),
+    Done(Result<Outcome, Failure>),
     /// The supervisor disposed the VM while an eval waited on a host call.
     Disposed,
+}
+
+/// What an eval's value settled to, ready to send.
+pub(super) enum Outcome {
+    /// JSON text.
+    Json(String),
+    /// A call's result that is bytes (an ArrayBuffer or a view of one).
+    Bytes(Vec<u8>),
 }
 
 /// "Message\nstack" for thrown errors, or the value's string form, at most
@@ -77,6 +86,41 @@ fn clip(s: String) -> String {
     js::clip(s, errors::TEXT_MAX)
 }
 
+/// The function a call names: an own property of the global object (a
+/// classic script's function declaration, or one set on `globalThis`), not
+/// one inherited from its prototypes, and not one of isolane's own
+/// (`__isolane_*`). Ok(None) if there is no such function; Err if reading
+/// the property threw (a getter), with the exception caught.
+///
+/// Programs (ES modules) will look up a named export, then a method of the
+/// default export, here instead.
+fn handler<'s>(scope: &mut v8::PinScope<'s, '_>, name: &str) -> Result<Option<v8::Local<'s, v8::Function>>, ()> {
+    if name.starts_with("__isolane_") {
+        return Ok(None);
+    }
+    let Some(key) = v8::String::new(scope, name) else { return Ok(None) };
+    let global = scope.get_current_context().global(scope);
+    if global.has_own_property(scope, key.into()) != Some(true) {
+        return Ok(None);
+    }
+    let Some(value) = global.get(scope, key.into()) else { return Err(()) };
+    Ok(v8::Local::<v8::Function>::try_from(value).ok())
+}
+
+/// A call's result: bytes as they are, anything else as JSON. Bytes count
+/// against `limits.resultBytes` as JSON does.
+fn to_outcome(scope: &mut v8::PinScope, value: v8::Local<v8::Value>) -> Result<Outcome, Failure> {
+    let max = crate::limits::get().result_bytes.min(crate::frame::MAX_FRAME - FRAME_SLACK);
+    match crate::bytes::copy_bytes_max(scope, value, max) {
+        Some(Ok(bytes)) => Ok(Outcome::Bytes(bytes)),
+        Some(Err(len)) => Err(limit(
+            "resultBytes",
+            format!("the result is {len} bytes, more than the {max}-byte limit (limits.resultBytes)"),
+        )),
+        None => to_json(scope, value).map(Outcome::Json),
+    }
+}
+
 fn to_json(scope: &mut v8::PinScope, value: v8::Local<v8::Value>) -> Result<String, Failure> {
     if value.is_undefined() {
         return Ok("null".into());
@@ -104,21 +148,21 @@ fn to_json(scope: &mut v8::PinScope, value: v8::Local<v8::Value>) -> Result<Stri
     }
 }
 
-/// Run one eval: the `before` shims, then compile and run the code, then
-/// drive microtasks and host replies until the completion value (or the
-/// promise it returned) settles; then each `after` shim the same way.
+/// Run one eval: the `before` shims, then compile and run the code (or call
+/// the function), then drive microtasks and host replies until the
+/// completion value (or the promise it returned) settles; then each `after`
+/// shim the same way.
 pub(super) fn eval(
     isolate: &mut v8::Isolate,
     context: &v8::Global<v8::Context>,
     shims: &Shims,
-    code: &str,
-    filename: Option<&str>,
+    job: &Job,
     mailbox: &Mailbox,
     deadline: Option<Instant>,
 ) -> EvalEnd {
     v8::scope_with_context!(scope, isolate, context);
     v8::tc_scope!(let tc, scope);
-    let end = run(tc, shims, code, filename.unwrap_or("eval.js"), mailbox, deadline);
+    let end = run(tc, shims, job, mailbox, deadline);
     // Rejections the eval left without a handler, now that it's over.
     if !matches!(end, EvalEnd::Disposed) {
         tc.reset();
@@ -130,8 +174,7 @@ pub(super) fn eval(
 fn run(
     tc: &mut v8::PinnedRef<v8::TryCatch<v8::HandleScope>>,
     shims: &Shims,
-    code: &str,
-    filename: &str,
+    job: &Job,
     mailbox: &Mailbox,
     deadline: Option<Instant>,
 ) -> EvalEnd {
@@ -158,19 +201,54 @@ fn run(
             return EvalEnd::Done(Err(shim_threw(tc, at)));
         }
     }
-    let Some(source) = v8::String::new(tc, code) else {
-        return EvalEnd::Done(Err(fail(ErrorCode::Internal, "source too large")));
+    let mut value: v8::Local<v8::Value> = match job {
+        Job::Code { code, filename } => {
+            let Some(source) = v8::String::new(tc, code) else {
+                return EvalEnd::Done(Err(fail(ErrorCode::Internal, "source too large")));
+            };
+            let Some(name) = v8::String::new(tc, filename.as_deref().unwrap_or("eval.js")) else {
+                return EvalEnd::Done(Err(fail(ErrorCode::Internal, "filename too large")));
+            };
+            let origin = v8::ScriptOrigin::new(tc, name.into(), 0, 0, false, 0, None, false, false, false, None);
+            let Some(script) = v8::Script::compile(tc, source, Some(&origin)) else {
+                return EvalEnd::Done(Err(compile_failure(tc)));
+            };
+            let Some(value) = script.run(tc) else {
+                return EvalEnd::Done(Err(guest_error(tc)));
+            };
+            value
+        }
+        Job::Call { name, args, bytes } => {
+            let handler = match handler(tc, name) {
+                Ok(Some(handler)) => handler,
+                Ok(None) => {
+                    let message = format!("the isolate has no function named {name}: define it with a function declaration or on globalThis");
+                    return EvalEnd::Done(Err(fail(ErrorCode::HandlerNotFound, clip(message))));
+                }
+                Err(()) => return EvalEnd::Done(Err(guest_error(tc))),
+            };
+            let parsed = v8::String::new(tc, args).and_then(|s| v8::json::parse(tc, s));
+            let Some(array) = parsed.and_then(|v| v8::Local::<v8::Array>::try_from(v).ok()) else {
+                return EvalEnd::Done(Err(fail(ErrorCode::Internal, "call arguments are not a JSON array")));
+            };
+            let mut argv: Vec<v8::Local<v8::Value>> = Vec::with_capacity(array.length() as usize);
+            for i in 0..array.length() {
+                let arg = array.get_index(tc, i).unwrap_or_else(|| v8::undefined(tc).into());
+                argv.push(arg);
+            }
+            for (index, data) in bytes {
+                if let Some(slot) = argv.get_mut(*index as usize) {
+                    *slot = crate::bytes::new_u8array(tc, data).into();
+                }
+            }
+            let this: v8::Local<v8::Value> = v8::undefined(tc).into();
+            let Some(value) = handler.call(tc, this, &argv) else {
+                return EvalEnd::Done(Err(guest_error(tc)));
+            };
+            value
+        }
     };
-    let Some(name) = v8::String::new(tc, filename) else {
-        return EvalEnd::Done(Err(fail(ErrorCode::Internal, "filename too large")));
-    };
-    let origin = v8::ScriptOrigin::new(tc, name.into(), 0, 0, false, 0, None, false, false, false, None);
-    let Some(script) = v8::Script::compile(tc, source, Some(&origin)) else {
-        return EvalEnd::Done(Err(compile_failure(tc)));
-    };
-    let Some(mut value) = script.run(tc) else {
-        return EvalEnd::Done(Err(guest_error(tc)));
-    };
+    let call = matches!(job, Job::Call { .. });
 
     // What's settling: the guest's value (None), or `after` shim i's promise.
     let mut stage: Option<usize> = None;
@@ -207,7 +285,7 @@ fn run(
         }
         let next = stage.map_or(0, |i| i + 1);
         let Some((func, at)) = shims.after.get(next) else {
-            return EvalEnd::Done(to_json(tc, result));
+            return EvalEnd::Done(if call { to_outcome(tc, result) } else { to_json(tc, result).map(Outcome::Json) });
         };
         let func = v8::Local::new(tc, func);
         let this: v8::Local<v8::Value> = v8::undefined(tc).into();
@@ -322,34 +400,47 @@ pub(super) fn run_idle_timers(scope: &mut v8::PinScope) {
 }
 
 /// A VM that couldn't start: fail its evals until it is disposed.
-pub(super) fn refuse_all(rx: &Receiver<VmMsg>, out: &Output, cause: String) {
+pub(super) fn refuse_all(id: u64, rx: &Receiver<VmMsg>, out: &Output, cause: String) {
     while let Ok(msg) = rx.recv() {
         match msg {
-            VmMsg::Eval { req, .. } => send_result(out, req, Err(limit("workerMemoryBytes", cause.clone())), Usage::default()),
+            VmMsg::Eval { req, .. } => send_result(out, (id, req), Err(limit("workerMemoryBytes", cause.clone())), Usage::default(), None),
             VmMsg::HostReply { .. } => {}
             VmMsg::Dispose => return,
         }
     }
 }
 
-pub(super) fn send_result(out: &Output, req: u64, result: Result<String, Failure>, usage: Usage) {
+/// Send eval `req`'s result (`vm` is its isolate). `retired`: what the
+/// isolate's later evals fail with, if it is retired.
+pub(super) fn send_result(out: &Output, (vm, req): (u64, u64), result: Result<Outcome, Failure>, usage: Usage, retired: Option<&Failure>) {
     // A result too large for a frame fails the eval (an oversized frame
     // would read as a protocol violation).
     let result = match result {
-        Ok(json) if !crate::frame::fits(json.len() + 256, 0) => {
+        Ok(Outcome::Json(json)) if !crate::frame::fits(json.len() + 1024, 0) => {
             Err(fail(ErrorCode::NotSerializable, "the result is larger than 64 MiB as JSON"))
+        }
+        Ok(Outcome::Bytes(bytes)) if !crate::frame::fits(1024, bytes.len()) => {
+            Err(fail(ErrorCode::NotSerializable, "the result is larger than 64 MiB"))
         }
         r => r,
     };
+    let retired = retired.map(|f| f.message.as_str());
     match result {
-        Ok(json) => {
+        Ok(Outcome::Json(json)) => {
             let value = RawValue::from_string(json).expect("V8 produced JSON");
-            out.send(&Out::Result { req, ok: true, value: Some(&value), code: None, message: None, guest: None, limit: None, shim: None, usage });
+            out.send(&Out::Result { vm, req, ok: true, value: Some(&value), bin: None, retired, code: None, message: None, guest: None, limit: None, shim: None, usage });
+        }
+        Ok(Outcome::Bytes(bytes)) => {
+            let msg = Out::Result { vm, req, ok: true, value: None, bin: Some(bytes.len()), retired, code: None, message: None, guest: None, limit: None, shim: None, usage };
+            out.send_with_bytes(&msg, &[&bytes]);
         }
         Err(f) => out.send(&Out::Result {
+            vm,
             req,
             ok: false,
             value: None,
+            bin: None,
+            retired,
             code: Some(f.code),
             message: Some(&f.message),
             guest: f.guest.as_deref(),
