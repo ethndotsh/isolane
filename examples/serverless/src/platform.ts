@@ -3,7 +3,7 @@
 // Deployers connect over a WebSocket, deploy an app, and serve its host
 // functions from their own process. A deploy loads the app as a program on
 // the app's own tenant (its own sandboxed worker process), kept warm, and
-// HTTP requests to /<app>/... call the app's `handle(request)` there.
+// HTTP requests to /<app>/... go to the app's fetch handler there.
 //
 //   node src/platform.ts          # HTTP on :8787, deployers on ws://localhost:8787/connect
 
@@ -12,7 +12,7 @@ import { IsolaneError, Runtime } from 'isolane';
 import { WebSocketServer } from 'ws';
 import { DeployerConnection } from './connection.ts';
 import type { Deploy } from './protocol.ts';
-import { RequestTooLarge, WarmApp } from './warm.ts';
+import { WarmApp } from './warm.ts';
 
 const PORT = Number(process.env.PORT ?? 8787);
 
@@ -68,18 +68,19 @@ const server = createServer(async (req, res) => {
 
   const started = performance.now();
   try {
-    const outcome = await app.serve(req, url);
-    if ('thrown' in outcome) {
-      app.connection.send({ type: 'log', level: 'error', message: `handle threw: ${outcome.thrown.stack}` });
-      return reply(res, 500, { error: outcome.thrown.name, message: outcome.thrown.message });
-    }
-    const { status, headers, body } = outcome.response;
-    res.writeHead(status, [...headers.flat(), 'x-isolane-ms', (performance.now() - started).toFixed(1)]).end(body);
+    const response = await app.serve(req, url);
+    const headers: string[] = [];
+    response.headers.forEach((value, name) => headers.push(name, value));
+    const body = Buffer.from(await response.arrayBuffer());
+    headers.push('x-isolane-ms', (performance.now() - started).toFixed(1));
+    if (response.statusText) res.writeHead(response.status, response.statusText, headers);
+    else res.writeHead(response.status, headers);
+    res.end(body);
   } catch (err) {
-    if (err instanceof RequestTooLarge) return reply(res, 413, { error: err.message });
     const e = err instanceof IsolaneError ? err : new IsolaneError('ERR_INTERNAL', String(err));
+    if (e.limit === 'bodyBytes') return reply(res, 413, { error: e.message });
     app.connection.send({ type: 'log', level: 'error', message: `${e.code}: ${e.guest?.stack ?? e.message}` });
-    // The app's own failures (it returned junk) are a 500;
+    // The app's own failures (it threw, or returned junk) are a 500;
     // running out of time or memory, a 503; anything else, ours: a 502.
     const status = e.kind === 'guest' ? 500 : e.kind === 'limit' ? 503 : 502;
     reply(res, status, { error: e.code, message: e.guest?.message ?? e.message });
