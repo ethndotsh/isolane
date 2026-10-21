@@ -475,11 +475,7 @@ export class TenantWorker {
       if (!this.#proc.alive) {
         reject(
           this.#stopped
-            ? new IsolaneError(this.#stopped.code, `isolane: worker for tenant ${this.tenant} ${this.#stopped.why}`, {
-                tenant: this.tenant,
-                // Retired by a recycle: a new isolate starts on the fresh worker.
-                retryable: this.#stopped.code === 'ERR_ISOLATE_RETIRED' ? true : undefined,
-              })
+            ? new IsolaneError(this.#stopped.code, `isolane: worker for tenant ${this.tenant} ${this.#stopped.why}`, { tenant: this.tenant })
             : new IsolaneError('ERR_WORKER_CRASHED', `worker for tenant ${this.tenant} is gone`, { tenant: this.tenant }),
         );
         return;
@@ -840,9 +836,8 @@ export class TenantWorker {
     const err = new IsolaneError(code, `isolane: worker for tenant ${this.tenant} ${why}`, {
       tenant: this.tenant,
       limit: oom ? 'workerMemoryBytes' : undefined,
-      // A fresh worker has its full memory again; a new isolate after a
-      // recycle starts on the fresh worker.
-      retryable: oom || code === 'ERR_ISOLATE_RETIRED' ? true : undefined,
+      // A fresh worker has its full memory again.
+      retryable: oom ? true : undefined,
     });
     if (oom && this.#requests.size) {
       this.#chain.emit('limit', { tenant: this.tenant, limit: 'workerMemoryBytes', message: err.message });

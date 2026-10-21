@@ -612,15 +612,15 @@ Every failure is an `IsolaneError` with `code`, `kind`, `retryable`, and
 
 | Kind | Codes |
 |---|---|
-| `guest` | `ERR_GUEST_EXCEPTION` (see `err.guest`), `ERR_UNSETTLED`, `ERR_NOT_SERIALIZABLE`, `ERR_INVALID_RETURN` |
+| `guest` | `ERR_GUEST_EXCEPTION` (see `err.guest`), `ERR_UNSETTLED`, `ERR_NOT_SERIALIZABLE`, `ERR_INVALID_RETURN`, `ERR_HANDLER_NOT_FOUND` |
 | `limit` | `ERR_LIMIT` (see `err.limit`), `ERR_ISOLATE_RETIRED` |
-| `usage` | `ERR_INVALID_CONFIG`, `ERR_ISOLATE_CLOSED`, `ERR_RUNTIME_CLOSED`, `ERR_ABORTED`, `ERR_DENIED`, `ERR_SHIM`, `ERR_HANDLER_NOT_FOUND` |
+| `usage` | `ERR_INVALID_CONFIG`, `ERR_ISOLATE_CLOSED`, `ERR_RUNTIME_CLOSED`, `ERR_ABORTED`, `ERR_DENIED`, `ERR_SHIM` |
 | `security` | `ERR_TENANT_QUARANTINED` |
 | `infrastructure` | `ERR_WORKER_CRASHED`, `ERR_WORKER_UNRESPONSIVE`, `ERR_WORKER_INCOMPATIBLE`, `ERR_ISOLATION_UNAVAILABLE`, `ERR_INTERNAL` |
 
-`ERR_DENIED` is a hook's `deny()`. `ERR_WORKER_CRASHED` and
-`ERR_WORKER_UNRESPONSIVE` are `retryable`, as is `ERR_LIMIT` for
-`workerMemoryBytes` and `ERR_ISOLATE_RETIRED` after a recycle.
+`ERR_DENIED` is a hook's `deny()`. `ERR_WORKER_CRASHED`,
+`ERR_WORKER_UNRESPONSIVE`, and `ERR_ISOLATE_RETIRED` are `retryable` (the
+last on a new isolate), as is `ERR_LIMIT` for `workerMemoryBytes`.
 
 ### What guest code sees
 

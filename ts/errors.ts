@@ -6,6 +6,8 @@
  *
  * guest (the guest code's own doing):
  * - `ERR_GUEST_EXCEPTION`: it threw, or its result promise rejected. See `guest`.
+ * - `ERR_HANDLER_NOT_FOUND`: `isolate.call(name)` named no function the
+ *   isolate's code defined.
  * - `ERR_UNSETTLED`: its result is a promise that can never settle.
  * - `ERR_NOT_SERIALIZABLE`: its completion value isn't JSON-serializable.
  * - `ERR_INVALID_RETURN`: its completion value doesn't match the `returns`
@@ -28,7 +30,7 @@
  *   guest's call. All of them emit `onLimit`.
  * - `ERR_ISOLATE_RETIRED`: an earlier failure retired this isolate (an
  *   eval that was stopped part-way, by a limit or its signal, or one that
- *   ran out of memory); create a new one.
+ *   ran out of memory), or a recycle did. Retryable: create a new one.
  *
  * usage (the calling code's doing):
  * - `ERR_INVALID_CONFIG`: the configuration is malformed (the message names
@@ -38,8 +40,6 @@
  * - `ERR_ABORTED`: the eval's `signal` was aborted (`reason`). An eval
  *   stopped while it ran retires its isolate; one that hadn't started
  *   doesn't.
- * - `ERR_HANDLER_NOT_FOUND`: `isolate.call(name)` named no function the
- *   isolate's code defined.
  * - `ERR_SHIM`: one of the embedder's `shims` threw (or, for `after`,
  *   rejected or never settled). See `shim`; the message has its error.
  * - `ERR_DENIED`: a `beforeEval` or `beforeCall` hook refused it (`reason`). (A
@@ -87,6 +87,7 @@ const KINDS: Record<IsolaneErrorCode, IsolaneErrorKind> = {
   ERR_UNSETTLED: 'guest',
   ERR_NOT_SERIALIZABLE: 'guest',
   ERR_INVALID_RETURN: 'guest',
+  ERR_HANDLER_NOT_FOUND: 'guest',
   ERR_LIMIT: 'limit',
   ERR_ISOLATE_RETIRED: 'limit',
   ERR_INVALID_CONFIG: 'usage',
@@ -94,7 +95,6 @@ const KINDS: Record<IsolaneErrorCode, IsolaneErrorKind> = {
   ERR_RUNTIME_CLOSED: 'usage',
   ERR_SHIM: 'usage',
   ERR_ABORTED: 'usage',
-  ERR_HANDLER_NOT_FOUND: 'usage',
   ERR_DENIED: 'usage',
   ERR_TENANT_QUARANTINED: 'security',
   ERR_WORKER_CRASHED: 'infrastructure',
@@ -105,7 +105,7 @@ const KINDS: Record<IsolaneErrorCode, IsolaneErrorKind> = {
 };
 
 /** Failures where running the same code again, unchanged, may succeed. */
-const RETRYABLE = new Set<IsolaneErrorCode>(['ERR_WORKER_CRASHED', 'ERR_WORKER_UNRESPONSIVE']);
+const RETRYABLE = new Set<IsolaneErrorCode>(['ERR_WORKER_CRASHED', 'ERR_WORKER_UNRESPONSIVE', 'ERR_ISOLATE_RETIRED']);
 
 export function isIsolaneErrorCode(code: unknown): code is IsolaneErrorCode {
   return typeof code === 'string' && Object.hasOwn(KINDS, code);

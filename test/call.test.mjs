@@ -34,7 +34,7 @@ test('a call passes arguments and returns results as data', async () => {
   assert.equal((await vm.call('bytes', [0])).length, 0);
   // Only functions the isolate defined as globals are callable.
   for (const name of ['missing', 'notAFunction', 'lexical', 'toString', 'hasOwnProperty']) {
-    await assert.rejects(vm.call(name), (err) => code('ERR_HANDLER_NOT_FOUND')(err) && err.kind === 'usage' && err.message.includes(name), name);
+    await assert.rejects(vm.call(name), (err) => code('ERR_HANDLER_NOT_FOUND')(err) && err.kind === 'guest' && err.message.includes(name), name);
   }
   // isolane's own are refused before they're sent.
   await assert.rejects(vm.call('__isolane_web_fetch'), code('ERR_INVALID_CONFIG'));
@@ -84,7 +84,7 @@ test('a call stopped part-way retires its isolate', async () => {
   const vm = isolate({ ...T, limits: { timeoutMs: 100 } });
   await vm.eval('function spin() { for (;;) {} } function ok() { return 1 }');
   await assert.rejects(vm.call('spin'), limit('timeoutMs'));
-  await assert.rejects(vm.call('ok'), code('ERR_ISOLATE_RETIRED'));
+  await assert.rejects(vm.call('ok'), (err) => code('ERR_ISOLATE_RETIRED')(err) && err.retryable && err.kind === 'limit');
   await assert.rejects(vm.eval('1'), code('ERR_ISOLATE_RETIRED'));
   vm.close();
 
