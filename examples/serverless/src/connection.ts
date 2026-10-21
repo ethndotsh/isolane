@@ -28,6 +28,11 @@ export class DeployerConnection {
     });
   }
 
+  /** Whether the deployer is still connected. */
+  get open(): boolean {
+    return this.#socket.readyState === this.#socket.OPEN;
+  }
+
   send(message: ToDeployer): void {
     if (this.#socket.readyState === this.#socket.OPEN) this.#socket.send(JSON.stringify(message));
   }

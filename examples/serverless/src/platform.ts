@@ -1,9 +1,9 @@
 // A small serverless platform on isolane.
 //
 // Deployers connect over a WebSocket, deploy an app, and serve its host
-// functions from their own process; HTTP requests to /<app>/... run the
-// app's `handle(request)` in a fresh isolate on the app's own tenant (its
-// own sandboxed worker process).
+// functions from their own process. A deploy loads the app into a warm
+// isolate on the app's own tenant (its own sandboxed worker process), and
+// HTTP requests to /<app>/... call the app's `handle(request)` there.
 //
 //   node src/platform.ts          # HTTP on :8787, deployers on ws://localhost:8787/connect
 
@@ -11,17 +11,12 @@ import { createServer, type ServerResponse } from 'node:http';
 import { IsolaneError, Runtime } from 'isolane';
 import { WebSocketServer } from 'ws';
 import { DeployerConnection } from './connection.ts';
-import { invoke, RequestTooLarge } from './invoke.ts';
 import type { Deploy } from './protocol.ts';
+import { RequestTooLarge, WarmApp } from './warm.ts';
 
 const PORT = Number(process.env.PORT ?? 8787);
 
-interface App {
-  deploy: Deploy;
-  connection: DeployerConnection;
-}
-
-const apps = new Map<string, App>();
+const apps = new Map<string, WarmApp>();
 
 const runtime = new Runtime({
   // ISOLANE_STRICT=0 allows a development worker without the full lockdown.
@@ -30,18 +25,35 @@ const runtime = new Runtime({
   hooks: { onSecurityEvent: (e) => console.warn(`[security] ${e.kind} in ${e.tenant}: ${e.detail ?? ''}`) },
 });
 
-function deployed(deploy: Deploy, connection: DeployerConnection): void {
+/** Load the app; once its code has run, it replaces the version serving now (which finishes its requests). */
+async function deployed(deploy: Deploy, connection: DeployerConnection): Promise<void> {
   const current = apps.get(deploy.app);
   if (current && current.connection !== connection) {
     return connection.send({ type: 'error', message: `${deploy.app} belongs to another deployer` });
   }
-  apps.set(deploy.app, { deploy, connection });
+  const next = new WarmApp(runtime.tenant(deploy.app), deploy, connection, `http://localhost:${PORT}`);
+  try {
+    await next.start();
+  } catch (err) {
+    // The app's code didn't load (a syntax error, a top-level throw): the
+    // version serving now, if any, keeps serving.
+    const e = err instanceof IsolaneError ? err : new IsolaneError('ERR_INTERNAL', String(err));
+    return connection.send({ type: 'error', message: `${deploy.app} failed to load: ${e.guest?.stack ?? e.message}` });
+  }
+  // A deploy from a connection that closed meanwhile goes nowhere.
+  if (!connection.open) return next.close();
+  apps.get(deploy.app)?.close();
+  apps.set(deploy.app, next);
   connection.send({ type: 'deployed', app: deploy.app, url: `http://localhost:${PORT}/${deploy.app}/` });
 }
 
 /** An app lives as long as its deployer's connection. */
 function disconnected(connection: DeployerConnection): void {
-  for (const [name, app] of apps) if (app.connection === connection) apps.delete(name);
+  for (const [name, app] of apps) {
+    if (app.connection !== connection) continue;
+    apps.delete(name);
+    app.close();
+  }
 }
 
 function reply(res: ServerResponse, status: number, body: unknown): void {
@@ -56,7 +68,7 @@ const server = createServer(async (req, res) => {
 
   const started = performance.now();
   try {
-    const outcome = await invoke(runtime.tenant(name), app.deploy, app.connection, req, url);
+    const outcome = await app.serve(req, url);
     if ('thrown' in outcome) {
       app.connection.send({ type: 'log', level: 'error', message: `handle threw: ${outcome.thrown.stack}` });
       return reply(res, 500, { error: outcome.thrown.name, message: outcome.thrown.message });
@@ -67,7 +79,7 @@ const server = createServer(async (req, res) => {
     if (err instanceof RequestTooLarge) return reply(res, 413, { error: err.message });
     const e = err instanceof IsolaneError ? err : new IsolaneError('ERR_INTERNAL', String(err));
     app.connection.send({ type: 'log', level: 'error', message: `${e.code}: ${e.guest?.stack ?? e.message}` });
-    // The app's own failures (it threw at load, returned junk) are a 500;
+    // The app's own failures (it returned junk) are a 500;
     // running out of time or memory, a 503; anything else, ours: a 502.
     const status = e.kind === 'guest' ? 500 : e.kind === 'limit' ? 503 : 502;
     reply(res, status, { error: e.code, message: e.guest?.message ?? e.message });
