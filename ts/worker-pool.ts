@@ -228,8 +228,23 @@ export interface IsolateState {
   callBytes: number;
   /** Set once the worker retired it (an eval was stopped part-way, or it ran out of memory): what its evals fail with. */
   retired?: string;
+  /** The program it's an instance of, if it is one. */
+  readonly program?: number;
+  /** Set when work between evals retired it in the worker (its next eval fails with that limit): a program routes no more calls here. */
+  retiring?: string;
+  /** Told what each of its evals and its background work cost (a program's usage). */
+  onUsage?: (usage: WorkerUsage) => void;
   readonly dispose: () => void;
 }
+
+/** What a program adds to its instances: its id, and its env (JSON-serializable) with its host functions in it. */
+export interface ProgramSpec {
+  readonly id: number;
+  readonly env: Readonly<Record<string, unknown>>;
+}
+
+/** `program` in an event, for an isolate that is a program's instance. */
+const ofProgram = (state: IsolateState | undefined) => (state?.program === undefined ? {} : { program: state.program });
 
 export interface TenantWorkerOptions {
   tenant: string;
@@ -354,6 +369,11 @@ export class TenantWorker {
     return this.#proc.pid;
   }
 
+  /** The worker process is running (it may still be starting). */
+  get alive(): boolean {
+    return this.#proc.alive;
+  }
+
   /** Add the worker's CPU time since the last sample to the tenant's usage. */
   sampleCpu(): void {
     if (!this.#proc.alive) return;
@@ -370,12 +390,17 @@ export class TenantWorker {
 
   #limit(limit: string, message: string, isolate?: number): IsolaneError {
     const err = limitError(limit, message, this.tenant);
-    this.#chain.emit('limit', { tenant: this.tenant, isolate, limit, message: err.message });
+    const state = isolate === undefined ? undefined : this.#isolates.get(isolate);
+    this.#chain.emit('limit', { tenant: this.tenant, isolate, ...ofProgram(state), limit, message: err.message });
     return err;
   }
 
-  /** Start an isolate. Throws ERR_LIMIT (isolates) or ERR_INVALID_CONFIG (name collisions). */
-  createIsolate(id: number, config: ResolvedConfig, chain: HookChain): IsolateState {
+  /**
+   * Start an isolate. Throws ERR_LIMIT (isolates) or ERR_INVALID_CONFIG
+   * (name collisions). A program's instance gets its env, with the
+   * config's host functions mounted in it instead of on the global.
+   */
+  createIsolate(id: number, config: ResolvedConfig, chain: HookChain, program?: ProgramSpec): IsolateState {
     if (this.#isolates.size >= this.limits.isolates) {
       throw this.#limit('isolates', `tenant ${this.tenant} already has ${this.limits.isolates} isolates`);
     }
@@ -390,8 +415,10 @@ export class TenantWorker {
       throw err instanceof TypeError ? invalidConfig('', (err as Error).message.replace(/^isolane: /, '')) : err;
     }
     const functions = [...config.host, ...caps.entries];
+    const inEnv = new Set<HostEntry>(program ? config.host : []);
     const state: IsolateState = {
       id,
+      program: program?.id,
       functions,
       chain,
       limits: config.limits,
@@ -416,11 +443,28 @@ export class TenantWorker {
       wasm: config.wasm,
       web: config.web !== false,
       baseUrl: config.web ? config.web.baseUrl : undefined,
-      functions: functions.map((f) => ({ path: f.path, sync: f.sync })),
+      functions: functions.map((f) => (inEnv.has(f) ? { path: f.path, sync: f.sync, env: true } : { path: f.path, sync: f.sync })),
       prelude: caps.prelude,
       shims: config.shims,
+      env: program ? JSON.stringify(program.env) : undefined,
     });
     return state;
+  }
+
+  /**
+   * Load a program into isolate `state`: compile its modules and evaluate
+   * them, under the setup rules. `files` maps paths to module sources;
+   * `main` is the entry. Resolves once setup is done.
+   */
+  load(state: IsolateState, req: number, main: string, files: Readonly<Record<string, string>>, signal?: AbortSignal): Promise<unknown> {
+    // A frame carries at most 64 MiB, as for an eval's code.
+    const codeBytes = Math.min(state.limits.codeBytes, MAX_FRAME - 64 * 1024);
+    let bytes = 0;
+    for (const [path, source] of Object.entries(files)) bytes += Buffer.byteLength(path, 'utf8') + Buffer.byteLength(source, 'utf8');
+    if (bytes > codeBytes) {
+      return Promise.reject(this.#limit('codeBytes', `the program is larger than ${codeBytes} bytes`, state.id));
+    }
+    return this.#submit(state, req, { t: 'load', vm: state.id, req, main, files: { ...files } }, [], signal);
   }
 
   /** `last`: the isolate closes after this eval (a one-shot run), so the
@@ -626,7 +670,8 @@ export class TenantWorker {
     }
   }
 
-  #count(u: WorkerUsage): void {
+  #count(u: WorkerUsage, vm: number): void {
+    this.#isolates.get(vm)?.onUsage?.(u);
     if (u.cpuUs !== undefined) this.#usage.cpuMs += u.cpuUs / 1000;
     const memory = (u.heapBytes ?? 0) + (u.externalBytes ?? 0);
     if (memory > this.#usage.peakMemoryBytes) this.#usage.peakMemoryBytes = memory;
@@ -634,7 +679,7 @@ export class TenantWorker {
 
   #onMessage(msg: Exclude<WorkerMessage, { t: 'ready' }>): void {
     if (msg.t === 'usage') {
-      this.#count(msg);
+      this.#count(msg, msg.vm);
       for (const p of this.#requests.values()) if (p.isolate.id === msg.vm) p.rearm?.();
       if (msg.limit !== undefined) {
         const state = this.#isolates.get(msg.vm);
@@ -643,6 +688,7 @@ export class TenantWorker {
         // The isolate is retired: its host calls have no one waiting. (The
         // tenant's shared budget only pauses background work.)
         if (state && msg.limit !== 'workerBackgroundMs') {
+          state.retiring = message;
           this.#abandonCalls(state, new IsolaneError('ERR_LIMIT', message, { tenant: this.tenant, limit: msg.limit }));
         }
       }
@@ -651,7 +697,7 @@ export class TenantWorker {
     if (msg.t === 'result') {
       this.#usage.evals++;
       if (!msg.ok) this.#usage.failures++;
-      this.#count(msg);
+      this.#count(msg, msg.vm);
       const pending = this.#requests.get(msg.req);
       if (pending && pending.isolate.id !== msg.vm) {
         this.#proc.kill('protocol-violation', `a result for isolate ${msg.vm} answered an eval of isolate ${pending.isolate.id}`);
@@ -679,7 +725,7 @@ export class TenantWorker {
           shim: shim && msg.shim ? { phase: msg.shim.phase, index: msg.shim.index, filename: shim.filename } : undefined,
         });
         if (code === 'ERR_LIMIT') {
-          this.#chain.emit('limit', { tenant: this.tenant, isolate: pending.isolate.id, limit: msg.limit ?? 'unknown', message: msg.message });
+          this.#chain.emit('limit', { tenant: this.tenant, isolate: pending.isolate.id, ...ofProgram(pending.isolate), limit: msg.limit ?? 'unknown', message: msg.message });
         }
         // The eval ran out of a limit: its isolate's host calls have no one
         // waiting (the worker frees their slots too).

@@ -5,6 +5,7 @@
 //! - `context`: the context: web platform, removed globals, console, host
 //!   functions in their namespaces, the prelude, the embedder's shims
 //! - `eval`: running guest code and sending results
+//! - `module`: a program's ES modules, `isolane:env`, and its handlers
 //! - `host_call`: host functions and their replies
 //! - `console`: guest console output
 //! - `errors`: guest errors described, host-call attribution, and errors
@@ -20,6 +21,7 @@ mod errors;
 mod eval;
 mod host_call;
 mod mailbox;
+mod module;
 mod watchdog;
 
 use std::cell::{Cell, RefCell};
@@ -105,6 +107,9 @@ pub struct VmConfig {
     /// The embedder's shims (`shims`), in the order they run.
     #[serde(default)]
     pub shims: crate::proto::Shims,
+    /// A program's `env` (JSON text, an object): what `isolane:env`
+    /// exports, with the host functions marked `env` mounted in it.
+    pub env: Option<String>,
 }
 
 // ---- seeded entropy ----
@@ -171,6 +176,12 @@ pub enum Job {
     Code {
         code: String,
         filename: Option<String>,
+    },
+    /// Load a program: compile, instantiate, and evaluate its main module
+    /// (`main`, a path in `files`) under the setup rules.
+    Module {
+        main: String,
+        files: std::collections::BTreeMap<String, String>,
     },
     /// Call the function the isolate's code defined as `name` (see
     /// `eval::handler`), with `args` (a JSON array) and the byte arguments
@@ -400,12 +411,12 @@ fn stopped_part_way(result: &Result<Outcome, Failure>) -> Option<&'static str> {
     match result {
         Err(Failure {
             code: ErrorCode::Limit,
-            limit: Some(limit @ ("timeoutMs" | "cpuMs")),
+            limit: Some(limit @ ("timeoutMs" | "cpuMs" | "startupCpuMs")),
             ..
-        }) => Some(if *limit == "cpuMs" {
-            "limits.cpuMs"
-        } else {
-            "limits.timeoutMs"
+        }) => Some(match *limit {
+            "cpuMs" => "limits.cpuMs",
+            "startupCpuMs" => "limits.startupCpuMs",
+            _ => "limits.timeoutMs",
         }),
         Err(Failure {
             code: ErrorCode::Aborted,
@@ -454,6 +465,7 @@ fn vm_main(
     });
     isolate.set_oom_error_handler(out_of_memory);
     errors::install(&mut isolate);
+    module::install(&mut isolate);
 
     let cpu_clock = CpuClock::current();
     let handle = isolate.thread_safe_handle();
@@ -486,6 +498,8 @@ fn vm_main(
         deadline: Cell::new(None),
         timed_out: Cell::new(false),
         in_eval: Cell::new(false),
+        in_setup: Cell::new(false),
+        setup_io: Cell::new(false),
         blocked: Cell::new(std::time::Duration::ZERO),
         host_calls: Cell::new(0),
         limit_hit: RefCell::new(None),
@@ -643,15 +657,26 @@ fn vm_main(
                     continue;
                 }
                 let cpu_start = cpu_clock.map(|c| c.now()).unwrap_or_default();
+                // A program's setup runs under its own CPU budget, and
+                // without I/O.
+                let setup = matches!(job, Job::Module { .. });
+                let budget = if setup {
+                    config.limits.startup_cpu()
+                } else {
+                    cpu
+                };
                 bridge.in_eval.set(true);
+                bridge.in_setup.set(setup);
+                bridge.setup_io.set(false);
                 bridge.host_calls.set(0);
                 bridge.limit_hit.replace(None);
-                let (end, fired) = guard.run(&mut isolate, timeout, cpu, |isolate, deadline| {
+                let (end, fired) = guard.run(&mut isolate, timeout, budget, |isolate, deadline| {
                     let end = eval(isolate, &context, &shims, &job, &bridge.mailbox, deadline);
                     pump_tasks(isolate);
                     end
                 });
                 bridge.in_eval.set(false);
+                bridge.in_setup.set(false);
                 let result = match end {
                     EvalEnd::Disposed => break,
                     EvalEnd::Done(r) => r,
@@ -670,6 +695,12 @@ fn vm_main(
                     ))
                 } else if fired == Fired::Aborted {
                     Err(fail(ErrorCode::Aborted, "the eval was aborted"))
+                } else if fired == Fired::Cpu && setup {
+                    let ms = config.limits.startup_cpu_ms.unwrap_or(0);
+                    Err(limit(
+                        "startupCpuMs",
+                        format!("the program's setup used more than {ms}ms of CPU time (limits.startupCpuMs)"),
+                    ))
                 } else if fired == Fired::Cpu {
                     let ms = config.limits.cpu_ms.unwrap_or(0);
                     Err(limit(
@@ -679,7 +710,19 @@ fn vm_main(
                 } else if let Some(hit) = bridge.limit_hit.take() {
                     Err(hit)
                 } else {
-                    result
+                    match result {
+                        // Setup that failed after trying I/O: the refusal
+                        // is likely why.
+                        Err(mut f)
+                            if setup
+                                && bridge.setup_io.get()
+                                && f.code == ErrorCode::GuestException =>
+                        {
+                            f.code = ErrorCode::SetupIo;
+                            Err(f)
+                        }
+                        result => result,
+                    }
                 };
                 // An eval stopped part-way (out of time or CPU, or aborted)
                 // may have left the isolate's state half-updated: retire the

@@ -45,10 +45,12 @@ export interface EvalOutcome extends EvalEvent {
   durationMs: number;
 }
 
-/** A call (`isolate.call`), before it runs. */
+/** A call (`isolate.call`, `program.call`), before it runs. */
 export interface CallEvent {
   tenant: string;
   isolate: number;
+  /** The program, for a call to one of its instances. */
+  program?: number;
   /** The function called. */
   name: string;
   args: unknown[];
@@ -64,6 +66,8 @@ export interface CallOutcome extends CallEvent {
 export interface LogEvent {
   tenant: string;
   isolate?: number;
+  /** The program, when the isolate is one of its instances. */
+  program?: number;
   level: LogLevel;
   message: string;
   /** `guest`: the guest's console; `host`: a host function's `ctx.log`. */
@@ -79,6 +83,8 @@ export interface LogEvent {
 export interface GuestErrorEvent {
   tenant: string;
   isolate: number;
+  /** The program, when the isolate is one of its instances. */
+  program?: number;
   kind: 'exception' | 'rejection';
   error: GuestErrorInfo;
 }
@@ -87,6 +93,8 @@ export interface GuestErrorEvent {
 export interface LimitEvent {
   tenant: string;
   isolate?: number;
+  /** The program, when the isolate is one of its instances (or the limit is the program's own). */
+  program?: number;
   /** Which limit: a key of `Limits` (`timeoutMs`, `isolates`, ...). */
   limit: string;
   message: string;
@@ -96,6 +104,8 @@ export interface LimitEvent {
 export interface PolicyDenialEvent {
   tenant: string;
   isolate: number;
+  /** The program, when the isolate is one of its instances. */
+  program?: number;
   /** The guest API the policy governs. */
   api: 'fetch' | 'connect' | 'fs';
   /** What was refused: a URL, `host:port`, or a guest path. */
@@ -111,6 +121,22 @@ export interface SecurityEvent {
   quarantinedUntil?: number;
   /** What the worker did: the signal or exit code, and the end of its stderr. */
   detail: string;
+}
+
+/**
+ * A program was loaded into one of its instances (an isolate): its
+ * modules compiled and evaluated, its setup. `tenant.load()` loads the
+ * first; the rest start as calls need them.
+ */
+export interface ProgramLoadEvent {
+  tenant: string;
+  program: number;
+  isolate: number;
+  /** The main module's path. */
+  filename: string;
+  durationMs: number;
+  /** Why the load failed, if it did. */
+  error?: IsolaneError;
 }
 
 /** A tenant's worker process started or exited. */
@@ -155,6 +181,7 @@ export interface Hooks {
   onGuestError?(event: GuestErrorEvent): void;
   onLimit?(event: LimitEvent): void;
   onPolicyDenial?(event: PolicyDenialEvent): void;
+  onProgramLoad?(event: ProgramLoadEvent): void;
   /** Runtime, `defaults`, and `tenants(name)` levels only (there's no call). */
   onSecurityEvent?(event: SecurityEvent): void;
   /** Runtime, `defaults`, and `tenants(name)` levels only (there's no call). */
@@ -170,6 +197,7 @@ export interface RuntimeEvents {
   guestError: GuestErrorEvent;
   limit: LimitEvent;
   policyDenial: PolicyDenialEvent;
+  programLoad: ProgramLoadEvent;
   securityEvent: SecurityEvent;
   worker: WorkerEvent;
 }
@@ -185,6 +213,7 @@ const HOOK_KEYS = new Set([
   'onGuestError',
   'onLimit',
   'onPolicyDenial',
+  'onProgramLoad',
   'onSecurityEvent',
   'onWorker',
 ]);
@@ -234,6 +263,7 @@ const EVENT_HOOK = {
   guestError: 'onGuestError',
   limit: 'onLimit',
   policyDenial: 'onPolicyDenial',
+  programLoad: 'onProgramLoad',
   securityEvent: 'onSecurityEvent',
   worker: 'onWorker',
 } as const;
@@ -245,14 +275,17 @@ const EVENT_HOOK = {
 export class HookChain {
   readonly levels: readonly Hooks[];
   readonly emitter: Emitter;
+  /** The program whose instance this isolate is: its events say so. */
+  readonly program: number | undefined;
   /** Whether host calls need the interceptor path at all. */
   readonly interceptsHostCalls: boolean;
   readonly interceptsEvals: boolean;
   readonly interceptsCalls: boolean;
 
-  constructor(levels: readonly Hooks[], emitter: Emitter) {
+  constructor(levels: readonly Hooks[], emitter: Emitter, program?: number) {
     this.levels = levels;
     this.emitter = emitter;
+    this.program = program;
     this.interceptsHostCalls = levels.some((h) => h.beforeHostCall || h.afterHostCall);
     this.interceptsEvals = levels.some((h) => h.beforeEval || h.afterEval);
     this.interceptsCalls = levels.some((h) => h.beforeCall || h.afterCall);
@@ -272,6 +305,7 @@ export class HookChain {
   }
 
   emit<K extends keyof typeof EVENT_HOOK>(event: K, payload: RuntimeEvents[K]): void {
+    if (this.program !== undefined && !('program' in payload)) payload = { ...payload, program: this.program };
     const key = EVENT_HOOK[event];
     for (const level of this.levels) {
       const hook = level[key] as ((e: RuntimeEvents[K]) => void) | undefined;

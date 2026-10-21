@@ -7,7 +7,11 @@
  * guest (the guest code's own doing):
  * - `ERR_GUEST_EXCEPTION`: it threw, or its result promise rejected. See `guest`.
  * - `ERR_HANDLER_NOT_FOUND`: `isolate.call(name)` named no function the
- *   isolate's code defined.
+ *   isolate's code defined (for `program.call`, no export, and no method of
+ *   the default export).
+ * - `ERR_SETUP_IO`: a program's setup (its top-level code) failed after
+ *   trying I/O, which setup can't do: `fetch`, `connect()`, `fs`, and host
+ *   functions work only in calls. See `guest`.
  * - `ERR_UNSETTLED`: its result is a promise that can never settle.
  * - `ERR_NOT_SERIALIZABLE`: its completion value isn't JSON-serializable.
  * - `ERR_INVALID_RETURN`: its completion value doesn't match the `returns`
@@ -37,6 +41,7 @@
  *   the field). Thrown synchronously.
  * - `ERR_ISOLATE_CLOSED`: the isolate was closed (or its tenant stopped).
  * - `ERR_RUNTIME_CLOSED`: the runtime was closed.
+ * - `ERR_PROGRAM_CLOSED`: the program was closed (`program.close()`).
  * - `ERR_ABORTED`: the eval's `signal` was aborted (`reason`). An eval
  *   stopped while it ran retires its isolate; one that hadn't started
  *   doesn't.
@@ -72,6 +77,8 @@ export type IsolaneErrorCode =
   | 'ERR_SHIM'
   | 'ERR_ABORTED'
   | 'ERR_HANDLER_NOT_FOUND'
+  | 'ERR_SETUP_IO'
+  | 'ERR_PROGRAM_CLOSED'
   | 'ERR_DENIED'
   | 'ERR_TENANT_QUARANTINED'
   | 'ERR_WORKER_CRASHED'
@@ -88,11 +95,13 @@ const KINDS: Record<IsolaneErrorCode, IsolaneErrorKind> = {
   ERR_NOT_SERIALIZABLE: 'guest',
   ERR_INVALID_RETURN: 'guest',
   ERR_HANDLER_NOT_FOUND: 'guest',
+  ERR_SETUP_IO: 'guest',
   ERR_LIMIT: 'limit',
   ERR_ISOLATE_RETIRED: 'limit',
   ERR_INVALID_CONFIG: 'usage',
   ERR_ISOLATE_CLOSED: 'usage',
   ERR_RUNTIME_CLOSED: 'usage',
+  ERR_PROGRAM_CLOSED: 'usage',
   ERR_SHIM: 'usage',
   ERR_ABORTED: 'usage',
   ERR_DENIED: 'usage',

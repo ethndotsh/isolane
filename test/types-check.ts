@@ -47,6 +47,14 @@ async function typed() {
   rt.tenant('t').isolate({ shims: { after: { filename: 'x.js' } } });
   const off = rt.on('limit', (e) => void (e.limit satisfies string));
   off();
+  await using program = await rt.tenant('t').load('export const f = () => 1;', { env: { a: 1 }, instances: { max: 2 }, host: { db: { getUser } } });
+  const fromProgram: { id: number; name: string } = await program.call('f', [1], { returns: User });
+  const loads: number = program.usage().loads;
+  // @ts-expect-error instances fields are named
+  void rt.tenant('t').load('', { instances: { size: 2 } });
+  rt.on('programLoad', (e) => void (e.durationMs satisfies number));
+  void fromProgram;
+  void loads;
   void total;
   void untyped;
   void viaTenant;

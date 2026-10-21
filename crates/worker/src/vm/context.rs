@@ -1,6 +1,6 @@
 //! A VM's context: the web platform (if on), removed globals, console, host
-//! functions (in their namespaces), the trusted prelude, and the
-//! embedder's shims.
+//! functions (in their namespaces, on the global or in a program's `env`),
+//! the trusted prelude, and the embedder's shims.
 
 use super::console::install_console;
 use super::eval::{describe, shim_failure};
@@ -69,7 +69,15 @@ pub(super) fn new_context(
             .map_err(|e| fail(ErrorCode::IsolateRetired, e))?;
     }
     install_console(scope, global);
-    install_functions(scope, global, config).map_err(|e| fail(ErrorCode::IsolateRetired, e))?;
+    let env = match &config.env {
+        Some(json) => Some(new_env(scope, json).map_err(|e| fail(ErrorCode::IsolateRetired, e))?),
+        None => None,
+    };
+    install_functions(scope, global, env, config)
+        .map_err(|e| fail(ErrorCode::IsolateRetired, e))?;
+    if let Some(env) = env {
+        super::module::set_env(scope, env);
+    }
     if let Some(prelude) = &config.prelude {
         // The supervisor's own code (brokers, globals): named isolane:, so
         // its frames are isolane's in guest stacks.
@@ -187,33 +195,54 @@ fn compile_shims(scope: &mut v8::PinScope, shims: &crate::proto::Shims) -> Resul
     Ok(Shims { before, after })
 }
 
+/// A program's `env`: its JSON, parsed in the context (an object: the
+/// supervisor serialized it).
+fn new_env<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    json: &str,
+) -> Result<v8::Local<'s, v8::Object>, String> {
+    v8::String::new(scope, json)
+        .and_then(|text| v8::json::parse(scope, text))
+        .and_then(|env| v8::Local::<v8::Object>::try_from(env).ok())
+        .ok_or_else(|| "vm setup failed: env is not a JSON object".to_string())
+}
+
 /// Host functions at their paths: `["db", "getUser"]` is a function on a
-/// `db` object on the global. Namespace objects are frozen once every
-/// function is in place, so guest code can't swap one out for another
-/// tenant's view of it (it could only shadow its own).
+/// `db` object on the global (or, for a program's functions, in its `env`).
+/// Namespace objects are frozen once every function is in place, so guest
+/// code can't swap one out for another tenant's view of it (it could only
+/// shadow its own).
 fn install_functions(
     scope: &mut v8::PinScope,
     global: v8::Local<v8::Object>,
+    env: Option<v8::Local<v8::Object>>,
     config: &VmConfig,
 ) -> Result<(), String> {
-    // Namespaces this VM made, by path: a host namespace replaces whatever
-    // global had its name (the configuration chose it), and is never merged
-    // into an existing object.
-    let mut namespaces: Vec<(Vec<String>, v8::Local<v8::Object>)> = Vec::new();
+    // Namespaces this VM made, by root and path: a host namespace replaces
+    // whatever value had its name (the configuration chose it), and is
+    // never merged into an existing object.
+    let mut namespaces: Vec<(bool, Vec<String>, v8::Local<v8::Object>)> = Vec::new();
     for (index, spec) in config.functions.iter().enumerate() {
         let Some((name, parents)) = spec.path.split_last() else {
             return Err("vm setup failed: a host function with an empty path".into());
         };
-        let mut holder = global;
+        let mut holder = match (spec.env, env) {
+            (false, _) => global,
+            (true, Some(env)) => env,
+            (true, None) => return Err("vm setup failed: an env function without an env".into()),
+        };
         for depth in 1..=parents.len() {
             let prefix = &parents[..depth];
-            holder = match namespaces.iter().find(|(p, _)| p.as_slice() == prefix) {
-                Some((_, obj)) => *obj,
+            let found = namespaces
+                .iter()
+                .find(|(in_env, p, _)| *in_env == spec.env && p.as_slice() == prefix);
+            holder = match found {
+                Some((_, _, obj)) => *obj,
                 None => {
                     let obj = v8::Object::new(scope);
                     let key = js::short_string(scope, &prefix[depth - 1]);
                     holder.set(scope, key.into(), obj.into());
-                    namespaces.push((prefix.to_vec(), obj));
+                    namespaces.push((spec.env, prefix.to_vec(), obj));
                     obj
                 }
             };
@@ -231,7 +260,7 @@ fn install_functions(
         let key = js::short_string(scope, name);
         holder.set(scope, key.into(), func.into());
     }
-    for (_, ns) in namespaces {
+    for (_, _, ns) in namespaces {
         ns.set_integrity_level(scope, v8::IntegrityLevel::Frozen);
     }
     Ok(())

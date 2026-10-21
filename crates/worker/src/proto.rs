@@ -7,7 +7,7 @@ use serde_json::value::RawValue;
 
 /// The protocol version. The worker reports it in `ready`; a supervisor
 /// that speaks another version refuses the worker.
-pub const PROTOCOL_VERSION: u32 = 6;
+pub const PROTOCOL_VERSION: u32 = 7;
 
 /// Supervisor → worker.
 #[derive(Deserialize)]
@@ -17,7 +17,7 @@ pub enum In {
     Create {
         vm: u64,
         #[serde(flatten)]
-        config: crate::vm::VmConfig,
+        config: Box<crate::vm::VmConfig>,
     },
     #[serde(rename_all = "camelCase")]
     Eval {
@@ -31,9 +31,21 @@ pub enum In {
         #[serde(default)]
         last: bool,
     },
-    /// Call the function the isolate's code defined as `name`, with
-    /// arguments as data: nothing is compiled. Runs and is budgeted as an
-    /// eval (`req` names it in `result` and `abort`).
+    /// Load a program into the isolate: compile its main module (and, with
+    /// multi-file programs, what it imports), instantiate it, and evaluate
+    /// it under the setup rules (`limits.startupCpuMs`, no I/O). Runs as an
+    /// eval (`req` names it in `result` and `abort`); an isolate takes one.
+    Load {
+        vm: u64,
+        req: u64,
+        /// The main module's path in `files`.
+        main: String,
+        /// Module sources by path (their names in stack traces).
+        files: std::collections::BTreeMap<String, String>,
+    },
+    /// Call the function the isolate's code defined as `name` (a program's
+    /// export), with arguments as data: nothing is compiled. Runs and is
+    /// budgeted as an eval (`req` names it in `result` and `abort`).
     Call {
         vm: u64,
         req: u64,
@@ -89,6 +101,9 @@ pub struct FunctionSpec {
     pub path: Vec<String>,
     #[serde(default)]
     pub sync: bool,
+    /// Under the program's `env` object (`isolane:env`), not the global.
+    #[serde(default)]
+    pub env: bool,
 }
 
 /// Trusted embedder code run around guest code. `setup` runs once, after
@@ -153,6 +168,9 @@ pub enum ErrorCode {
     /// A call named no function the isolate's code defined.
     #[serde(rename = "ERR_HANDLER_NOT_FOUND")]
     HandlerNotFound,
+    /// A program's setup failed after trying I/O, which setup can't do.
+    #[serde(rename = "ERR_SETUP_IO")]
+    SetupIo,
     #[serde(rename = "ERR_INTERNAL")]
     Internal,
 }

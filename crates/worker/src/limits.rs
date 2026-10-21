@@ -16,6 +16,9 @@ pub struct Limits {
     pub timeout_ms: Option<u64>,
     /// CPU time per eval (and per continuation), Linux only. None: no limit.
     pub cpu_ms: Option<u64>,
+    /// CPU time for a program's setup (evaluating its modules), Linux
+    /// only, in place of `cpu_ms`. None: no limit.
+    pub startup_cpu_ms: Option<u64>,
     /// The V8 heap; exceeding it retires the isolate. None: V8's default.
     pub heap_bytes: Option<u64>,
     /// Live timers (setTimeout/setInterval); more throws a RangeError.
@@ -52,6 +55,7 @@ impl Default for Limits {
         Limits {
             timeout_ms: None,
             cpu_ms: None,
+            startup_cpu_ms: None,
             heap_bytes: None,
             timers: 10_000,
             background_ms: None,
@@ -80,6 +84,11 @@ impl Limits {
 
     pub fn cpu(&self) -> Option<Duration> {
         self.cpu_ms
+            .map(|ms| Duration::from_millis(ms.min(MAX_BUDGET_MS)))
+    }
+
+    pub fn startup_cpu(&self) -> Option<Duration> {
+        self.startup_cpu_ms
             .map(|ms| Duration::from_millis(ms.min(MAX_BUDGET_MS)))
     }
 }

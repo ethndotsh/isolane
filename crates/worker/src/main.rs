@@ -359,7 +359,7 @@ impl Worker {
 
     fn handle(&mut self, msg: In, attached: &[u8]) -> Result<(), Exit> {
         match msg {
-            In::Create { vm, config } => self.create(vm, config),
+            In::Create { vm, config } => self.create(vm, *config),
             In::Eval {
                 vm,
                 req,
@@ -374,6 +374,22 @@ impl Worker {
                         req,
                         job: Job::Code { code, filename },
                         last,
+                    },
+                );
+            }
+            In::Load {
+                vm,
+                req,
+                main,
+                files,
+            } => {
+                self.eval(
+                    vm,
+                    req,
+                    VmMsg::Eval {
+                        req,
+                        job: Job::Module { main, files },
+                        last: false,
                     },
                 );
             }

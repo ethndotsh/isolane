@@ -26,11 +26,23 @@ export type WorkerCommand =
       wasm: boolean;
       web: boolean;
       baseUrl?: string;
-      functions: { path: readonly string[]; sync: boolean }[];
+      /** `env`: under the program's env object, not the global. */
+      functions: { path: readonly string[]; sync: boolean; env?: true }[];
       prelude?: string;
       shims: ResolvedShims;
+      /** A program's env, as JSON text (an object). */
+      env?: string;
     }
   | { t: 'eval'; vm: number; req: number; code: string; filename: string; last?: true }
+  | {
+      t: 'load';
+      vm: number;
+      req: number;
+      /** The main module's path in `files`. */
+      main: string;
+      /** Module sources by path. */
+      files: Record<string, string>;
+    }
   | {
       t: 'call';
       vm: number;
@@ -58,7 +70,7 @@ export type WorkerCommand =
   | { t: 'dispose'; vm: number };
 
 /** The protocol version this library speaks; a worker reporting another is refused. */
-export const PROTOCOL_VERSION = 6;
+export const PROTOCOL_VERSION = 7;
 
 /**
  * Input queued for a worker that it hasn't read. A worker reads its input

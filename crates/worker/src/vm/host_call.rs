@@ -37,6 +37,11 @@ pub(super) struct Bridge {
     pub(super) timed_out: Cell<bool>,
     /// An eval is running (not a timer or continuation between evals).
     pub(super) in_eval: Cell<bool>,
+    /// A program's setup is running (its modules evaluating): host calls,
+    /// and so `fetch`, `connect()`, and `fs`, are refused.
+    pub(super) in_setup: Cell<bool>,
+    /// The running setup tried I/O (and was refused).
+    pub(super) setup_io: Cell<bool>,
     /// Time spent blocked in sync host calls since it was last taken: the
     /// background budget charges it (it's wall time the VM thread is held,
     /// with little CPU to show for it).
@@ -76,6 +81,29 @@ fn send_host_call(
     bridge: &Bridge,
 ) -> Option<(u64, usize)> {
     let function = args.data().uint32_value(scope).unwrap_or(u32::MAX);
+    if bridge.in_setup.get() {
+        bridge.setup_io.set(true);
+        let name = bridge
+            .names
+            .get(function as usize)
+            .map_or("", String::as_str);
+        let what = match name {
+            "__isolane_fetch" => "fetch()".to_string(),
+            "__isolane_socket" => "connect()".to_string(),
+            "__isolane_fs" => "fs".to_string(),
+            name => format!("the host function {name}"),
+        };
+        let message = format!(
+            "{what} can't be used while the program sets up (its top-level code): call it from a handler"
+        );
+        js::throw_with(
+            scope,
+            js::Class::Error,
+            &message,
+            &[("code", "ERR_SETUP_IO")],
+        );
+        return None;
+    }
     let limits = crate::limits::get();
     let internal = bridge
         .internal

@@ -1,7 +1,7 @@
-//! Running guest code: one eval (compile and run code, or call a function
-//! the isolate defined; then drive microtasks, timers, and host replies
-//! until its value settles), idle timers between evals, and the results
-//! sent back.
+//! Running guest code: one eval (compile and run code, load a program, or
+//! call a function the isolate defined; then drive microtasks, timers, and
+//! host replies until its value settles), idle timers between evals, and
+//! the results sent back.
 
 use std::rc::Rc;
 use std::sync::mpsc::{Receiver, RecvTimeoutError};
@@ -13,6 +13,7 @@ use super::context::Shims;
 use super::errors;
 use super::host_call::{apply_host_reply, Bridge};
 use super::mailbox::Mailbox;
+use super::module::{self, Handler, LoadError};
 use super::watchdog::CpuClock;
 use super::{pump_tasks, Job, Output, VmMsg};
 use crate::js;
@@ -100,8 +101,7 @@ fn clip(s: String) -> String {
 /// (`__isolane_*`). Ok(None) if there is no such function; Err if reading
 /// the property threw (a getter), with the exception caught.
 ///
-/// Programs (ES modules) will look up a named export, then a method of the
-/// default export, here instead.
+/// A VM with a program looks among its exports instead (`module::handler`).
 fn handler<'s>(
     scope: &mut v8::PinScope<'s, '_>,
     name: &str,
@@ -218,7 +218,15 @@ fn run(
         };
         shim_failure(at, what)
     };
-    for (script, at) in &shims.before {
+    // A program's setup runs without the eval shims (they run around its
+    // calls).
+    let setup = matches!(job, Job::Module { .. });
+    let (before, after): (&[_], &[_]) = if setup {
+        (&[], &[])
+    } else {
+        (&shims.before, &shims.after)
+    };
+    for (script, at) in before {
         let script = v8::Local::new(tc, script);
         if script.run(tc).is_none() {
             return EvalEnd::Done(Err(shim_threw(tc, at)));
@@ -253,9 +261,25 @@ fn run(
             };
             value
         }
+        Job::Module { main, files } => match module::load(tc, main, files) {
+            Ok(value) => value,
+            Err(LoadError::Compile) => return EvalEnd::Done(Err(compile_failure(tc))),
+            Err(LoadError::Threw) => return EvalEnd::Done(Err(guest_error(tc))),
+            Err(LoadError::Failed(f)) => return EvalEnd::Done(Err(f)),
+        },
         Job::Call { name, args, bytes } => {
-            let handler = match handler(tc, name) {
-                Ok(Some(handler)) => handler,
+            let found = match module::handler(tc, name) {
+                Ok(Handler::NoProgram) => handler(tc, name)
+                    .map(|global| global.map(|function| (function, v8::undefined(tc).into()))),
+                Ok(Handler::Found(function, this)) => Ok(Some((function, this))),
+                Ok(Handler::Missing) => {
+                    let message = format!("the program has no export named {name}, and its default export no method named {name}");
+                    return EvalEnd::Done(Err(fail(ErrorCode::HandlerNotFound, clip(message))));
+                }
+                Err(()) => Err(()),
+            };
+            let (handler, this): (v8::Local<v8::Function>, v8::Local<v8::Value>) = match found {
+                Ok(Some(found)) => found,
                 Ok(None) => {
                     let message = format!("the isolate has no function named {name}: define it with a function declaration or on globalThis");
                     return EvalEnd::Done(Err(fail(ErrorCode::HandlerNotFound, clip(message))));
@@ -281,7 +305,6 @@ fn run(
                     *slot = crate::bytes::new_u8array(tc, data).into();
                 }
             }
-            let this: v8::Local<v8::Value> = v8::undefined(tc).into();
             let Some(value) = handler.call(tc, this, &argv) else {
                 return EvalEnd::Done(Err(guest_error(tc)));
             };
@@ -305,7 +328,7 @@ fn run(
                 Settled::Failed(f) => {
                     let f = match stage {
                         Some(i) if f.code == ErrorCode::Unsettled => {
-                            shim_failure(&shims.after[i].1, "never settled".into())
+                            shim_failure(&after[i].1, "never settled".into())
                         }
                         _ => f,
                     };
@@ -318,7 +341,7 @@ fn run(
             (Err(e), None) => return EvalEnd::Done(Err(guest_failure(tc, e))),
             (Err(e), Some(i)) => {
                 let what = format!("threw: {}", describe(tc, e));
-                return EvalEnd::Done(Err(shim_failure(&shims.after[i].1, what)));
+                return EvalEnd::Done(Err(shim_failure(&after[i].1, what)));
             }
             (Ok(v), None) => result = v,
             // An `after` shim's value replaces the result unless it's undefined.
@@ -326,7 +349,11 @@ fn run(
             (Ok(_), Some(_)) => {}
         }
         let next = stage.map_or(0, |i| i + 1);
-        let Some((func, at)) = shims.after.get(next) else {
+        let Some((func, at)) = after.get(next) else {
+            if setup {
+                module::loaded(tc);
+                return EvalEnd::Done(Ok(Outcome::Json("null".into())));
+            }
             return EvalEnd::Done(if call {
                 to_outcome(tc, result)
             } else {

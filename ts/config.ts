@@ -19,6 +19,12 @@ export interface IsolateLimits {
   timeoutMs?: number | null;
   /** CPU time per eval (and per continuation); Linux only. `null`: none. Default none. */
   cpuMs?: number | null;
+  /**
+   * CPU time for a program's setup, when its modules evaluate (in place
+   * of `cpuMs`, which applies to its calls); Linux only. Its wall clock is
+   * `timeoutMs`. `null`: none. Default 1 s.
+   */
+  startupCpuMs?: number | null;
   /** The isolate's V8 heap; exceeding it retires the isolate. `null`: V8's default. Default 128 MiB. */
   heapBytes?: number | null;
   /** Live timers; more throws a RangeError in the guest. Default 10,000. */
@@ -109,6 +115,7 @@ export type Limits = IsolateLimits & TenantLimits;
 export const DEFAULT_LIMITS = Object.freeze({
   timeoutMs: 30_000,
   cpuMs: null,
+  startupCpuMs: 1_000,
   heapBytes: 128 * 1024 ** 2,
   timers: 10_000,
   backgroundMs: 1_000,
@@ -159,9 +166,9 @@ export const MAX_DURATION_MS = 2 ** 31 - 1;
 /** Every limit, with defaults filled in (`null` where a limit is off). */
 export type ResolvedLimits = { [K in keyof (Limits & RuntimeLimits)]-?: Exclude<(Limits & RuntimeLimits)[K], undefined> };
 
-const ISOLATE_LIMITS = new Set(['timeoutMs', 'cpuMs', 'heapBytes', 'timers', 'backgroundMs', 'logBytes', 'logLineBytes', 'codeBytes', 'resultBytes', 'decompressedBytes', 'pendingHostCalls', 'hostCalls', 'pendingHostCallBytes']);
+const ISOLATE_LIMITS = new Set(['timeoutMs', 'cpuMs', 'startupCpuMs', 'heapBytes', 'timers', 'backgroundMs', 'logBytes', 'logLineBytes', 'codeBytes', 'resultBytes', 'decompressedBytes', 'pendingHostCalls', 'hostCalls', 'pendingHostCallBytes']);
 const TENANT_LIMITS = new Set(['isolates', 'pendingEvals', 'workerMemoryBytes', 'idleMs', 'workerBackgroundMs', 'workerLifetimeMs', 'workerEvals']);
-const NULLABLE = new Set(['timeoutMs', 'cpuMs', 'heapBytes', 'backgroundMs', 'workerMemoryBytes', 'workerBackgroundMs', 'workerLifetimeMs', 'workerEvals']);
+const NULLABLE = new Set(['timeoutMs', 'cpuMs', 'startupCpuMs', 'heapBytes', 'backgroundMs', 'workerMemoryBytes', 'workerBackgroundMs', 'workerLifetimeMs', 'workerEvals']);
 const MINIMUM: Record<string, number> = { workerMemoryBytes: 64 * 1024 ** 2, heapBytes: 1024 ** 2 };
 /**
  * The most each limit can be: what the worker holds it in (timers: a u32;
@@ -172,6 +179,7 @@ const MAXIMUM: Record<string, number> = {
   timers: 2 ** 32 - 1,
   timeoutMs: MAX_DURATION_MS,
   cpuMs: MAX_DURATION_MS,
+  startupCpuMs: MAX_DURATION_MS,
   backgroundMs: MAX_DURATION_MS,
   idleMs: MAX_DURATION_MS,
   workerBackgroundMs: MAX_DURATION_MS,
@@ -553,6 +561,7 @@ export function workerLimits(l: ResolvedLimits) {
   return {
     timeoutMs: l.timeoutMs ?? undefined,
     cpuMs: l.cpuMs ?? undefined,
+    startupCpuMs: l.startupCpuMs ?? undefined,
     heapBytes: l.heapBytes ?? undefined,
     timers: l.timers,
     backgroundMs: l.backgroundMs ?? undefined,

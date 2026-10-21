@@ -1,16 +1,17 @@
 // The public classes: a Runtime runs each tenant in its own worker process,
 // a Tenant is one tenant's handle, and an Isolate is one V8 isolate in a
-// tenant's worker.
+// tenant's worker. Programs (program.ts) are pools of isolates.
 
 import { resolve as resolvePath } from 'node:path';
 
 import { resolve, validateConfig, validateLimits, type IsolateConfig, type ResolvedConfig, type ResolvedLimits, type RuntimeLimits } from './config.js';
 import { IsolaneError, abortedError, invalidConfig, limitError } from './errors.js';
 import { Emitter, HookChain, validateHooks, type Hooks, type RuntimeEvents } from './hooks.js';
+import { LOAD, OBSERVE, Program, USABLE, resolveInstances, type InstancesOptions } from './program.js';
 import { checkReturn, isStandardSchema, type StandardSchemaV1 } from './schema.js';
 import { resolveWorkerBinary } from './worker-binary.js';
-import { SpareWorker, TenantWorker, emptyUsage, exitCode, isOutOfMemory, type IsolateState, type TenantUsage } from './worker-pool.js';
-import { WorkerProcess, meetsStrict, type IsolationInfo, type WorkerExit } from './worker.js';
+import { SpareWorker, TenantWorker, emptyUsage, exitCode, isOutOfMemory, type IsolateState, type ProgramSpec, type TenantUsage } from './worker-pool.js';
+import { WorkerProcess, meetsStrict, type IsolationInfo, type WorkerExit, type WorkerUsage } from './worker.js';
 
 /** What `isolationReport()` finds: the host's isolation, and whether strict mode accepts it. */
 export type IsolationReport = IsolationInfo & { meetsStrict: boolean };
@@ -51,6 +52,33 @@ export interface CallOptions<S extends AnySchema | undefined = undefined> {
   returns?: S;
   /** Aborting it stops the call, as for an eval (`EvalOptions.signal`). */
   signal?: AbortSignal;
+}
+
+/** Options for `tenant.load()`: an isolate's config for its instances, and the program's own. */
+export interface LoadOptions extends IsolateConfig {
+  /** The main module's path: its name in stack traces. Default `main.js`. */
+  filename?: string;
+  /**
+   * What `import { env } from 'isolane:env'` gives the program: a JSON
+   * object, with the `host` functions mounted in it (`env.db.getUser`)
+   * instead of on the global. Default `{}`.
+   */
+  env?: Record<string, unknown>;
+  /** How its instances are kept (warm by default). */
+  instances?: InstancesOptions;
+}
+
+/** A program's env: a JSON object whose names no host function takes. */
+function checkEnv(env: unknown): Record<string, unknown> {
+  if (env === undefined) return {};
+  if (env === null || typeof env !== 'object' || Array.isArray(env)) throw invalidConfig('env', 'must be an object');
+  let copy: unknown;
+  try {
+    copy = JSON.parse(JSON.stringify(env));
+  } catch (err) {
+    throw invalidConfig('env', `must be JSON-serializable: ${(err as Error).message}`);
+  }
+  return copy as Record<string, unknown>;
 }
 
 /** A function name for `isolate.call`: not one of isolane's own (`__isolane_*`). */
@@ -132,6 +160,7 @@ const USAGE = Symbol('usage');
 const RESET_USAGE = Symbol('resetUsage');
 const RELEASE = Symbol('release');
 const STOP = Symbol('stop');
+const LOAD_PROGRAM = Symbol('loadProgram');
 
 /**
  * Runs guest code in per-tenant sandboxed worker processes. Results are
@@ -156,6 +185,7 @@ export class Runtime {
   #draining = new Map<string, TenantWorker>();
   #nextIsolate = 1;
   #nextReq = 1;
+  #nextProgram = 1;
   #closed = false;
 
   /** Internals for tests and diagnostics. */
@@ -298,8 +328,8 @@ export class Runtime {
     }
   }
 
-  /** @internal Create an isolate for `tenant` with the call's config. */
-  [CREATE](tenant: string, config: IsolateConfig): Isolate {
+  /** @internal Create an isolate for `tenant` with the call's config (a program's instance, with `program`). */
+  [CREATE](tenant: string, config: IsolateConfig, program?: ProgramSpec): Isolate {
     if (this.#closed) throw new IsolaneError('ERR_RUNTIME_CLOSED', 'isolane: the runtime is closed');
     if (typeof tenant !== 'string' || tenant === '') throw invalidConfig('tenant', 'is required (a non-empty string)');
     const until = this.#quarantined.get(tenant);
@@ -316,11 +346,43 @@ export class Runtime {
     const call = validateConfig(config, '', 'call');
     const own = this.#tenantLayer(tenant);
     const resolved = resolve([this.#runtimeLayer(), this.#defaults, own, call], this.#limits, ['runtime', 'defaults', 'tenant', 'call']);
-    const chain = new HookChain(resolved.hooks, this.#emitter);
+    if (program) {
+      for (const entry of resolved.host) {
+        const name = entry.path[0];
+        if (Object.hasOwn(program.env, name)) throw invalidConfig(`env.${name}`, `is also a host function's name (${entry.name}): host functions are mounted in env`);
+      }
+    }
+    const chain = new HookChain(resolved.hooks, this.#emitter, program?.id);
     const worker = this.#workerFor(tenant, own, resolved.web !== false);
     const id = this.#nextIsolate++;
-    const state = worker.createIsolate(id, resolved, chain);
+    const state = worker.createIsolate(id, resolved, chain, program);
     return new Isolate(worker, state, () => this.#nextReq++);
+  }
+
+  /** @internal Load a program for `tenant`: its first instance is evaluated before this resolves. */
+  async [LOAD_PROGRAM](tenant: string, source: string, options: LoadOptions): Promise<Program> {
+    if (typeof source !== 'string') {
+      throw invalidConfig('source', 'must be the main module\'s source (a string); multi-file programs ({ main, files }) are not supported yet');
+    }
+    if (options === null || typeof options !== 'object') throw invalidConfig('', 'load() options must be an object');
+    const { filename, env, instances, ...config } = options;
+    const main = checkFilename(filename) ?? 'main.js';
+    const spec: ProgramSpec = { id: this.#nextProgram++, env: checkEnv(env) };
+    const pool = resolveInstances(instances);
+    validateConfig(config, '', 'call');
+    if (this.#closed) throw new IsolaneError('ERR_RUNTIME_CLOSED', 'isolane: the runtime is closed');
+    const levels = resolve([this.#runtimeLayer(), this.#defaults, this.#tenantLayer(tenant), config], this.#limits);
+    const program = new Program({
+      id: spec.id,
+      tenant,
+      main,
+      files: Object.freeze({ [main]: source }),
+      instances: pool,
+      create: () => this[CREATE](tenant, config, spec),
+      chain: new HookChain(levels.hooks, this.#emitter, spec.id),
+    });
+    await program.start();
+    return program;
   }
 
   // ---- internals ----
@@ -476,6 +538,17 @@ export class Tenant {
     return this.#runtime[CREATE](this.name, config ?? {});
   }
 
+  /**
+   * Load a program: `source` is an ES module, evaluated once per instance
+   * (its setup, which can't do I/O and has `limits.startupCpuMs`), whose
+   * exports `program.call(name, args)` invokes. Instances are kept warm
+   * and reused (`instances`). Resolves once the first instance has loaded,
+   * so a syntax error or a throw in its top-level code rejects here.
+   */
+  load(source: string, options?: LoadOptions): Promise<Program> {
+    return this.#runtime[LOAD_PROGRAM](this.name, source, options ?? {});
+  }
+
   /** What the tenant has used so far (a copy). */
   usage(): TenantUsage {
     return this.#runtime[USAGE](this.name);
@@ -595,7 +668,8 @@ export class Isolate {
       const value = await this.#worker.call(this.#state, this.#nextReq(), name, args, signal);
       return (returns ? await checkReturn(returns, value, this.tenant) : value) as ResultOf<S>;
     }
-    const event = { tenant: this.tenant, isolate: this.id, name, args: [...args] };
+    const program = this.#chain.program;
+    const event = { tenant: this.tenant, isolate: this.id, ...(program === undefined ? {} : { program }), name, args: [...args] };
     const before = await chain.beforeCall(event);
     if ('denied' in before) {
       throw new IsolaneError('ERR_DENIED', `isolane: the call was denied: ${before.denied}`, { tenant: this.tenant, reason: before.denied });
@@ -610,6 +684,23 @@ export class Isolate {
     }
     value = await chain.afterCall({ ...event, args: before.args, durationMs: performance.now() - started, result: value });
     return (returns ? await checkReturn(returns, value, this.tenant) : value) as ResultOf<S>;
+  }
+
+  /** @internal Load a program into this isolate (a program's instance). */
+  async [LOAD](main: string, files: Readonly<Record<string, string>>): Promise<unknown> {
+    this.#checkOpen();
+    await this.#ready();
+    return this.#worker.load(this.#state, this.#nextReq(), main, files);
+  }
+
+  /** @internal Whether a program can route another call here. */
+  get [USABLE](): boolean {
+    return !this.#closed && this.#state.retired === undefined && this.#state.retiring === undefined && this.#worker.alive && !this.#worker.recycling;
+  }
+
+  /** @internal */
+  [OBSERVE](onUsage: (usage: WorkerUsage) => void): void {
+    this.#state.onUsage = onUsage;
   }
 
   /** Throws if the isolate can't run anything: closed, or retired by the worker. */
