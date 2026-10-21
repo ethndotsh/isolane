@@ -104,7 +104,8 @@ platform's):
   `DOMException`
 - `structuredClone` (with `transfer` for ArrayBuffers, ports, and
   streams), `MessageChannel`, `MessagePort`, `MessageEvent`,
-  `queueMicrotask`, `reportError`, `performance`
+  `queueMicrotask`, `reportError`, `onerror` and `onunhandledrejection`,
+  `performance`
 - `crypto.getRandomValues`, `crypto.randomUUID`, and `crypto.subtle` (Web
   Crypto: SHA-1, SHA-2, and SHA-3 digests; HMAC; AES-GCM, -CBC, -CTR, and
   -KW; RSA-OAEP, RSA-PSS, and RSASSA-PKCS1-v1_5; ECDSA and ECDH on P-256,
@@ -656,7 +657,11 @@ as in a browser or Workers:
 
 - with the web platform, an `unhandledrejection` event on the global
   object first (`event.preventDefault()` handles it), and an `error`
-  event for exceptions (as `reportError` dispatches);
+  event for exceptions (as `reportError` dispatches). Listeners added with
+  `addEventListener` and the handler attributes `onunhandledrejection` and
+  `onerror` both see them; `onerror` is called with the message, filename,
+  line, column, and error, as in a browser, and returning `true` from it
+  handles the error;
 - then the guest's console (`onLog`): `Uncaught …` or
   `Uncaught (in promise) …`;
 - and `onGuestError` (`runtime.on('guestError')`) with `{ tenant,

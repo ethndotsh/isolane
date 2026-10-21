@@ -67,8 +67,12 @@
   const FETCH_JS = "ext:isolane/fetch.js";
 
   // The global object is an EventTarget (reportError dispatches "error" on
-  // it). Set up the first time anything event-related is used.
+  // it), with the handler attributes onerror (HTML's special error handler:
+  // it gets message, filename, line, column, and error, and returning true
+  // cancels the event) and onunhandledrejection. Set up the first time
+  // anything event-related is used.
   const TARGET_METHODS = ["addEventListener", "removeEventListener", "dispatchEvent"];
+  const HANDLERS = [["error", true], ["unhandledrejection", false]];
   let events;
   function eventModule() {
     if (events) return events;
@@ -79,6 +83,11 @@
     g[webidl.brand] = webidl.brand;
     events.setEventTargetData(g);
     events.saveGlobalThisReference(g);
+    for (const { 0: type, 1: special } of HANDLERS) {
+      events.defineEventHandler(g, type, undefined, special);
+      // Non-enumerable, like every other global here.
+      ObjectDefineProperty(g, `on${type}`, { __proto__: null, enumerable: false });
+    }
     return events;
   }
   for (const name of TARGET_METHODS) {
@@ -89,6 +98,23 @@
       get() {
         eventModule();
         return g[name];
+      },
+    });
+  }
+  // Until then, accessors that set it up (defineEventHandler replaces them).
+  for (const { 0: type } of HANDLERS) {
+    const name = `on${type}`;
+    ObjectDefineProperty(g, name, {
+      __proto__: null,
+      configurable: true,
+      enumerable: false,
+      get() {
+        eventModule();
+        return g[name];
+      },
+      set(value) {
+        eventModule();
+        g[name] = value;
       },
     });
   }

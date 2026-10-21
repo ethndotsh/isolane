@@ -257,6 +257,46 @@ test('onGuestError: exceptions in timers and unhandled rejections, logged too, w
   }
 });
 
+test('onerror and onunhandledrejection: handler attributes on the global object', async () => {
+  const events = [];
+  const rt = new Runtime({ strict, hooks: { onGuestError: (e) => events.push(e), onLog: () => {} } });
+  const wait = 'new Promise((r) => setTimeout(r, 5))';
+  try {
+    assert.deepEqual(
+      await rt.run('[onerror, onunhandledrejection, Object.getOwnPropertyDescriptor(globalThis, "onerror").enumerable]', T),
+      [null, null, false],
+    );
+    // onerror gets HTML's five arguments; returning true handles the error.
+    assert.deepEqual(
+      await rt.run(
+        `let got; onerror = (message, filename, line, column, error) => { got = [message, typeof filename, typeof line, typeof column, error.message]; return true };
+         setTimeout(() => { throw new Error("in timer") }, 1); ${wait}.then(() => got)`,
+        T,
+      ),
+      ['Uncaught Error: in timer', 'string', 'number', 'number', 'in timer'],
+    );
+    assert.deepEqual(events, []);
+    // Any other return value leaves it unhandled, and null takes the handler off.
+    await rt.run(`let calls = 0; onerror = () => { calls++ }; reportError(new Error("a")); onerror = null; reportError(new Error("b")); calls`, T);
+    assert.deepEqual(events.map((e) => [e.kind, e.error.message]), [['exception', 'a'], ['exception', 'b']]);
+    // onunhandledrejection gets the event; preventDefault() handles it.
+    events.length = 0;
+    assert.equal(
+      await rt.run(`let got; onunhandledrejection = (e) => { got = e.reason.message; e.preventDefault() }; Promise.reject(new Error("r")); ${wait}.then(() => got)`, T),
+      'r',
+    );
+    assert.equal(await rt.run(`onunhandledrejection = (e) => {}; Promise.reject(new Error("unhandled")); ${wait}.then(() => typeof onunhandledrejection)`, T), 'function');
+    assert.deepEqual(events.map((e) => [e.kind, e.error.message]), [['rejection', 'unhandled']]);
+    // A value that isn't an object is null, and a handler sits alongside listeners.
+    assert.deepEqual(
+      await rt.run(`onerror = 5; const a = onerror; let n = 0; addEventListener("error", (e) => { n++; e.preventDefault() }); onerror = () => { n++ }; reportError(1); [a, n]`, T),
+      [null, 2],
+    );
+  } finally {
+    rt.close();
+  }
+});
+
 test('errors nothing handled stay within the console budget', async () => {
   const events = [];
   const logs = [];

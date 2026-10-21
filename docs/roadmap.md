@@ -396,7 +396,8 @@ Checked on the dev build (October 2026), before this work: a guest throw gave a 
 | Hide isolane's own runtime frames (`ext:`/`isolane:`) from `err.guest.stack`, `frames`, and `Uncaught` log lines; the guest's own `error.stack` keeps them (as Deno's does), and `Error.prepareStackTrace`/`captureStackTrace` are untouched | done |
 | An option to keep isolane's frames in `err.guest` (a raw stack), if debugging the runtime from the host side ever needs it | idea |
 | Errors from timers and tasks, and unhandled rejections (V8's promise-reject callback, reported once a task's microtasks have run, unless handled by then or by an `unhandledrejection` listener's `preventDefault()`): the guest's console (`Uncaught …`) and a structured `onGuestError` event (`runtime.on('guestError')`), within `limits.logBytes`; they don't fail the eval | done |
-| `onerror` / `onunhandledrejection` handler attributes on the global object (`addEventListener` works today) | planned |
+| `onerror` / `onunhandledrejection` handler attributes on the global object (Deno's `defineEventHandler`, non-enumerable like the other globals; `onerror` is HTML's special error handler, and returning true handles the error) | done |
+| `ErrorEvent`'s `filename`, `lineno`, and `colno` for errors nothing handled are empty: `core.destructureError` (runtime/core.js) returns no frames | planned |
 | Source-map support for transformed TypeScript/JSX and bundles: map frames back to original files before reporting (in the worker) | planned (with TS transform / bundling) |
 
 ### Bundles, npm, and shims
