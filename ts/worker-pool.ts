@@ -8,10 +8,10 @@ import { splitBytes, type BinaryPart } from './binary.js';
 import { capabilities } from './capabilities.js';
 import { workerLimits, type ResolvedConfig, type ResolvedLimits, type ResolvedShims } from './config.js';
 import { IsolaneError, abortedError, invalidConfig, isIsolaneErrorCode, limitError, type IsolaneErrorCode } from './errors.js';
+import { MAX_FRAME, fits } from './frame.js';
 import type { HookChain } from './hooks.js';
 import type { HostContext, HostEntry } from './host.js';
 import {
-  MAX_FRAME,
   OOM_EXIT_CODE,
   WorkerProcess,
   type LogLevel,
@@ -704,7 +704,7 @@ export class TenantWorker {
         return;
       }
       const bytes = split.parts.reduce((n, p) => n + p.bytes.length, 0);
-      if (!WorkerProcess.fits((split.json?.length ?? 0) * 3 + 1024, bytes)) {
+      if (!fits((split.json?.length ?? 0) * 3 + 1024, bytes)) {
         fail(new RangeError(`host function ${entry.name} returned more than 64 MiB`));
         return;
       }

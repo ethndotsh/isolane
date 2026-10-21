@@ -1,9 +1,10 @@
 // Network and fs brokers, and the guest-side prelude, without a worker: the
 // prelude runs in a node:vm context whose host functions cross a JSON
 // boundary as they would over the protocol. The context has a stand-in for
-// the web platform: TextEncoder/TextDecoder, and a minimal fetch over the
+// the web platform: TextEncoder/TextDecoder, a minimal fetch over the
 // broker (WEB_FETCH below) where the real one is runtime/fetch.js, tested
-// end to end in web.test.mjs.
+// end to end in web.test.mjs, and the real runtime/fs.js on a stand-in for
+// the bootstrap it's given.
 import { test, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
@@ -91,12 +92,38 @@ const WEB_FETCH = String.raw`(rawFetch) => {
   };
 }`;
 
+/** runtime/fs.js's `createFs`, with what it uses of the web platform's bootstrap. */
+const WEB_FS = String.raw`((__bootstrap) => (
+${readFileSync(new URL('../runtime/fs.js', import.meta.url), 'utf8').trim().replace(/;$/, '')}
+))({
+  core: {
+    isArrayBuffer: (v) => v instanceof ArrayBuffer,
+    isDataView: (v) => v instanceof DataView,
+    isArrayBufferView: (v) => ArrayBuffer.isView(v),
+    loadExtScript: () => ({ TextEncoder, TextDecoder }),
+  },
+  primordials: {
+    DataViewPrototypeGetBuffer: (v) => v.buffer,
+    DataViewPrototypeGetByteLength: (v) => v.byteLength,
+    DataViewPrototypeGetByteOffset: (v) => v.byteOffset,
+    ObjectFreeze: Object.freeze,
+    String,
+    TypeError,
+    TypedArrayPrototypeGetBuffer: (v) => v.buffer,
+    TypedArrayPrototypeGetByteLength: (v) => v.byteLength,
+    TypedArrayPrototypeGetByteOffset: (v) => v.byteOffset,
+    Uint8Array,
+  },
+}).createFs`;
+
 /** A guest context with the policies installed; returns an async eval. */
 function guest(policies, track) {
   const caps = capabilities({ globals: {}, ...policies }, new Set(), reporter);
   track?.(caps);
   const ctx = vm.createContext({ TextEncoder, TextDecoder });
   ctx.__isolane_web_fetch = vm.runInContext(WEB_FETCH, ctx);
+  const createFs = vm.runInContext(WEB_FS, ctx);
+  ctx.__isolane_web_fs = (raw) => (ctx.fs = createFs(raw));
   const GuestError = vm.runInContext('Error', ctx);
   const GuestTypeError = vm.runInContext('TypeError', ctx);
   const GuestUint8Array = vm.runInContext('Uint8Array', ctx);

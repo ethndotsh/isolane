@@ -9,6 +9,7 @@ import type { Readable, Writable } from 'node:stream';
 import type { PathSegment } from './binary.js';
 import type { ResolvedShims, TimeSpec } from './config.js';
 import { parseGuestError, type GuestErrorInfo } from './errors.js';
+import { encodeFrame, FrameError, FrameReader, type Frame } from './frame.js';
 
 /**
  * What the supervisor sends a worker: one variant per `proto::In` in
@@ -47,18 +48,7 @@ export type WorkerCommand =
   | { t: 'dispose'; vm: number };
 
 /** The protocol version this library speaks; a worker reporting another is refused. */
-export const PROTOCOL_VERSION = 4;
-
-/** Largest frame accepted from a worker (matches the worker's own cap). */
-export const MAX_FRAME = 64 << 20;
-
-/**
- * A frame body is UTF-8 JSON (starting with `{`), or bytes attached to
- * JSON: a 0x00 tag, a u32 little-endian JSON length, the JSON, then raw
- * bytes that the JSON's `bin` field claims, all of them, in order.
- */
-const BINARY_TAG = 0;
-const BINARY_HEADER = 5;
+export const PROTOCOL_VERSION = 5;
 
 /**
  * Input queued for a worker that it hasn't read. A worker reads its input
@@ -256,7 +246,6 @@ const toWellFormed = (s: string): string => s.replace(LONE_SURROGATE, '\ufffd');
 export class WorkerProcess {
   readonly ready: Promise<IsolationInfo>;
   #child: ChildProcessByStdio<Writable, Readable, Readable>;
-  #buf: Buffer = Buffer.alloc(0);
   #alive = true;
   #stderrTail = '';
   #stall: NodeJS.Timeout | undefined;
@@ -302,92 +291,65 @@ export class WorkerProcess {
       this.#child.kill('SIGKILL');
     };
 
-    // Chunks of a frame still arriving, joined once it's complete (joining
-    // on every chunk would copy a large frame over and over).
-    let pending: Buffer[] = [];
-    let pendingBytes = 0;
-    let need = 0;
+    // Handle one frame; false once the worker is failed.
+    const handle = (frame: Frame): boolean => {
+      const msg = parseWorkerMessage(frame.json, frame.bytes);
+      if (!msg) {
+        this.#fail('protocol-violation', 'malformed message');
+        return false;
+      }
+      if (msg.t === 'hostCall') msg.size = frame.size;
+      if (msg.t !== 'ready') {
+        if (!isReady) {
+          this.#fail('protocol-violation', 'message before ready');
+          return false;
+        }
+        handlers.onMessage(msg);
+        return true;
+      }
+      if (!isReady && msg.protocol !== PROTOCOL_VERSION) {
+        this.#fail(
+          'incompatible',
+          `the worker speaks protocol ${msg.protocol}, this library ${PROTOCOL_VERSION}: install a matching isolane-worker (${workerPath})`,
+        );
+        return false;
+      }
+      // ISOLANE_DEV_INSECURE=1 admits a dev build of the worker (no V8
+      // sandbox), outside strict mode only, for local development.
+      const devInsecure = !strict && process.env.ISOLANE_DEV_INSECURE === '1';
+      if (isReady) {
+        this.#fail('protocol-violation', 'unexpected ready');
+        return false;
+      }
+      // A build without a secure V8 sandbox is a setup problem, not an
+      // attack (a probe only reports it).
+      if (!msg.sandboxSecure && !devInsecure && !probe) {
+        this.#fail(
+          'insufficient-isolation',
+          'the worker has no secure V8 sandbox (a development build?); use a release worker, or ISOLANE_DEV_INSECURE=1 with strict: false for local development',
+        );
+        return false;
+      }
+      const { t: _, protocol: __, ...info } = msg;
+      if (strict && !probe && !meetsStrict(info)) {
+        this.#fail('insufficient-isolation', `strict mode: landlock=${info.lockdown.landlock}, seccomp=${info.lockdown.seccomp}`);
+        return false;
+      }
+      isReady = true;
+      clearTimeout(readyTimer);
+      markReady(info);
+      return true;
+    };
+    const frames = new FrameReader();
     this.#child.stdout.on('data', (chunk: Buffer) => {
       if (!this.#alive) return;
-      if (need > 0 && pendingBytes + chunk.length < need) {
-        pending.push(chunk);
-        pendingBytes += chunk.length;
-        return;
-      }
-      if (pending.length) {
-        pending.push(chunk);
-        chunk = Buffer.concat(pending, pendingBytes + chunk.length);
-        pending = [];
-        pendingBytes = 0;
-      }
-      this.#buf = this.#buf.length ? Buffer.concat([this.#buf, chunk]) : chunk;
-      need = 0;
-      while (this.#buf.length >= 4) {
-        const len = this.#buf.readUInt32LE(0);
-        if (len > MAX_FRAME) return this.#fail('protocol-violation', `frame of ${len} bytes`);
-        if (this.#buf.length < 4 + len) {
-          // Hold the partial frame until all of it is here.
-          need = 4 + len;
-          pending = [this.#buf];
-          pendingBytes = this.#buf.length;
-          this.#buf = Buffer.alloc(0);
-          break;
+      try {
+        for (const frame of frames.push(chunk)) {
+          if (!handle(frame)) return;
         }
-        const body = this.#buf.subarray(4, 4 + len);
-        this.#buf = this.#buf.subarray(4 + len);
-        let msg: WorkerMessage | null;
-        try {
-          if (body[0] === BINARY_TAG) {
-            if (body.length < BINARY_HEADER) throw new Error('truncated binary frame');
-            const jsonLen = body.readUInt32LE(1);
-            if (jsonLen > body.length - BINARY_HEADER) throw new Error('binary frame JSON overruns the frame');
-            const json = body.subarray(BINARY_HEADER, BINARY_HEADER + jsonLen).toString('utf8');
-            // Copied: host functions may keep these bytes, and they shouldn't
-            // keep the rest of the stream's buffer alive.
-            const bytes = Buffer.from(body.subarray(BINARY_HEADER + jsonLen));
-            msg = parseWorkerMessage(JSON.parse(json), bytes);
-          } else {
-            msg = parseWorkerMessage(JSON.parse(body.toString('utf8')));
-          }
-        } catch {
-          msg = null;
-        }
-        if (!msg) return this.#fail('protocol-violation', 'malformed message');
-        if (msg.t === 'hostCall') msg.size = len;
-        if (msg.t === 'ready') {
-          if (!isReady && msg.protocol !== PROTOCOL_VERSION) {
-            return this.#fail(
-              'incompatible',
-              `the worker speaks protocol ${msg.protocol}, this library ${PROTOCOL_VERSION}: install a matching isolane-worker (${workerPath})`,
-            );
-          }
-          // ISOLANE_DEV_INSECURE=1 admits a dev build of the worker (no V8
-          // sandbox), outside strict mode only, for local development.
-          const devInsecure = !strict && process.env.ISOLANE_DEV_INSECURE === '1';
-          if (isReady) return this.#fail('protocol-violation', 'unexpected ready');
-          // A build without a secure V8 sandbox is a setup problem, not an
-          // attack (a probe only reports it).
-          if (!msg.sandboxSecure && !devInsecure && !probe) {
-            return this.#fail(
-              'insufficient-isolation',
-              'the worker has no secure V8 sandbox (a development build?); use a release worker, or ISOLANE_DEV_INSECURE=1 with strict: false for local development',
-            );
-          }
-          const { t: _, protocol: __, ...info } = msg;
-          if (strict && !probe && !meetsStrict(info)) {
-            return this.#fail(
-              'insufficient-isolation',
-              `strict mode: landlock=${info.lockdown.landlock}, seccomp=${info.lockdown.seccomp}`,
-            );
-          }
-          isReady = true;
-          clearTimeout(readyTimer);
-          markReady(info);
-        } else if (!isReady) {
-          return this.#fail('protocol-violation', 'message before ready');
-        } else {
-          handlers.onMessage(msg);
-        }
+      } catch (err) {
+        if (!(err instanceof FrameError)) throw err;
+        this.#fail('protocol-violation', err.message);
       }
     });
     // Keep a little stderr for diagnostics; never parse it.
@@ -435,26 +397,8 @@ export class WorkerProcess {
   /** Send a message, with `attached` bytes after its JSON (a binary frame). */
   send(msg: WorkerCommand, attached: Uint8Array[] = []): void {
     if (!this.#alive) return;
-    const json = Buffer.from(JSON.stringify(msg, wellFormed), 'utf8');
-    if (attached.length === 0) {
-      const header = Buffer.alloc(4);
-      header.writeUInt32LE(json.length, 0);
-      this.#child.stdin.write(Buffer.concat([header, json]));
-      this.#checkBacklog();
-      return;
-    }
-    const bytes = attached.reduce((n, b) => n + b.length, 0);
-    const header = Buffer.alloc(4 + BINARY_HEADER);
-    header.writeUInt32LE(BINARY_HEADER + json.length + bytes, 0);
-    header[4] = BINARY_TAG;
-    header.writeUInt32LE(json.length, 5);
-    this.#child.stdin.write(Buffer.concat([header, json, ...attached]));
+    this.#child.stdin.write(encodeFrame(Buffer.from(JSON.stringify(msg, wellFormed), 'utf8'), attached));
     this.#checkBacklog();
-  }
-
-  /** Whether a message of `json` bytes plus `attached` bytes fits in a frame. */
-  static fits(json: number, attached: number): boolean {
-    return json + attached + (attached > 0 ? BINARY_HEADER : 0) <= MAX_FRAME;
   }
 
   kill(reason: 'killed' | 'unresponsive' | 'protocol-violation' = 'killed', detail = 'stopped by the supervisor'): void {

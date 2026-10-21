@@ -5,6 +5,7 @@ import { connect as netConnect, isIP, type Socket } from 'node:net';
 import { connect as tlsConnect } from 'node:tls';
 
 import { DEFAULT_POLICY_LIMITS } from '../config.js';
+import { ByteQueue } from './byte-queue.js';
 import { isPublicAddress, matchHost, MiB, NO_REPORTER, pinnedLookup, type BrokerFunction, type BrokerReporter } from './net.js';
 
 export interface ConnectPolicy {
@@ -39,13 +40,10 @@ const SOCKET_HIGH_WATER = 1 * MiB;
 
 interface GuestSocket {
   socket: Socket;
-  chunks: Buffer[];
-  buffered: number;
-  ended: boolean;
-  error?: Error;
+  /** What the peer sent, unread. */
+  queue: ByteQueue;
   /** The connection is gone; the entry stays only until the guest reads what's left. */
   closed?: boolean;
-  wake?: () => void;
   /** What the guest gets back from open and startTls. */
   remoteAddress: string;
 }
@@ -120,34 +118,21 @@ export function connectBroker(policy: ConnectPolicy, report: BrokerReporter = NO
       throw new Error('socket is closed');
     }
     const id = nextId++;
-    const g: GuestSocket = { socket, chunks: [], buffered: 0, ended: false, remoteAddress };
-    const wake = () => {
-      const w = g.wake;
-      g.wake = undefined;
-      w?.();
-    };
+    const queue = new ByteQueue(SOCKET_HIGH_WATER);
+    queue.source = socket;
+    const g: GuestSocket = { socket, queue, remoteAddress };
     socket.on('data', (chunk: Buffer) => {
       if (overTransfer(chunk.length)) return socket.destroy(transferError());
-      g.chunks.push(chunk);
-      g.buffered += chunk.length;
-      if (g.buffered >= SOCKET_HIGH_WATER) socket.pause();
-      wake();
+      queue.push(chunk);
     });
-    socket.on('end', () => {
-      g.ended = true;
-      wake();
-    });
-    socket.on('error', (err) => {
-      g.error = err;
-      wake();
-    });
+    socket.on('end', () => queue.end());
+    socket.on('error', (err) => queue.fail(new Error(`socket error: ${err.message}`)));
     socket.on('close', () => {
-      g.ended = true;
       g.closed = true;
       // Nothing left for the guest to read: forget it now, so a closed
       // socket stops counting against connect.limits.connections.
-      if (!g.chunks.length && !g.error && !g.wake) forget(id);
-      wake();
+      if (!queue.size && !queue.error && !queue.waiting) forget(id);
+      queue.end();
     });
     socket.setTimeout(idleTimeoutMs, () => socket.destroy(new Error('idle timeout')));
     sockets.set(id, g);
@@ -197,27 +182,23 @@ export function connectBroker(policy: ConnectPolicy, report: BrokerReporter = NO
     // A socket forgotten when its connection closed reads as ended (once).
     if (typeof id === 'number' && forgotten.delete(id)) return null;
     const g = get(id);
-    if (g.wake) throw new Error('socket.read: another read is already waiting');
-    while (g.chunks.length === 0 && !g.ended && !g.error) {
-      await new Promise<void>((r) => (g.wake = r));
-    }
-    if (g.chunks.length) {
-      const data = Buffer.concat(g.chunks);
-      g.chunks = [];
-      g.buffered = 0;
-      g.socket.resume();
-      return data;
+    if (g.queue.waiting) throw new Error('socket.read: another read is already waiting');
+    let data: Buffer | null;
+    try {
+      data = await g.queue.read();
+    } catch (err) {
+      if (g.closed) sockets.delete(id as number);
+      throw err;
     }
     // Everything's read: a closed connection's entry goes.
-    if (g.closed) sockets.delete(id as number);
-    if (g.error) throw new Error(`socket error: ${g.error.message}`);
-    return null; // end of stream
+    if (data === null && g.closed) sockets.delete(id as number);
+    return data; // null: end of stream
   };
 
   const write = async (id: unknown, data: unknown) => {
     const g = get(id);
     if (!(data instanceof Uint8Array)) throw new TypeError('socket.write: malformed data');
-    if (g.error) throw new Error(`socket error: ${g.error.message}`);
+    if (g.queue.error) throw g.queue.error;
     if (overTransfer(data.length)) {
       const err = transferError();
       g.socket.destroy(err);
@@ -241,10 +222,7 @@ export function connectBroker(policy: ConnectPolicy, report: BrokerReporter = NO
     g.socket.removeAllListeners('error');
     g.socket.removeAllListeners('close');
     g.socket.setTimeout(0);
-    g.ended = true;
-    const w = g.wake;
-    g.wake = undefined;
-    w?.();
+    g.queue.end();
   };
 
   const startTls = async (id: unknown, raw: unknown) => {
@@ -253,13 +231,13 @@ export function connectBroker(policy: ConnectPolicy, report: BrokerReporter = NO
     if (typeof servername !== 'string' || servername.length === 0 || servername.length > 253) {
       throw new TypeError('startTls: expected a server hostname');
     }
-    if (g.error || g.ended) throw new Error('startTls: the socket is closed');
+    if (g.queue.error || g.queue.ended) throw new Error('startTls: the socket is closed');
     // Bytes that arrived before the handshake and weren't read would be
     // taken as coming over TLS: refuse, as STARTTLS clients must (a
     // man-in-the-middle can inject them). That's the broker's queue and
     // Node's own buffer; bytes still in the kernel are read by the TLS
     // layer as handshake records, so they fail the handshake instead.
-    if (g.chunks.length || g.socket.readableLength > 0) throw new Error('startTls: the server sent data before the TLS handshake');
+    if (g.queue.size || g.socket.readableLength > 0) throw new Error('startTls: the server sent data before the TLS handshake');
     release(id as number, g);
     upgrading++;
     try {
@@ -280,10 +258,7 @@ export function connectBroker(policy: ConnectPolicy, report: BrokerReporter = NO
     if (!g) return;
     sockets.delete(id as number);
     g.socket.destroy();
-    g.ended = true;
-    const w = g.wake;
-    g.wake = undefined;
-    w?.();
+    g.queue.end();
   };
 
   const fn: BrokerFunction = (op: unknown, ...args: unknown[]) => {

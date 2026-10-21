@@ -212,6 +212,20 @@
     },
   });
 
+  // fs: an object over the isolate's fs policy, handed over the same way
+  // (runtime/fs.js). Without a policy there is no `fs` global.
+  const FS_JS = "ext:isolane/fs.js";
+  ObjectDefineProperty(g, "__isolane_web_fs", {
+    __proto__: null,
+    configurable: true,
+    enumerable: false,
+    writable: false,
+    value(transport) {
+      if (ObjectHasOwn(g, "fs")) return;
+      define("fs", load(FS_JS).createFs(transport));
+    },
+  });
+
   // structuredClone and MessageChannel: Deno's 13_message_port.js, within
   // the isolate (see runtime/core.js).
   const MESSAGE_PORT_JS = "ext:deno_web/13_message_port.js";
@@ -296,6 +310,7 @@
     for (const name of LAZY) void g[name];
     eventModule();
     load(SOCKETS_JS);
+    load(FS_JS);
     void g.URL.createObjectURL;
   }
 

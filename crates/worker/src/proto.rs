@@ -7,7 +7,7 @@ use serde_json::value::RawValue;
 
 /// The protocol version. The worker reports it in `ready`; a supervisor
 /// that speaks another version refuses the worker.
-pub const PROTOCOL_VERSION: u32 = 4;
+pub const PROTOCOL_VERSION: u32 = 5;
 
 /// Supervisor → worker.
 #[derive(Deserialize)]

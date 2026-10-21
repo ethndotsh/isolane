@@ -68,9 +68,9 @@ pub(super) fn new_context(
         run_internal(scope, "isolane:prelude.js", prelude).map_err(|e| fail(ErrorCode::IsolateRetired, e))?;
     }
     if config.web {
-        // The web platform's hooks for the prelude to hand over the network
+        // The web platform's hooks for the prelude to hand over the
         // brokers: gone before guest code runs, whether or not they were used.
-        for hook in [crate::web::FETCH_HOOK, crate::web::CONNECT_HOOK] {
+        for hook in [crate::web::FETCH_HOOK, crate::web::CONNECT_HOOK, crate::web::FS_HOOK] {
             let key = v8::String::new(scope, hook).unwrap();
             global.delete(scope, key.into());
         }

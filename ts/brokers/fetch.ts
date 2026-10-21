@@ -8,6 +8,7 @@ import { isIP } from 'node:net';
 import { PassThrough } from 'node:stream';
 
 import { DEFAULT_POLICY_LIMITS } from '../config.js';
+import { ByteQueue } from './byte-queue.js';
 import { isPublicAddress, matchHost, MiB, NO_REPORTER, pinnedLookup, redacted, type BrokerFunction, type BrokerReporter } from './net.js';
 
 export interface FetchPolicy {
@@ -109,12 +110,9 @@ interface InFlight {
   abort: AbortController;
   timer: NodeJS.Timeout;
   res?: http.IncomingMessage;
-  chunks: Buffer[];
-  buffered: number;
+  /** The response body, unread. */
+  body: ByteQueue;
   received: number;
-  ended: boolean;
-  error?: Error;
-  wake?: () => void;
   /** A streamed request body: what the guest writes, piped to the request. */
   upload?: PassThrough;
   /** Its bytes so far (limits.requestBytes). */
@@ -206,11 +204,6 @@ export function fetchBroker(policy: FetchPolicy, report: BrokerReporter = NO_REP
       }
     });
 
-  const wake = (f: InFlight) => {
-    const w = f.wake;
-    f.wake = undefined;
-    w?.();
-  };
   const finish = (id: number) => {
     const f = inFlight.get(id);
     if (!f) return;
@@ -276,10 +269,8 @@ export function fetchBroker(policy: FetchPolicy, report: BrokerReporter = NO_REP
     const f: InFlight = {
       abort,
       timer: setTimeout(() => abort.abort(overLimit('timeoutMs', `fetch timed out after ${timeoutMs}ms (fetch.limits.timeoutMs)`)), timeoutMs),
-      chunks: [],
-      buffered: 0,
+      body: new ByteQueue(FETCH_HIGH_WATER),
       received: 0,
-      ended: false,
       sent: 0,
     };
     if (meta.streamBody) {
@@ -335,33 +326,24 @@ export function fetchBroker(policy: FetchPolicy, report: BrokerReporter = NO_REP
         }
         // Stream the body: buffer up to the high-water mark, then pause
         // until the guest reads.
-        f.res = res;
+        f.res = f.body.source = res;
         res.on('data', (chunk: Buffer) => {
           f.received += chunk.length;
           const over = f.received > maxResponse ? overLimit('responseBytes', `fetch: response larger than ${maxResponse} bytes (fetch.limits.responseBytes)`) : transfer(chunk.length);
           if (over) {
-            f.error = over;
+            f.body.fail(over);
             res.destroy();
-            wake(f);
             return;
           }
-          f.chunks.push(chunk);
-          f.buffered += chunk.length;
-          if (f.buffered >= FETCH_HIGH_WATER) res.pause();
-          wake(f);
+          f.body.push(chunk);
         });
         res.on('end', () => {
-          f.ended = true;
           clearTimeout(f.timer);
-          wake(f);
+          f.body.end();
         });
-        res.on('error', (err) => {
-          f.error ??= failure(err, f);
-          wake(f);
-        });
+        res.on('error', (err) => f.body.fail(failure(err, f)));
         res.on('close', () => {
-          if (!f.ended && !f.error) f.error = failure(new Error('the response was cut off'), f);
-          wake(f);
+          if (!f.body.ended) f.body.fail(failure(new Error('the response was cut off'), f));
         });
         const pairs: [string, string][] = [];
         for (let i = 0; i < res.rawHeaders.length; i += 2) {
@@ -384,27 +366,22 @@ export function fetchBroker(policy: FetchPolicy, report: BrokerReporter = NO_REP
   async function read(rawId: unknown): Promise<Buffer | null> {
     const f = typeof rawId === 'number' ? inFlight.get(rawId) : undefined;
     if (!f) throw new TypeError('fetch: the response body is closed');
-    if (f.wake) throw new TypeError('fetch: another read is already waiting');
-    while (f.chunks.length === 0 && !f.ended && !f.error) {
-      await new Promise<void>((r) => (f.wake = r));
-    }
-    if (f.chunks.length) {
-      const data = f.chunks.length === 1 ? f.chunks[0] : Buffer.concat(f.chunks);
-      f.chunks = [];
-      f.buffered = 0;
-      f.res?.resume();
+    if (f.body.waiting) throw new TypeError('fetch: another read is already waiting');
+    try {
+      const data = await f.body.read();
+      if (data === null) finish(rawId as number); // end of the body
       return data;
+    } catch (err) {
+      finish(rawId as number);
+      throw err;
     }
-    finish(rawId as number);
-    if (f.error) throw f.error;
-    return null; // end of the body
   }
 
   async function write(rawId: unknown, chunk: unknown): Promise<void> {
     const f = typeof rawId === 'number' ? inFlight.get(rawId) : undefined;
     const upload = f?.upload;
     if (!f || !upload) throw new TypeError('fetch: the request body is closed');
-    if (f.error || f.abort.signal.aborted) throw failure(f.error ?? new Error('fetch was cancelled'), f);
+    if (f.body.error || f.abort.signal.aborted) throw failure(f.body.error ?? new Error('fetch was cancelled'), f);
     if (upload.writableEnded) throw new TypeError('fetch: the request body has ended');
     if (chunk === null) {
       upload.end();
@@ -440,8 +417,7 @@ export function fetchBroker(policy: FetchPolicy, report: BrokerReporter = NO_REP
     f.abort.abort(new Error('fetch was cancelled'));
     f.upload?.destroy();
     f.res?.destroy();
-    f.error ??= new TypeError('fetch was cancelled');
-    wake(f);
+    f.body.fail(new TypeError('fetch was cancelled'));
   }
 
   const fn: BrokerFunction = (op: unknown, ...args: unknown[]) => {

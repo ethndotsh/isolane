@@ -36,6 +36,8 @@ macro_rules! runtime_js {
 pub const FETCH_HOOK: &str = "__isolane_web_fetch";
 /// The same for the socket broker (`connect()`, runtime/sockets.js).
 pub const CONNECT_HOOK: &str = "__isolane_web_connect";
+/// The same for the file broker (`fs`, runtime/fs.js).
+pub const FS_HOOK: &str = "__isolane_web_fs";
 
 const PRIMORDIALS: &str = runtime_js!("deno/libs/core/00_primordials.js");
 const CORE: &str = runtime_js!("core.js");
@@ -73,6 +75,8 @@ const EXT: &[(&str, &str)] = &[
     ("ext:isolane/fetch.js", runtime_js!("fetch.js")),
     // connect(), the Sockets API over the socket broker.
     ("ext:isolane/sockets.js", runtime_js!("sockets.js")),
+    // The `fs` object over the file broker.
+    ("ext:isolane/fs.js", runtime_js!("fs.js")),
 ];
 
 // ---- helpers shared by the ops ----

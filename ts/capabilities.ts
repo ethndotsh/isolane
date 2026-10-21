@@ -27,20 +27,21 @@ export const SOCKET_HOST_FUNCTION = '__isolane_socket';
 /**
  * The hooks an isolate's web platform (runtime/globals.js) leaves for the
  * prelude: the prelude hands each the raw host function, and the web
- * platform's `fetch` and `connect()` use it. The worker deletes the hooks
+ * platform's `fetch`, `connect()`, and `fs` use it. The worker deletes the hooks
  * before guest code runs.
  */
 export const WEB_FETCH_HOOK = '__isolane_web_fetch';
 /** The same for `connect()`: the Sockets API (runtime/sockets.js) over the socket broker. */
 export const WEB_CONNECT_HOOK = '__isolane_web_connect';
+/** The same for `fs` (runtime/fs.js), over the file broker. */
+export const WEB_FS_HOOK = '__isolane_web_fs';
 
 /**
  * Trusted setup the worker runs in a VM's context before any guest code:
- * hands the raw `fetch` and socket host functions to the web platform,
- * wraps the raw `fs` one in an `fs` object, then deletes the raw ones.
- * Config resolution only allows these policies with the web platform on.
- * Bytes cross as Uint8Arrays (host calls carry them raw). Guest code can
- * tamper with the wrappers, which only affects itself: the brokers above
+ * hands the raw `fetch`, socket, and `fs` host functions to the web
+ * platform, then deletes them. Config resolution only allows these
+ * policies with the web platform on. Guest code can tamper with the web
+ * platform's wrappers, which only affects itself: the brokers above
  * validate every request on their own.
  */
 export const PRELUDE = String.raw`(() => {
@@ -58,35 +59,7 @@ export const PRELUDE = String.raw`(() => {
   };
   if (rawFetch) handOver('${WEB_FETCH_HOOK}', rawFetch, 'fetch');
   if (rawSocket) handOver('${WEB_CONNECT_HOOK}', rawSocket, 'connect');
-
-  if (rawFs) {
-    if (typeof g.TextEncoder !== 'function') throw new TypeError('fs needs the web platform');
-    const encoder = new g.TextEncoder();
-    const decoder = new g.TextDecoder();
-    // A guest's text, bytes, or buffer as a Uint8Array (the bytes cross to
-    // the host as they are when called).
-    const toBytes = (data) => {
-      if (data instanceof ArrayBuffer) return new Uint8Array(data);
-      if (ArrayBuffer.isView(data)) return new Uint8Array(data.buffer, data.byteOffset, data.byteLength);
-      return encoder.encode(String(data));
-    };
-    const encodingOf = (options) => (typeof options === 'string' ? options : options?.encoding);
-    g.fs = Object.freeze({
-      async readFile(path, options) {
-        const bytes = await rawFs('readFile', path);
-        const enc = encodingOf(options);
-        if (enc == null) return bytes;
-        if (enc === 'utf8' || enc === 'utf-8') return decoder.decode(bytes);
-        throw new TypeError('fs.readFile: unsupported encoding ' + enc);
-      },
-      writeFile: (path, data) => rawFs('writeFile', path, toBytes(data)),
-      readdir: (path) => rawFs('readdir', path),
-      stat: (path) => rawFs('stat', path),
-      exists: (path) => rawFs('exists', path),
-      mkdir: (path, options) => rawFs('mkdir', path, options?.recursive === true),
-      rm: (path, options) => rawFs('rm', path, options?.recursive === true),
-    });
-  }
+  if (rawFs) handOver('${WEB_FS_HOOK}', rawFs, 'fs');
 })();`;
 
 export interface Capabilities {

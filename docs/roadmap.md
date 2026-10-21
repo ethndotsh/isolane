@@ -457,7 +457,7 @@ Applied, with the implementation review's items:
 | A test that checks the guide's limits table against `DEFAULT_LIMITS` | done |
 | A shared gate module for the WPT and test262 runners; one HTTP test server; broker unit tests without the fake web `fetch` | planned |
 | `create` deserialized straight into `VmConfig`, named exit codes, `serve` split up (main.rs) | planned |
-| One `ByteQueue` for the fetch and connect brokers; framing out of `worker.ts`; the guest `fs` wrapper in `runtime/fs.js` | planned |
+| One `ByteQueue` for the fetch and connect brokers (`ts/brokers/byte-queue.ts`); framing out of `worker.ts` (`ts/frame.ts`); the guest `fs` wrapper in `runtime/fs.js`, handed the broker like `fetch` and `connect()` (protocol 5) | done |
 
 ### API v2 (from `docs/api-review.md`)
 
