@@ -34,10 +34,10 @@ use std::sync::Arc;
 use crate::frame::Writer;
 use crate::proto::{fail, limit, ErrorCode, Failure, Usage};
 pub use background::init_shared as init_shared_background;
-pub use console::guest_log;
-pub use errors::{report as report_guest_error, RejectionReporter};
-use context::{allow_wasm, deny_wasm, new_context, Shims};
 use background::Background;
+pub use console::guest_log;
+use context::{allow_wasm, deny_wasm, new_context, Shims};
+pub use errors::{report as report_guest_error, RejectionReporter};
 use eval::{eval, refuse_all, run_idle_timers, send_result, usage, EvalEnd, Outcome};
 use host_call::{apply_host_reply, Bridge};
 use mailbox::Mailbox;
@@ -57,7 +57,9 @@ pub fn set_platform(platform: v8::SharedRef<v8::Platform>) {
 /// background work (async WebAssembly compilation) and GC steps. Returns
 /// whether any ran.
 fn pump_tasks(isolate: &v8::Isolate) -> bool {
-    let Some(platform) = PLATFORM.get() else { return false };
+    let Some(platform) = PLATFORM.get() else {
+        return false;
+    };
     let mut ran = false;
     while v8::Platform::pump_message_loop(platform, isolate, false) {
         ran = true;
@@ -117,7 +119,9 @@ thread_local! {
 /// Fill `buf` from this thread's seeded stream, if it has one.
 pub fn seeded_entropy(buf: &mut [u8]) -> bool {
     SEED.with(|seed| {
-        let Some(mut state) = seed.get() else { return false };
+        let Some(mut state) = seed.get() else {
+            return false;
+        };
         for chunk in buf.chunks_mut(8) {
             state = state.wrapping_add(0x9e37_79b9_7f4a_7c15);
             let mut z = state;
@@ -149,19 +153,33 @@ pub fn out_of_time() -> bool {
 pub enum VmMsg {
     /// `last`: the VM is disposed right after (a one-shot run), so timers
     /// left pending never run.
-    Eval { req: u64, job: Job, last: bool },
-    HostReply { call: u64, reply: Reply },
+    Eval {
+        req: u64,
+        job: Job,
+        last: bool,
+    },
+    HostReply {
+        call: u64,
+        reply: Reply,
+    },
     Dispose,
 }
 
 /// What an eval runs.
 pub enum Job {
     /// Compile `code` and run it.
-    Code { code: String, filename: Option<String> },
+    Code {
+        code: String,
+        filename: Option<String>,
+    },
     /// Call the function the isolate's code defined as `name` (see
     /// `eval::handler`), with `args` (a JSON array) and the byte arguments
     /// at their indices.
-    Call { name: String, args: String, bytes: Vec<(u32, Vec<u8>)> },
+    Call {
+        name: String,
+        args: String,
+        bytes: Vec<(u32, Vec<u8>)>,
+    },
 }
 
 /// The supervisor's answer to a host call.
@@ -178,7 +196,12 @@ pub struct Reply {
     pub bytes: Vec<(Vec<crate::proto::PathSegment>, Vec<u8>)>,
 }
 
-pub fn spawn(id: u64, config: VmConfig, rx: Receiver<VmMsg>, out: Output) -> std::io::Result<Stopper> {
+pub fn spawn(
+    id: u64,
+    config: VmConfig,
+    rx: Receiver<VmMsg>,
+    out: Output,
+) -> std::io::Result<Stopper> {
     let stopper = Stopper(Arc::new(StopperState::default()));
     let watchdog = stopper.0.clone();
     std::thread::Builder::new()
@@ -265,16 +288,25 @@ fn memory_limit_hit(isolate: &mut v8::Isolate, heap_limit: usize) -> (&'static s
     let stats = isolate.get_heap_statistics();
     let held = stats.used_heap_size() + stats.external_memory();
     if held >= heap_limit / 2 {
-        ("heapBytes", "the isolate exceeded its heap limit (limits.heapBytes)")
+        (
+            "heapBytes",
+            "the isolate exceeded its heap limit (limits.heapBytes)",
+        )
     } else {
-        ("workerMemoryBytes", "the tenant's worker ran out of memory (limits.workerMemoryBytes)")
+        (
+            "workerMemoryBytes",
+            "the tenant's worker ran out of memory (limits.workerMemoryBytes)",
+        )
     }
 }
 
 /// V8 couldn't get memory (the worker's memory limit, not a VM's heap
 /// limit, which `near_heap_limit` handles). V8 can't continue; exit with a
 /// code the supervisor reports as a memory limit, not a crash.
-pub unsafe extern "C" fn out_of_memory(_location: *const std::ffi::c_char, _details: &v8::OomDetails) {
+pub unsafe extern "C" fn out_of_memory(
+    _location: *const std::ffi::c_char,
+    _details: &v8::OomDetails,
+) {
     const MSG: &[u8] = b"isolane-worker: out of memory (worker memory limit)\n";
     #[cfg(target_os = "linux")]
     // SAFETY: write and _exit are async-signal-safe and take a valid buffer;
@@ -351,7 +383,14 @@ impl Guard<'_> {
         let batch = background.start(floor);
         self.run(isolate, wall, cpu_budget, |isolate, _| f(isolate));
         let spent = usage(isolate, cpu_clock, cpu_start);
-        background.settle(batch.blocked(self.bridge.blocked.take()), spent, self.oom.hit(), out, id, what)
+        background.settle(
+            batch.blocked(self.bridge.blocked.take()),
+            spent,
+            self.oom.hit(),
+            out,
+            id,
+            what,
+        )
     }
 }
 
@@ -359,13 +398,30 @@ impl Guard<'_> {
 /// CPU, or aborted), if it was.
 fn stopped_part_way(result: &Result<Outcome, Failure>) -> Option<&'static str> {
     match result {
-        Err(Failure { code: ErrorCode::Limit, limit: Some(limit @ ("timeoutMs" | "cpuMs")), .. }) => Some(if *limit == "cpuMs" { "limits.cpuMs" } else { "limits.timeoutMs" }),
-        Err(Failure { code: ErrorCode::Aborted, .. }) => Some("its signal was aborted"),
+        Err(Failure {
+            code: ErrorCode::Limit,
+            limit: Some(limit @ ("timeoutMs" | "cpuMs")),
+            ..
+        }) => Some(if *limit == "cpuMs" {
+            "limits.cpuMs"
+        } else {
+            "limits.timeoutMs"
+        }),
+        Err(Failure {
+            code: ErrorCode::Aborted,
+            ..
+        }) => Some("its signal was aborted"),
         _ => None,
     }
 }
 
-fn vm_main(id: u64, config: VmConfig, rx: Receiver<VmMsg>, out: Output, stopper: Arc<StopperState>) {
+fn vm_main(
+    id: u64,
+    config: VmConfig,
+    rx: Receiver<VmMsg>,
+    out: Output,
+    stopper: Arc<StopperState>,
+) {
     crate::limits::set(config.limits);
     crate::clock::set_mode(config.time);
     SEED.with(|seed| seed.set(config.random.seed));
@@ -378,7 +434,11 @@ fn vm_main(id: u64, config: VmConfig, rx: Receiver<VmMsg>, out: Output, stopper:
     }
     // A web VM starts from the web platform's snapshot (built on first
     // use), if there is one; other VMs never touch it.
-    let snapshot = if config.web { crate::web::snapshot() } else { None };
+    let snapshot = if config.web {
+        crate::web::snapshot()
+    } else {
+        None
+    };
     let from_snapshot = snapshot.is_some();
     if let Some(blob) = snapshot {
         params = params
@@ -387,7 +447,11 @@ fn vm_main(id: u64, config: VmConfig, rx: Receiver<VmMsg>, out: Output, stopper:
     }
     let mut isolate = v8::Isolate::new(params);
     isolate.set_microtasks_policy(v8::MicrotasksPolicy::Explicit);
-    isolate.set_allow_wasm_code_generation_callback(if config.wasm { allow_wasm } else { deny_wasm });
+    isolate.set_allow_wasm_code_generation_callback(if config.wasm {
+        allow_wasm
+    } else {
+        deny_wasm
+    });
     isolate.set_oom_error_handler(out_of_memory);
     errors::install(&mut isolate);
 
@@ -399,7 +463,10 @@ fn vm_main(id: u64, config: VmConfig, rx: Receiver<VmMsg>, out: Output, stopper:
     };
     WATCHDOG.with(|w| *w.borrow_mut() = Some(watchdog.clone()));
     stopper.started(watchdog.clone());
-    let oom = Box::new(OomState { handle, hit: AtomicBool::new(false) });
+    let oom = Box::new(OomState {
+        handle,
+        hit: AtomicBool::new(false),
+    });
     isolate.add_near_heap_limit_callback(near_heap_limit, &*oom as *const OomState as *mut c_void);
     // The heap limit as configured (V8's own figure, which adds young
     // generation space, only when none is).
@@ -424,7 +491,11 @@ fn vm_main(id: u64, config: VmConfig, rx: Receiver<VmMsg>, out: Output, stopper:
         limit_hit: RefCell::new(None),
         // The supervisor names its brokers __isolane_* and refuses those
         // names for the embedder's functions.
-        internal: config.functions.iter().map(|f| f.path.first().is_some_and(|n| n.starts_with("__isolane_"))).collect(),
+        internal: config
+            .functions
+            .iter()
+            .map(|f| f.path.first().is_some_and(|n| n.starts_with("__isolane_")))
+            .collect(),
         names: config.functions.iter().map(|f| f.path.join(".")).collect(),
     });
     isolate.set_slot(bridge.clone());
@@ -433,9 +504,15 @@ fn vm_main(id: u64, config: VmConfig, rx: Receiver<VmMsg>, out: Output, stopper:
     // with this).
     let mut retired: Option<Failure> = None;
     let retire = |cause: String| fail(ErrorCode::IsolateRetired, cause);
-    let guard = Guard { watchdog: &watchdog, bridge: &bridge, oom: &oom };
+    let guard = Guard {
+        watchdog: &watchdog,
+        bridge: &bridge,
+        oom: &oom,
+    };
     // Setup runs the embedder's `setup` shims: under the eval budget.
-    let (created, fired) = guard.run(&mut isolate, timeout, cpu, |isolate, _| new_context(isolate, &config, from_snapshot));
+    let (created, fired) = guard.run(&mut isolate, timeout, cpu, |isolate, _| {
+        new_context(isolate, &config, from_snapshot)
+    });
     let fired = fired != Fired::No;
     let (context, shims) = match created {
         Ok(created) if !fired && !oom.hit() => created,
@@ -451,7 +528,13 @@ fn vm_main(id: u64, config: VmConfig, rx: Receiver<VmMsg>, out: Output, stopper:
             });
             v8::scope!(let scope, &mut isolate);
             let bare = v8::Context::new(scope, Default::default());
-            (v8::Global::new(scope, bare), Shims { before: Vec::new(), after: Vec::new() })
+            (
+                v8::Global::new(scope, bare),
+                Shims {
+                    before: Vec::new(),
+                    after: Vec::new(),
+                },
+            )
         }
     };
 
@@ -467,19 +550,46 @@ fn vm_main(id: u64, config: VmConfig, rx: Receiver<VmMsg>, out: Output, stopper:
     loop {
         // Between evals, wake for the next timer too (stateful isolates keep
         // theirs; see run_idle_timers), and to report background usage.
-        let next_timer = if retired.is_none() { crate::web::timers::next_timer().map(|timer| timer.due) } else { None };
+        let next_timer = if retired.is_none() {
+            crate::web::timers::next_timer().map(|timer| timer.due)
+        } else {
+            None
+        };
         // While the tenant's shared budget is empty, timers and deferred
         // continuations wait for it (evals and other messages don't).
-        let pause = if retired.is_none() && (next_timer.is_some_and(|d| d.is_zero()) || !deferred.is_empty()) { background.paused(&out, id) } else { None };
+        let pause = if retired.is_none()
+            && (next_timer.is_some_and(|d| d.is_zero()) || !deferred.is_empty())
+        {
+            background.paused(&out, id)
+        } else {
+            None
+        };
         let next_timer = match pause {
             Some(wait) => next_timer.map(|due| due.max(wait)),
             None => next_timer,
         };
-        let wake = [next_timer, background.report_due(), pause.filter(|_| !deferred.is_empty())].into_iter().flatten().min();
-        let resumed = if pause.is_none() { deferred.pop_front() } else { None };
-        let msg = match resumed.map(|(call, reply)| Ok(VmMsg::HostReply { call, reply })).unwrap_or_else(|| bridge.mailbox.idle(wake)) {
+        let wake = [
+            next_timer,
+            background.report_due(),
+            pause.filter(|_| !deferred.is_empty()),
+        ]
+        .into_iter()
+        .flatten()
+        .min();
+        let resumed = if pause.is_none() {
+            deferred.pop_front()
+        } else {
+            None
+        };
+        let msg = match resumed
+            .map(|(call, reply)| Ok(VmMsg::HostReply { call, reply }))
+            .unwrap_or_else(|| bridge.mailbox.idle(wake))
+        {
             Ok(m) => m,
-            Err(RecvTimeoutError::Timeout) if !crate::web::timers::next_timer().is_some_and(|timer| timer.due.is_zero()) || retired.is_some() => {
+            Err(RecvTimeoutError::Timeout)
+                if !crate::web::timers::next_timer().is_some_and(|timer| timer.due.is_zero())
+                    || retired.is_some() =>
+            {
                 // No timer is due: only a usage report was.
                 background.report(&out, id, /* force */ false, None);
                 continue;
@@ -488,10 +598,19 @@ fn vm_main(id: u64, config: VmConfig, rx: Receiver<VmMsg>, out: Output, stopper:
                 if background.paused(&out, id).is_some() {
                     continue;
                 }
-                let settled = guard.background(&mut isolate, &mut background, cpu_clock, (timeout, cpu), std::time::Duration::ZERO, "timer callback", (&out, id), |isolate| {
-                    v8::scope_with_context!(scope, isolate, &context);
-                    run_idle_timers(scope);
-                });
+                let settled = guard.background(
+                    &mut isolate,
+                    &mut background,
+                    cpu_clock,
+                    (timeout, cpu),
+                    std::time::Duration::ZERO,
+                    "timer callback",
+                    (&out, id),
+                    |isolate| {
+                        v8::scope_with_context!(scope, isolate, &context);
+                        run_idle_timers(scope);
+                    },
+                );
                 if let Some((r, hit)) = settled {
                     retired = Some(r);
                     background_hit = hit;
@@ -514,7 +633,13 @@ fn vm_main(id: u64, config: VmConfig, rx: Receiver<VmMsg>, out: Output, stopper:
                     continue;
                 }
                 if !watchdog.begin_eval(req) {
-                    send_result(&out, (id, req), Err(fail(ErrorCode::Aborted, "the eval was aborted")), Usage::default(), None);
+                    send_result(
+                        &out,
+                        (id, req),
+                        Err(fail(ErrorCode::Aborted, "the eval was aborted")),
+                        Usage::default(),
+                        None,
+                    );
                     continue;
                 }
                 let cpu_start = cpu_clock.map(|c| c.now()).unwrap_or_default();
@@ -533,16 +658,24 @@ fn vm_main(id: u64, config: VmConfig, rx: Receiver<VmMsg>, out: Output, stopper:
                 };
                 let result = if oom.hit() {
                     let (which, cause) = memory_limit_hit(&mut isolate, heap_limit);
-                    retired = Some(retire(format!("the isolate was terminated by an earlier eval ({cause}); create a new one")));
+                    retired = Some(retire(format!(
+                        "the isolate was terminated by an earlier eval ({cause}); create a new one"
+                    )));
                     Err(limit(which, cause))
                 } else if fired == Fired::Wall {
                     let ms = config.limits.timeout_ms.unwrap_or(0);
-                    Err(limit("timeoutMs", format!("execution timed out after {ms}ms (limits.timeoutMs)")))
+                    Err(limit(
+                        "timeoutMs",
+                        format!("execution timed out after {ms}ms (limits.timeoutMs)"),
+                    ))
                 } else if fired == Fired::Aborted {
                     Err(fail(ErrorCode::Aborted, "the eval was aborted"))
                 } else if fired == Fired::Cpu {
                     let ms = config.limits.cpu_ms.unwrap_or(0);
-                    Err(limit("cpuMs", format!("execution used more than {ms}ms of CPU time (limits.cpuMs)")))
+                    Err(limit(
+                        "cpuMs",
+                        format!("execution used more than {ms}ms of CPU time (limits.cpuMs)"),
+                    ))
                 } else if let Some(hit) = bridge.limit_hit.take() {
                     Err(hit)
                 } else {
@@ -564,7 +697,11 @@ fn vm_main(id: u64, config: VmConfig, rx: Receiver<VmMsg>, out: Output, stopper:
                 // too): free their slots, or they'd count against
                 // limits.pendingHostCalls and pendingHostCallBytes in the next eval.
                 // Late replies to them are ignored.
-                if let Err(Failure { code: ErrorCode::Limit | ErrorCode::IsolateRetired | ErrorCode::Aborted, .. }) = &result {
+                if let Err(Failure {
+                    code: ErrorCode::Limit | ErrorCode::IsolateRetired | ErrorCode::Aborted,
+                    ..
+                }) = &result
+                {
                     bridge.pending.borrow_mut().clear();
                     bridge.pending_bytes.set(0);
                 }
@@ -585,15 +722,24 @@ fn vm_main(id: u64, config: VmConfig, rx: Receiver<VmMsg>, out: Output, stopper:
                     deferred.push_back((call, reply));
                     continue;
                 }
-                let settled = guard.background(&mut isolate, &mut background, cpu_clock, (timeout, cpu), background::REPLY_COST, "continuation", (&out, id), |isolate| {
-                    v8::scope_with_context!(scope, isolate, &context);
-                    apply_host_reply(scope, call, reply);
-                    scope.perform_microtask_checkpoint();
-                    while pump_tasks(scope) {
+                let settled = guard.background(
+                    &mut isolate,
+                    &mut background,
+                    cpu_clock,
+                    (timeout, cpu),
+                    background::REPLY_COST,
+                    "continuation",
+                    (&out, id),
+                    |isolate| {
+                        v8::scope_with_context!(scope, isolate, &context);
+                        apply_host_reply(scope, call, reply);
                         scope.perform_microtask_checkpoint();
-                    }
-                    errors::report_rejections(scope);
-                });
+                        while pump_tasks(scope) {
+                            scope.perform_microtask_checkpoint();
+                        }
+                        errors::report_rejections(scope);
+                    },
+                );
                 if let Some((r, hit)) = settled {
                     retired = Some(r);
                     background_hit = hit;

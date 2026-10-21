@@ -33,7 +33,6 @@ mod shared;
 mod x25519;
 mod x448;
 
-
 use deno_error::JsErrorClass;
 use serde::de::DeserializeOwned;
 use serde::Serialize;
@@ -63,7 +62,10 @@ impl rand_core::RngCore for IsolaneRng {
         if super::fill_random(dest) {
             Ok(())
         } else {
-            Err(rand_core::Error::from(std::num::NonZeroU32::new(rand_core::Error::CUSTOM_START).expect("CUSTOM_START is nonzero")))
+            Err(rand_core::Error::from(
+                std::num::NonZeroU32::new(rand_core::Error::CUSTOM_START)
+                    .expect("CUSTOM_START is nonzero"),
+            ))
         }
     }
 }
@@ -103,7 +105,8 @@ fn type_error(scope: &mut v8::PinScope, message: &str) {
 
 /// Argument `i`, deserialized; or a TypeError (thrown) and None.
 fn serde_arg<T: DeserializeOwned>(scope: &mut v8::PinScope, args: &Args, i: i32) -> Option<T> {
-    let parsed = bridge::from_v8(scope, args.get(i)).and_then(|v| bridge::deserialize(v).map_err(|e| e.to_string()));
+    let parsed = bridge::from_v8(scope, args.get(i))
+        .and_then(|v| bridge::deserialize(v).map_err(|e| e.to_string()));
     match parsed {
         Ok(v) => Some(v),
         Err(e) => {
@@ -238,7 +241,11 @@ fn op_crypto_verify_key(scope: &mut v8::PinScope, args: Args, mut rv: Rv) {
 fn op_crypto_derive_bits(scope: &mut v8::PinScope, args: Args, rv: Rv) {
     let opts = arg!(serde_arg(scope, &args, 0));
     let salt = arg!(opt_buf_arg(scope, &args, 1));
-    bytes_result(scope, rv, ops::op_crypto_derive_bits(opts, salt.map(bridge::JsBuffer)));
+    bytes_result(
+        scope,
+        rv,
+        ops::op_crypto_derive_bits(opts, salt.map(bridge::JsBuffer)),
+    );
 }
 
 fn op_crypto_import_key(scope: &mut v8::PinScope, args: Args, mut rv: Rv) {
@@ -329,7 +336,11 @@ fn keypair_or_throw(scope: &mut v8::PinScope, args: Args, f: fn(&mut [u8], &mut 
     let mut private = arg!(out_arg(scope, &args, 0));
     let mut public = arg!(out_arg(scope, &args, 1));
     if !f(&mut private, &mut public) {
-        throw(scope, "DOMExceptionOperationError", "Failed to generate key");
+        throw(
+            scope,
+            "DOMExceptionOperationError",
+            "Failed to generate key",
+        );
         return;
     }
     write_back(scope, &args, 0, &private);
@@ -340,7 +351,12 @@ fn keypair_or_throw(scope: &mut v8::PinScope, args: Args, f: fn(&mut [u8], &mut 
 /// the identity (all zero), which the JS rejects.
 type DeriveCurve<E> = fn(&[u8], &[u8], &mut [u8]) -> Result<bool, E>;
 
-fn derive_bits_curve<E: JsErrorClass>(scope: &mut v8::PinScope, args: Args, mut rv: Rv, f: DeriveCurve<E>) {
+fn derive_bits_curve<E: JsErrorClass>(
+    scope: &mut v8::PinScope,
+    args: Args,
+    mut rv: Rv,
+    f: DeriveCurve<E>,
+) {
     let k = arg!(buf_arg(scope, &args, 0));
     let u = arg!(buf_arg(scope, &args, 1));
     let mut secret = arg!(out_arg(scope, &args, 2));
@@ -355,7 +371,12 @@ fn derive_bits_curve<E: JsErrorClass>(scope: &mut v8::PinScope, args: Args, mut 
     }
 }
 
-fn export_der<E: JsErrorClass>(scope: &mut v8::PinScope, args: Args, rv: Rv, f: fn(&[u8]) -> Result<Vec<u8>, E>) {
+fn export_der<E: JsErrorClass>(
+    scope: &mut v8::PinScope,
+    args: Args,
+    rv: Rv,
+    f: fn(&[u8]) -> Result<Vec<u8>, E>,
+) {
     let key = arg!(buf_arg(scope, &args, 0));
     bytes_result(scope, rv, f(&key));
 }

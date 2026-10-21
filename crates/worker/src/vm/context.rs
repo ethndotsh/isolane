@@ -6,8 +6,8 @@ use super::console::install_console;
 use super::eval::{describe, shim_failure};
 use super::host_call::{host_function, sync_host_function};
 use super::VmConfig;
-use crate::proto::{fail, ErrorCode, Failure, Shim, ShimRef};
 use crate::js;
+use crate::proto::{fail, ErrorCode, Failure, Shim, ShimRef};
 
 /// The `before` and `after` shims, compiled once when the VM starts: each
 /// `before` a script, each `after` an `async function (result)`.
@@ -18,10 +18,16 @@ pub(super) struct Shims {
 
 /// WebAssembly compilation, refused unless the VM allows it (the global is
 /// also deleted then).
-pub(super) unsafe extern "C" fn deny_wasm(_: v8::Local<v8::Context>, _: v8::Local<v8::String>) -> bool {
+pub(super) unsafe extern "C" fn deny_wasm(
+    _: v8::Local<v8::Context>,
+    _: v8::Local<v8::String>,
+) -> bool {
     false
 }
-pub(super) unsafe extern "C" fn allow_wasm(_: v8::Local<v8::Context>, _: v8::Local<v8::String>) -> bool {
+pub(super) unsafe extern "C" fn allow_wasm(
+    _: v8::Local<v8::Context>,
+    _: v8::Local<v8::String>,
+) -> bool {
     true
 }
 
@@ -59,19 +65,25 @@ pub(super) fn new_context(
         global.delete(scope, key.into());
     }
     if config.wasm {
-        run_internal(scope, "isolane:wasm-guard.js", WASM_GUARD).map_err(|e| fail(ErrorCode::IsolateRetired, e))?;
+        run_internal(scope, "isolane:wasm-guard.js", WASM_GUARD)
+            .map_err(|e| fail(ErrorCode::IsolateRetired, e))?;
     }
     install_console(scope, global);
     install_functions(scope, global, config).map_err(|e| fail(ErrorCode::IsolateRetired, e))?;
     if let Some(prelude) = &config.prelude {
         // The supervisor's own code (brokers, globals): named isolane:, so
         // its frames are isolane's in guest stacks.
-        run_internal(scope, "isolane:prelude.js", prelude).map_err(|e| fail(ErrorCode::IsolateRetired, e))?;
+        run_internal(scope, "isolane:prelude.js", prelude)
+            .map_err(|e| fail(ErrorCode::IsolateRetired, e))?;
     }
     if config.web {
         // The web platform's hooks for the prelude to hand over the
         // brokers: gone before guest code runs, whether or not they were used.
-        for hook in [crate::web::FETCH_HOOK, crate::web::CONNECT_HOOK, crate::web::FS_HOOK] {
+        for hook in [
+            crate::web::FETCH_HOOK,
+            crate::web::CONNECT_HOOK,
+            crate::web::FS_HOOK,
+        ] {
             let key = js::short_string(scope, hook);
             global.delete(scope, key.into());
         }
@@ -88,7 +100,10 @@ fn run_internal(scope: &mut v8::PinScope, filename: &str, code: &str) -> Result<
     v8::tc_scope!(let tc, scope);
     let ran = shim_script(tc, code, filename, 0).and_then(|script| script.run(tc));
     if ran.is_none() {
-        let msg = tc.exception().map(|e| describe(tc, e)).unwrap_or_else(|| "unknown error".into());
+        let msg = tc
+            .exception()
+            .map(|e| describe(tc, e))
+            .unwrap_or_else(|| "unknown error".into());
         return Err(format!("vm setup failed: {msg}"));
     }
     Ok(())
@@ -104,12 +119,28 @@ fn shim_script<'s>(
 ) -> Option<v8::Local<'s, v8::Script>> {
     let source = v8::String::new(scope, code)?;
     let name = v8::String::new(scope, filename)?;
-    let origin = v8::ScriptOrigin::new(scope, name.into(), line_offset, 0, false, 0, None, false, false, false, None);
+    let origin = v8::ScriptOrigin::new(
+        scope,
+        name.into(),
+        line_offset,
+        0,
+        false,
+        0,
+        None,
+        false,
+        false,
+        false,
+        None,
+    );
     v8::Script::compile(scope, source, Some(&origin))
 }
 
 fn shim_ref(phase: &'static str, index: usize, shim: &Shim) -> ShimRef {
-    ShimRef { phase, index: index as u32, filename: shim.filename.clone() }
+    ShimRef {
+        phase,
+        index: index as u32,
+        filename: shim.filename.clone(),
+    }
 }
 
 /// Run the `setup` shims, then compile `before` and `after`. Compiled here,
@@ -125,14 +156,19 @@ fn compile_shims(scope: &mut v8::PinScope, shims: &crate::proto::Shims) -> Resul
     };
     for (i, shim) in shims.setup.iter().enumerate() {
         let at = shim_ref("setup", i, shim);
-        if shim_script(tc, &shim.code, &shim.filename, 0).and_then(|s| s.run(tc)).is_none() {
+        if shim_script(tc, &shim.code, &shim.filename, 0)
+            .and_then(|s| s.run(tc))
+            .is_none()
+        {
             return Err(threw(tc, &at));
         }
     }
     let mut before = Vec::with_capacity(shims.before.len());
     for (i, shim) in shims.before.iter().enumerate() {
         let at = shim_ref("before", i, shim);
-        let Some(script) = shim_script(tc, &shim.code, &shim.filename, 0) else { return Err(threw(tc, &at)) };
+        let Some(script) = shim_script(tc, &shim.code, &shim.filename, 0) else {
+            return Err(threw(tc, &at));
+        };
         before.push((v8::Global::new(tc, script), at));
     }
     let mut after = Vec::with_capacity(shims.after.len());
@@ -143,7 +179,9 @@ fn compile_shims(scope: &mut v8::PinScope, shims: &crate::proto::Shims) -> Resul
         let func = shim_script(tc, &wrapped, &shim.filename, -1)
             .and_then(|s| s.run(tc))
             .and_then(|f| v8::Local::<v8::Function>::try_from(f).ok());
-        let Some(func) = func else { return Err(threw(tc, &at)) };
+        let Some(func) = func else {
+            return Err(threw(tc, &at));
+        };
         after.push((v8::Global::new(tc, func), at));
     }
     Ok(Shims { before, after })
@@ -153,7 +191,11 @@ fn compile_shims(scope: &mut v8::PinScope, shims: &crate::proto::Shims) -> Resul
 /// `db` object on the global. Namespace objects are frozen once every
 /// function is in place, so guest code can't swap one out for another
 /// tenant's view of it (it could only shadow its own).
-fn install_functions(scope: &mut v8::PinScope, global: v8::Local<v8::Object>, config: &VmConfig) -> Result<(), String> {
+fn install_functions(
+    scope: &mut v8::PinScope,
+    global: v8::Local<v8::Object>,
+    config: &VmConfig,
+) -> Result<(), String> {
     // Namespaces this VM made, by path: a host namespace replaces whatever
     // global had its name (the configuration chose it), and is never merged
     // into an existing object.
@@ -177,9 +219,15 @@ fn install_functions(scope: &mut v8::PinScope, global: v8::Local<v8::Object>, co
             };
         }
         let data = v8::Integer::new_from_unsigned(scope, index as u32);
-        let builder =
-            if spec.sync { v8::Function::builder(sync_host_function) } else { v8::Function::builder(host_function) };
-        let func = builder.data(data.into()).build(scope).expect("build host function");
+        let builder = if spec.sync {
+            v8::Function::builder(sync_host_function)
+        } else {
+            v8::Function::builder(host_function)
+        };
+        let func = builder
+            .data(data.into())
+            .build(scope)
+            .expect("build host function");
         let key = js::short_string(scope, name);
         holder.set(scope, key.into(), func.into());
     }

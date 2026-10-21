@@ -2,9 +2,9 @@
 //! Ported from Deno's ext/crypto/import_key.rs (denoland/deno@eb4061f6f367) to
 //! isolane's ops: see mod.rs.
 
-use base64::Engine;
 use super::bridge::JsBuffer;
 use super::bridge::ToJsBuffer;
+use base64::Engine;
 use elliptic_curve::pkcs8::PrivateKeyInfo;
 use elliptic_curve::sec1::ToEncodedPoint;
 use p256::pkcs8::EncodePrivateKey;
@@ -14,151 +14,154 @@ use serde::Deserialize;
 use serde::Serialize;
 use spki::der::Decode;
 
-use super::shared::{EcNamedCurve, RustRawKeyData, SharedError, ID_SECP256R1_OID, ID_SECP384R1_OID, ID_SECP521R1_OID, RSA_ENCRYPTION_OID};
+use super::shared::{
+    EcNamedCurve, RustRawKeyData, SharedError, ID_SECP256R1_OID, ID_SECP384R1_OID,
+    ID_SECP521R1_OID, RSA_ENCRYPTION_OID,
+};
 
 #[derive(Debug, thiserror::Error, deno_error::JsError)]
 #[class("DOMExceptionDataError")]
 pub enum ImportKeyError {
-  #[class(inherit)]
-  #[error(transparent)]
-  General(
-    #[from]
-    #[inherit]
-    SharedError,
-  ),
-  #[error("invalid modulus")]
-  InvalidModulus,
-  #[error("isolane: RSA keys are at most 4096 bits")]
-  ModulusTooLarge,
-  #[error("isolane: RSA and EC key data is at most 64 KiB")]
-  KeyDataTooLarge,
-  #[error("invalid public exponent")]
-  InvalidPublicExponent,
-  #[error("invalid private exponent")]
-  InvalidPrivateExponent,
-  #[error("invalid first prime factor")]
-  InvalidFirstPrimeFactor,
-  #[error("invalid second prime factor")]
-  InvalidSecondPrimeFactor,
-  #[error("invalid first CRT exponent")]
-  InvalidFirstCRTExponent,
-  #[error("invalid second CRT exponent")]
-  InvalidSecondCRTExponent,
-  #[error("invalid CRT coefficient")]
-  InvalidCRTCoefficient,
-  #[error("invalid b64 coordinate")]
-  InvalidB64Coordinate,
-  #[error("invalid RSA public key")]
-  InvalidRSAPublicKey,
-  #[error("invalid RSA private key")]
-  InvalidRSAPrivateKey,
-  #[error("unsupported algorithm")]
-  UnsupportedAlgorithm,
-  #[error("public key is invalid (too long)")]
-  PublicKeyTooLong,
-  #[error("private key is invalid (too long)")]
-  PrivateKeyTooLong,
-  #[error("invalid P-256 elliptic curve point")]
-  InvalidP256ECPoint,
-  #[error("invalid P-384 elliptic curve point")]
-  InvalidP384ECPoint,
-  #[error("invalid P-521 elliptic curve point")]
-  InvalidP521ECPoint,
-  #[error("invalid P-256 elliptic curve SPKI data")]
-  InvalidP256ECSPKIData,
-  #[error("invalid P-384 elliptic curve SPKI data")]
-  InvalidP384ECSPKIData,
-  #[error("invalid P-521 elliptic curve SPKI data")]
-  InvalidP521ECSPKIData,
-  #[error("curve mismatch")]
-  CurveMismatch,
-  #[error("Unsupported named curve")]
-  UnsupportedNamedCurve,
-  #[error("invalid key data")]
-  InvalidKeyData,
-  #[error("invalid JWK private key")]
-  InvalidJWKPrivateKey,
-  #[error(transparent)]
-  EllipticCurve(#[from] elliptic_curve::Error),
-  #[error("expected valid PKCS#8 data")]
-  ExpectedValidPkcs8Data,
-  #[error("malformed parameters")]
-  MalformedParameters,
-  #[error(transparent)]
-  Spki(#[from] spki::Error),
-  #[error(transparent)]
-  Der(#[from] rsa::pkcs1::der::Error),
+    #[class(inherit)]
+    #[error(transparent)]
+    General(
+        #[from]
+        #[inherit]
+        SharedError,
+    ),
+    #[error("invalid modulus")]
+    InvalidModulus,
+    #[error("isolane: RSA keys are at most 4096 bits")]
+    ModulusTooLarge,
+    #[error("isolane: RSA and EC key data is at most 64 KiB")]
+    KeyDataTooLarge,
+    #[error("invalid public exponent")]
+    InvalidPublicExponent,
+    #[error("invalid private exponent")]
+    InvalidPrivateExponent,
+    #[error("invalid first prime factor")]
+    InvalidFirstPrimeFactor,
+    #[error("invalid second prime factor")]
+    InvalidSecondPrimeFactor,
+    #[error("invalid first CRT exponent")]
+    InvalidFirstCRTExponent,
+    #[error("invalid second CRT exponent")]
+    InvalidSecondCRTExponent,
+    #[error("invalid CRT coefficient")]
+    InvalidCRTCoefficient,
+    #[error("invalid b64 coordinate")]
+    InvalidB64Coordinate,
+    #[error("invalid RSA public key")]
+    InvalidRSAPublicKey,
+    #[error("invalid RSA private key")]
+    InvalidRSAPrivateKey,
+    #[error("unsupported algorithm")]
+    UnsupportedAlgorithm,
+    #[error("public key is invalid (too long)")]
+    PublicKeyTooLong,
+    #[error("private key is invalid (too long)")]
+    PrivateKeyTooLong,
+    #[error("invalid P-256 elliptic curve point")]
+    InvalidP256ECPoint,
+    #[error("invalid P-384 elliptic curve point")]
+    InvalidP384ECPoint,
+    #[error("invalid P-521 elliptic curve point")]
+    InvalidP521ECPoint,
+    #[error("invalid P-256 elliptic curve SPKI data")]
+    InvalidP256ECSPKIData,
+    #[error("invalid P-384 elliptic curve SPKI data")]
+    InvalidP384ECSPKIData,
+    #[error("invalid P-521 elliptic curve SPKI data")]
+    InvalidP521ECSPKIData,
+    #[error("curve mismatch")]
+    CurveMismatch,
+    #[error("Unsupported named curve")]
+    UnsupportedNamedCurve,
+    #[error("invalid key data")]
+    InvalidKeyData,
+    #[error("invalid JWK private key")]
+    InvalidJWKPrivateKey,
+    #[error(transparent)]
+    EllipticCurve(#[from] elliptic_curve::Error),
+    #[error("expected valid PKCS#8 data")]
+    ExpectedValidPkcs8Data,
+    #[error("malformed parameters")]
+    MalformedParameters,
+    #[error(transparent)]
+    Spki(#[from] spki::Error),
+    #[error(transparent)]
+    Der(#[from] rsa::pkcs1::der::Error),
 }
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum KeyData {
-  Spki(JsBuffer),
-  Pkcs8(JsBuffer),
-  Raw(JsBuffer),
-  JwkSecret {
-    k: String,
-  },
-  JwkPublicRsa {
-    n: String,
-    e: String,
-  },
-  JwkPrivateRsa {
-    n: String,
-    e: String,
-    d: String,
-    p: String,
-    q: String,
-    dp: String,
-    dq: String,
-    qi: String,
-  },
-  JwkPublicEc {
-    x: String,
-    y: String,
-  },
-  JwkPrivateEc {
-    x: String,
-    y: String,
-    d: String,
-  },
+    Spki(JsBuffer),
+    Pkcs8(JsBuffer),
+    Raw(JsBuffer),
+    JwkSecret {
+        k: String,
+    },
+    JwkPublicRsa {
+        n: String,
+        e: String,
+    },
+    JwkPrivateRsa {
+        n: String,
+        e: String,
+        d: String,
+        p: String,
+        q: String,
+        dp: String,
+        dq: String,
+        qi: String,
+    },
+    JwkPublicEc {
+        x: String,
+        y: String,
+    },
+    JwkPrivateEc {
+        x: String,
+        y: String,
+        d: String,
+    },
 }
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", tag = "algorithm")]
 pub enum ImportKeyOptions {
-  #[serde(rename = "RSASSA-PKCS1-v1_5")]
-  RsassaPkcs1v15 {},
-  #[serde(rename = "RSA-PSS")]
-  RsaPss {},
-  #[serde(rename = "RSA-OAEP")]
-  RsaOaep {},
-  #[serde(rename = "ECDSA", rename_all = "camelCase")]
-  Ecdsa { named_curve: EcNamedCurve },
-  #[serde(rename = "ECDH", rename_all = "camelCase")]
-  Ecdh { named_curve: EcNamedCurve },
-  #[serde(rename = "AES", rename_all = "camelCase")]
-  Aes {},
-  #[serde(rename = "HMAC", rename_all = "camelCase")]
-  Hmac {},
+    #[serde(rename = "RSASSA-PKCS1-v1_5")]
+    RsassaPkcs1v15 {},
+    #[serde(rename = "RSA-PSS")]
+    RsaPss {},
+    #[serde(rename = "RSA-OAEP")]
+    RsaOaep {},
+    #[serde(rename = "ECDSA", rename_all = "camelCase")]
+    Ecdsa { named_curve: EcNamedCurve },
+    #[serde(rename = "ECDH", rename_all = "camelCase")]
+    Ecdh { named_curve: EcNamedCurve },
+    #[serde(rename = "AES", rename_all = "camelCase")]
+    Aes {},
+    #[serde(rename = "HMAC", rename_all = "camelCase")]
+    Hmac {},
 }
 
 #[derive(Serialize)]
 #[serde(untagged)]
 pub enum ImportKeyResult {
-  #[serde(rename_all = "camelCase")]
-  Rsa {
-    raw_data: RustRawKeyData,
-    modulus_length: usize,
-    public_exponent: ToJsBuffer,
-  },
-  #[serde(rename_all = "camelCase")]
-  Ec { raw_data: RustRawKeyData },
-  #[serde(rename_all = "camelCase")]
-  #[allow(dead_code, reason = "variant kept for completeness")]
-  Aes { raw_data: RustRawKeyData },
-  #[serde(rename_all = "camelCase")]
-  Hmac { raw_data: RustRawKeyData },
+    #[serde(rename_all = "camelCase")]
+    Rsa {
+        raw_data: RustRawKeyData,
+        modulus_length: usize,
+        public_exponent: ToJsBuffer,
+    },
+    #[serde(rename_all = "camelCase")]
+    Ec { raw_data: RustRawKeyData },
+    #[serde(rename_all = "camelCase")]
+    #[allow(dead_code, reason = "variant kept for completeness")]
+    Aes { raw_data: RustRawKeyData },
+    #[serde(rename_all = "camelCase")]
+    Hmac { raw_data: RustRawKeyData },
 }
 
 /// The largest RSA modulus isolane imports, as for generateKey: operations
@@ -174,754 +177,724 @@ const MAX_RSA_PUBLIC_EXPONENT_BYTES: usize = 5;
 const MAX_ASYMMETRIC_KEY_DATA: usize = 64 * 1024;
 
 impl KeyData {
-  fn len(&self) -> usize {
-    match self {
-      KeyData::Spki(b) | KeyData::Pkcs8(b) | KeyData::Raw(b) => b.len(),
-      KeyData::JwkSecret { k } => k.len(),
-      KeyData::JwkPublicRsa { n, e } => n.len() + e.len(),
-      KeyData::JwkPrivateRsa { n, e, d, p, q, dp, dq, qi } => {
-        [n, e, d, p, q, dp, dq, qi].iter().map(|s| s.len()).sum()
-      }
-      KeyData::JwkPublicEc { x, y } => x.len() + y.len(),
-      KeyData::JwkPrivateEc { x, y, d } => x.len() + y.len() + d.len(),
+    fn len(&self) -> usize {
+        match self {
+            KeyData::Spki(b) | KeyData::Pkcs8(b) | KeyData::Raw(b) => b.len(),
+            KeyData::JwkSecret { k } => k.len(),
+            KeyData::JwkPublicRsa { n, e } => n.len() + e.len(),
+            KeyData::JwkPrivateRsa {
+                n,
+                e,
+                d,
+                p,
+                q,
+                dp,
+                dq,
+                qi,
+            } => [n, e, d, p, q, dp, dq, qi].iter().map(|s| s.len()).sum(),
+            KeyData::JwkPublicEc { x, y } => x.len() + y.len(),
+            KeyData::JwkPrivateEc { x, y, d } => x.len() + y.len() + d.len(),
+        }
     }
-  }
 }
 
 pub fn op_crypto_import_key(
-  opts: ImportKeyOptions,
-  key_data: KeyData,
+    opts: ImportKeyOptions,
+    key_data: KeyData,
 ) -> Result<ImportKeyResult, ImportKeyError> {
-  let asymmetric = !matches!(opts, ImportKeyOptions::Aes {} | ImportKeyOptions::Hmac {});
-  if asymmetric && key_data.len() > MAX_ASYMMETRIC_KEY_DATA {
-    return Err(ImportKeyError::KeyDataTooLarge);
-  }
-  let result = import_key(opts, key_data)?;
-  if let ImportKeyResult::Rsa { modulus_length, public_exponent, .. } = &result {
-    if *modulus_length > MAX_RSA_MODULUS_LENGTH {
-      return Err(ImportKeyError::ModulusTooLarge);
+    let asymmetric = !matches!(opts, ImportKeyOptions::Aes {} | ImportKeyOptions::Hmac {});
+    if asymmetric && key_data.len() > MAX_ASYMMETRIC_KEY_DATA {
+        return Err(ImportKeyError::KeyDataTooLarge);
     }
-    if public_exponent.0.len() > MAX_RSA_PUBLIC_EXPONENT_BYTES {
-      return Err(ImportKeyError::InvalidPublicExponent);
+    let result = import_key(opts, key_data)?;
+    if let ImportKeyResult::Rsa {
+        modulus_length,
+        public_exponent,
+        ..
+    } = &result
+    {
+        if *modulus_length > MAX_RSA_MODULUS_LENGTH {
+            return Err(ImportKeyError::ModulusTooLarge);
+        }
+        if public_exponent.0.len() > MAX_RSA_PUBLIC_EXPONENT_BYTES {
+            return Err(ImportKeyError::InvalidPublicExponent);
+        }
     }
-  }
-  Ok(result)
+    Ok(result)
 }
 
 fn import_key(
-  opts: ImportKeyOptions,
-  key_data: KeyData,
+    opts: ImportKeyOptions,
+    key_data: KeyData,
 ) -> Result<ImportKeyResult, ImportKeyError> {
-  match opts {
-    ImportKeyOptions::RsassaPkcs1v15 {} => import_key_rsassa(key_data),
-    ImportKeyOptions::RsaPss {} => import_key_rsapss(key_data),
-    ImportKeyOptions::RsaOaep {} => import_key_rsaoaep(key_data),
-    ImportKeyOptions::Ecdsa { named_curve }
-    | ImportKeyOptions::Ecdh { named_curve } => {
-      import_key_ec(key_data, named_curve)
+    match opts {
+        ImportKeyOptions::RsassaPkcs1v15 {} => import_key_rsassa(key_data),
+        ImportKeyOptions::RsaPss {} => import_key_rsapss(key_data),
+        ImportKeyOptions::RsaOaep {} => import_key_rsaoaep(key_data),
+        ImportKeyOptions::Ecdsa { named_curve } | ImportKeyOptions::Ecdh { named_curve } => {
+            import_key_ec(key_data, named_curve)
+        }
+        ImportKeyOptions::Aes {} => import_key_aes(key_data),
+        ImportKeyOptions::Hmac {} => import_key_hmac(key_data),
     }
-    ImportKeyOptions::Aes {} => import_key_aes(key_data),
-    ImportKeyOptions::Hmac {} => import_key_hmac(key_data),
-  }
 }
 
-const BASE64_URL_SAFE_FORGIVING:
-  base64::engine::general_purpose::GeneralPurpose =
-  base64::engine::general_purpose::GeneralPurpose::new(
-    &base64::alphabet::URL_SAFE,
-    base64::engine::general_purpose::GeneralPurposeConfig::new()
-      .with_decode_allow_trailing_bits(true)
-      .with_decode_padding_mode(base64::engine::DecodePaddingMode::Indifferent),
-  );
+const BASE64_URL_SAFE_FORGIVING: base64::engine::general_purpose::GeneralPurpose =
+    base64::engine::general_purpose::GeneralPurpose::new(
+        &base64::alphabet::URL_SAFE,
+        base64::engine::general_purpose::GeneralPurposeConfig::new()
+            .with_decode_allow_trailing_bits(true)
+            .with_decode_padding_mode(base64::engine::DecodePaddingMode::Indifferent),
+    );
 
 macro_rules! jwt_b64_int_or_err {
-  ($name:ident, $b64:expr, $err:tt) => {
-    let bytes = BASE64_URL_SAFE_FORGIVING
-      .decode($b64)
-      .map_err(|_| ImportKeyError::$err)?;
-    let $name = UintRef::new(&bytes).map_err(|_| ImportKeyError::$err)?;
-  };
+    ($name:ident, $b64:expr, $err:tt) => {
+        let bytes = BASE64_URL_SAFE_FORGIVING
+            .decode($b64)
+            .map_err(|_| ImportKeyError::$err)?;
+        let $name = UintRef::new(&bytes).map_err(|_| ImportKeyError::$err)?;
+    };
 }
 
-fn import_key_rsa_jwk(
-  key_data: KeyData,
-) -> Result<ImportKeyResult, ImportKeyError> {
-  match key_data {
-    KeyData::JwkPublicRsa { n, e } => {
-      jwt_b64_int_or_err!(modulus, &n, InvalidModulus);
-      jwt_b64_int_or_err!(public_exponent, &e, InvalidPublicExponent);
+fn import_key_rsa_jwk(key_data: KeyData) -> Result<ImportKeyResult, ImportKeyError> {
+    match key_data {
+        KeyData::JwkPublicRsa { n, e } => {
+            jwt_b64_int_or_err!(modulus, &n, InvalidModulus);
+            jwt_b64_int_or_err!(public_exponent, &e, InvalidPublicExponent);
 
-      let public_key = rsa::pkcs1::RsaPublicKey {
-        modulus,
-        public_exponent,
-      };
+            let public_key = rsa::pkcs1::RsaPublicKey {
+                modulus,
+                public_exponent,
+            };
 
-      let mut data = Vec::new();
-      public_key
-        .encode_to_vec(&mut data)
-        .map_err(|_| ImportKeyError::InvalidRSAPublicKey)?;
+            let mut data = Vec::new();
+            public_key
+                .encode_to_vec(&mut data)
+                .map_err(|_| ImportKeyError::InvalidRSAPublicKey)?;
 
-      let public_exponent: ToJsBuffer =
-        public_key.public_exponent.as_bytes().to_vec().into();
-      let modulus_length = public_key.modulus.as_bytes().len() * 8;
+            let public_exponent: ToJsBuffer = public_key.public_exponent.as_bytes().to_vec().into();
+            let modulus_length = public_key.modulus.as_bytes().len() * 8;
 
-      Ok(ImportKeyResult::Rsa {
-        raw_data: RustRawKeyData::Public(data.into()),
-        modulus_length,
-        public_exponent,
-      })
+            Ok(ImportKeyResult::Rsa {
+                raw_data: RustRawKeyData::Public(data.into()),
+                modulus_length,
+                public_exponent,
+            })
+        }
+        KeyData::JwkPrivateRsa {
+            n,
+            e,
+            d,
+            p,
+            q,
+            dp,
+            dq,
+            qi,
+        } => {
+            jwt_b64_int_or_err!(modulus, &n, InvalidModulus);
+            jwt_b64_int_or_err!(public_exponent, &e, InvalidPublicExponent);
+            jwt_b64_int_or_err!(private_exponent, &d, InvalidPrivateExponent);
+            jwt_b64_int_or_err!(prime1, &p, InvalidFirstPrimeFactor);
+            jwt_b64_int_or_err!(prime2, &q, InvalidSecondPrimeFactor);
+            jwt_b64_int_or_err!(exponent1, &dp, InvalidFirstCRTExponent);
+            jwt_b64_int_or_err!(exponent2, &dq, InvalidSecondCRTExponent);
+            jwt_b64_int_or_err!(coefficient, &qi, InvalidCRTCoefficient);
+
+            let private_key = rsa::pkcs1::RsaPrivateKey {
+                modulus,
+                public_exponent,
+                private_exponent,
+                prime1,
+                prime2,
+                exponent1,
+                exponent2,
+                coefficient,
+                other_prime_infos: None,
+            };
+
+            let mut data = Vec::new();
+            private_key
+                .encode_to_vec(&mut data)
+                .map_err(|_| ImportKeyError::InvalidRSAPrivateKey)?;
+
+            let public_exponent = private_key.public_exponent.as_bytes().to_vec().into();
+            let modulus_length = private_key.modulus.as_bytes().len() * 8;
+
+            Ok(ImportKeyResult::Rsa {
+                raw_data: RustRawKeyData::Private(data.into()),
+                modulus_length,
+                public_exponent,
+            })
+        }
+        _ => Err(ImportKeyError::InvalidKeyData),
     }
-    KeyData::JwkPrivateRsa {
-      n,
-      e,
-      d,
-      p,
-      q,
-      dp,
-      dq,
-      qi,
-    } => {
-      jwt_b64_int_or_err!(modulus, &n, InvalidModulus);
-      jwt_b64_int_or_err!(public_exponent, &e, InvalidPublicExponent);
-      jwt_b64_int_or_err!(private_exponent, &d, InvalidPrivateExponent);
-      jwt_b64_int_or_err!(prime1, &p, InvalidFirstPrimeFactor);
-      jwt_b64_int_or_err!(prime2, &q, InvalidSecondPrimeFactor);
-      jwt_b64_int_or_err!(exponent1, &dp, InvalidFirstCRTExponent);
-      jwt_b64_int_or_err!(exponent2, &dq, InvalidSecondCRTExponent);
-      jwt_b64_int_or_err!(coefficient, &qi, InvalidCRTCoefficient);
-
-      let private_key = rsa::pkcs1::RsaPrivateKey {
-        modulus,
-        public_exponent,
-        private_exponent,
-        prime1,
-        prime2,
-        exponent1,
-        exponent2,
-        coefficient,
-        other_prime_infos: None,
-      };
-
-      let mut data = Vec::new();
-      private_key
-        .encode_to_vec(&mut data)
-        .map_err(|_| ImportKeyError::InvalidRSAPrivateKey)?;
-
-      let public_exponent =
-        private_key.public_exponent.as_bytes().to_vec().into();
-      let modulus_length = private_key.modulus.as_bytes().len() * 8;
-
-      Ok(ImportKeyResult::Rsa {
-        raw_data: RustRawKeyData::Private(data.into()),
-        modulus_length,
-        public_exponent,
-      })
-    }
-    _ => Err(ImportKeyError::InvalidKeyData),
-  }
 }
 
-fn import_key_rsassa(
-  key_data: KeyData,
-) -> Result<ImportKeyResult, ImportKeyError> {
-  match key_data {
-    KeyData::Spki(data) => {
-      // 2-3.
-      let pk_info = spki::SubjectPublicKeyInfoRef::try_from(&*data)?;
+fn import_key_rsassa(key_data: KeyData) -> Result<ImportKeyResult, ImportKeyError> {
+    match key_data {
+        KeyData::Spki(data) => {
+            // 2-3.
+            let pk_info = spki::SubjectPublicKeyInfoRef::try_from(&*data)?;
 
-      // 4-5.
-      let alg = pk_info.algorithm.oid;
+            // 4-5.
+            let alg = pk_info.algorithm.oid;
 
-      // 6-7. (skipped, only support rsaEncryption for interoperability)
-      if alg != RSA_ENCRYPTION_OID {
-        return Err(ImportKeyError::UnsupportedAlgorithm);
-      }
+            // 6-7. (skipped, only support rsaEncryption for interoperability)
+            if alg != RSA_ENCRYPTION_OID {
+                return Err(ImportKeyError::UnsupportedAlgorithm);
+            }
 
-      // 8-9.
-      let public_key = rsa::pkcs1::RsaPublicKey::from_der(
-        pk_info.subject_public_key.raw_bytes(),
-      )?;
+            // 8-9.
+            let public_key =
+                rsa::pkcs1::RsaPublicKey::from_der(pk_info.subject_public_key.raw_bytes())?;
 
-      let bytes_consumed = public_key.encoded_len()?;
+            let bytes_consumed = public_key.encoded_len()?;
 
-      if bytes_consumed
-        != rsa::pkcs1::der::Length::new(
-          pk_info.subject_public_key.raw_bytes().len() as u16,
-        )
-      {
-        return Err(ImportKeyError::PublicKeyTooLong);
-      }
+            if bytes_consumed
+                != rsa::pkcs1::der::Length::new(pk_info.subject_public_key.raw_bytes().len() as u16)
+            {
+                return Err(ImportKeyError::PublicKeyTooLong);
+            }
 
-      let data: ToJsBuffer = pk_info.subject_public_key.raw_bytes().to_vec().into();
-      let public_exponent: ToJsBuffer =
-        public_key.public_exponent.as_bytes().to_vec().into();
-      let modulus_length = public_key.modulus.as_bytes().len() * 8;
+            let data: ToJsBuffer = pk_info.subject_public_key.raw_bytes().to_vec().into();
+            let public_exponent: ToJsBuffer = public_key.public_exponent.as_bytes().to_vec().into();
+            let modulus_length = public_key.modulus.as_bytes().len() * 8;
 
-      Ok(ImportKeyResult::Rsa {
-        raw_data: RustRawKeyData::Public(data),
-        modulus_length,
-        public_exponent,
-      })
+            Ok(ImportKeyResult::Rsa {
+                raw_data: RustRawKeyData::Public(data),
+                modulus_length,
+                public_exponent,
+            })
+        }
+        KeyData::Pkcs8(data) => {
+            // 2-3.
+            let pk_info = PrivateKeyInfo::from_der(&data)?;
+
+            // 4-5.
+            let alg = pk_info.algorithm.oid;
+
+            // 6-7. (skipped, only support rsaEncryption for interoperability)
+            if alg != RSA_ENCRYPTION_OID {
+                return Err(ImportKeyError::UnsupportedAlgorithm);
+            }
+
+            // 8-9.
+            let private_key = rsa::pkcs1::RsaPrivateKey::from_der(pk_info.private_key)?;
+
+            let bytes_consumed = private_key.encoded_len()?;
+
+            if bytes_consumed != rsa::pkcs1::der::Length::new(pk_info.private_key.len() as u16) {
+                return Err(ImportKeyError::PrivateKeyTooLong);
+            }
+
+            let data: ToJsBuffer = pk_info.private_key.to_vec().into();
+            let public_exponent = private_key.public_exponent.as_bytes().to_vec().into();
+            let modulus_length = private_key.modulus.as_bytes().len() * 8;
+
+            Ok(ImportKeyResult::Rsa {
+                raw_data: RustRawKeyData::Private(data),
+                modulus_length,
+                public_exponent,
+            })
+        }
+        KeyData::JwkPublicRsa { .. } | KeyData::JwkPrivateRsa { .. } => {
+            import_key_rsa_jwk(key_data)
+        }
+        _ => Err(SharedError::UnsupportedFormat.into()),
     }
-    KeyData::Pkcs8(data) => {
-      // 2-3.
-      let pk_info = PrivateKeyInfo::from_der(&data)?;
-
-      // 4-5.
-      let alg = pk_info.algorithm.oid;
-
-      // 6-7. (skipped, only support rsaEncryption for interoperability)
-      if alg != RSA_ENCRYPTION_OID {
-        return Err(ImportKeyError::UnsupportedAlgorithm);
-      }
-
-      // 8-9.
-      let private_key =
-        rsa::pkcs1::RsaPrivateKey::from_der(pk_info.private_key)?;
-
-      let bytes_consumed = private_key.encoded_len()?;
-
-      if bytes_consumed
-        != rsa::pkcs1::der::Length::new(pk_info.private_key.len() as u16)
-      {
-        return Err(ImportKeyError::PrivateKeyTooLong);
-      }
-
-      let data: ToJsBuffer = pk_info.private_key.to_vec().into();
-      let public_exponent =
-        private_key.public_exponent.as_bytes().to_vec().into();
-      let modulus_length = private_key.modulus.as_bytes().len() * 8;
-
-      Ok(ImportKeyResult::Rsa {
-        raw_data: RustRawKeyData::Private(data),
-        modulus_length,
-        public_exponent,
-      })
-    }
-    KeyData::JwkPublicRsa { .. } | KeyData::JwkPrivateRsa { .. } => {
-      import_key_rsa_jwk(key_data)
-    }
-    _ => Err(SharedError::UnsupportedFormat.into()),
-  }
 }
 
-fn import_key_rsapss(
-  key_data: KeyData,
-) -> Result<ImportKeyResult, ImportKeyError> {
-  match key_data {
-    KeyData::Spki(data) => {
-      // 2-3.
-      let pk_info = spki::SubjectPublicKeyInfoRef::try_from(&*data)?;
+fn import_key_rsapss(key_data: KeyData) -> Result<ImportKeyResult, ImportKeyError> {
+    match key_data {
+        KeyData::Spki(data) => {
+            // 2-3.
+            let pk_info = spki::SubjectPublicKeyInfoRef::try_from(&*data)?;
 
-      // 4-5.
-      let alg = pk_info.algorithm.oid;
+            // 4-5.
+            let alg = pk_info.algorithm.oid;
 
-      // 6-7. (skipped, only support rsaEncryption for interoperability)
-      if alg != RSA_ENCRYPTION_OID {
-        return Err(ImportKeyError::UnsupportedAlgorithm);
-      }
+            // 6-7. (skipped, only support rsaEncryption for interoperability)
+            if alg != RSA_ENCRYPTION_OID {
+                return Err(ImportKeyError::UnsupportedAlgorithm);
+            }
 
-      // 8-9.
-      let public_key = rsa::pkcs1::RsaPublicKey::from_der(
-        pk_info.subject_public_key.raw_bytes(),
-      )?;
+            // 8-9.
+            let public_key =
+                rsa::pkcs1::RsaPublicKey::from_der(pk_info.subject_public_key.raw_bytes())?;
 
-      let bytes_consumed = public_key.encoded_len()?;
+            let bytes_consumed = public_key.encoded_len()?;
 
-      if bytes_consumed
-        != rsa::pkcs1::der::Length::new(
-          pk_info.subject_public_key.raw_bytes().len() as u16,
-        )
-      {
-        return Err(ImportKeyError::PublicKeyTooLong);
-      }
+            if bytes_consumed
+                != rsa::pkcs1::der::Length::new(pk_info.subject_public_key.raw_bytes().len() as u16)
+            {
+                return Err(ImportKeyError::PublicKeyTooLong);
+            }
 
-      let data: ToJsBuffer = pk_info.subject_public_key.raw_bytes().to_vec().into();
-      let public_exponent: ToJsBuffer =
-        public_key.public_exponent.as_bytes().to_vec().into();
-      let modulus_length = public_key.modulus.as_bytes().len() * 8;
+            let data: ToJsBuffer = pk_info.subject_public_key.raw_bytes().to_vec().into();
+            let public_exponent: ToJsBuffer = public_key.public_exponent.as_bytes().to_vec().into();
+            let modulus_length = public_key.modulus.as_bytes().len() * 8;
 
-      Ok(ImportKeyResult::Rsa {
-        raw_data: RustRawKeyData::Public(data),
-        modulus_length,
-        public_exponent,
-      })
+            Ok(ImportKeyResult::Rsa {
+                raw_data: RustRawKeyData::Public(data),
+                modulus_length,
+                public_exponent,
+            })
+        }
+        KeyData::Pkcs8(data) => {
+            // 2-3.
+            let pk_info = PrivateKeyInfo::from_der(&data)?;
+
+            // 4-5.
+            let alg = pk_info.algorithm.oid;
+
+            // 6-7. (skipped, only support rsaEncryption for interoperability)
+            if alg != RSA_ENCRYPTION_OID {
+                return Err(ImportKeyError::UnsupportedAlgorithm);
+            }
+
+            // 8-9.
+            let private_key = rsa::pkcs1::RsaPrivateKey::from_der(pk_info.private_key)?;
+
+            let bytes_consumed = private_key.encoded_len()?;
+
+            if bytes_consumed != rsa::pkcs1::der::Length::new(pk_info.private_key.len() as u16) {
+                return Err(ImportKeyError::PrivateKeyTooLong);
+            }
+
+            let data: ToJsBuffer = pk_info.private_key.to_vec().into();
+            let public_exponent = private_key.public_exponent.as_bytes().to_vec().into();
+            let modulus_length = private_key.modulus.as_bytes().len() * 8;
+
+            Ok(ImportKeyResult::Rsa {
+                raw_data: RustRawKeyData::Private(data),
+                modulus_length,
+                public_exponent,
+            })
+        }
+        KeyData::JwkPublicRsa { .. } | KeyData::JwkPrivateRsa { .. } => {
+            import_key_rsa_jwk(key_data)
+        }
+        _ => Err(SharedError::UnsupportedFormat.into()),
     }
-    KeyData::Pkcs8(data) => {
-      // 2-3.
-      let pk_info = PrivateKeyInfo::from_der(&data)?;
-
-      // 4-5.
-      let alg = pk_info.algorithm.oid;
-
-      // 6-7. (skipped, only support rsaEncryption for interoperability)
-      if alg != RSA_ENCRYPTION_OID {
-        return Err(ImportKeyError::UnsupportedAlgorithm);
-      }
-
-      // 8-9.
-      let private_key =
-        rsa::pkcs1::RsaPrivateKey::from_der(pk_info.private_key)?;
-
-      let bytes_consumed = private_key.encoded_len()?;
-
-      if bytes_consumed
-        != rsa::pkcs1::der::Length::new(pk_info.private_key.len() as u16)
-      {
-        return Err(ImportKeyError::PrivateKeyTooLong);
-      }
-
-      let data: ToJsBuffer = pk_info.private_key.to_vec().into();
-      let public_exponent =
-        private_key.public_exponent.as_bytes().to_vec().into();
-      let modulus_length = private_key.modulus.as_bytes().len() * 8;
-
-      Ok(ImportKeyResult::Rsa {
-        raw_data: RustRawKeyData::Private(data),
-        modulus_length,
-        public_exponent,
-      })
-    }
-    KeyData::JwkPublicRsa { .. } | KeyData::JwkPrivateRsa { .. } => {
-      import_key_rsa_jwk(key_data)
-    }
-    _ => Err(SharedError::UnsupportedFormat.into()),
-  }
 }
 
-fn import_key_rsaoaep(
-  key_data: KeyData,
-) -> Result<ImportKeyResult, ImportKeyError> {
-  match key_data {
-    KeyData::Spki(data) => {
-      // 2-3.
-      let pk_info = spki::SubjectPublicKeyInfoRef::try_from(&*data)?;
+fn import_key_rsaoaep(key_data: KeyData) -> Result<ImportKeyResult, ImportKeyError> {
+    match key_data {
+        KeyData::Spki(data) => {
+            // 2-3.
+            let pk_info = spki::SubjectPublicKeyInfoRef::try_from(&*data)?;
 
-      // 4-5.
-      let alg = pk_info.algorithm.oid;
+            // 4-5.
+            let alg = pk_info.algorithm.oid;
 
-      // 6-7. (skipped, only support rsaEncryption for interoperability)
-      if alg != RSA_ENCRYPTION_OID {
-        return Err(ImportKeyError::UnsupportedAlgorithm);
-      }
+            // 6-7. (skipped, only support rsaEncryption for interoperability)
+            if alg != RSA_ENCRYPTION_OID {
+                return Err(ImportKeyError::UnsupportedAlgorithm);
+            }
 
-      // 8-9.
-      let public_key = rsa::pkcs1::RsaPublicKey::from_der(
-        pk_info.subject_public_key.raw_bytes(),
-      )?;
+            // 8-9.
+            let public_key =
+                rsa::pkcs1::RsaPublicKey::from_der(pk_info.subject_public_key.raw_bytes())?;
 
-      let bytes_consumed = public_key.encoded_len()?;
+            let bytes_consumed = public_key.encoded_len()?;
 
-      if bytes_consumed
-        != rsa::pkcs1::der::Length::new(
-          pk_info.subject_public_key.raw_bytes().len() as u16,
-        )
-      {
-        return Err(ImportKeyError::PublicKeyTooLong);
-      }
+            if bytes_consumed
+                != rsa::pkcs1::der::Length::new(pk_info.subject_public_key.raw_bytes().len() as u16)
+            {
+                return Err(ImportKeyError::PublicKeyTooLong);
+            }
 
-      let data: ToJsBuffer = pk_info.subject_public_key.raw_bytes().to_vec().into();
-      let public_exponent: ToJsBuffer =
-        public_key.public_exponent.as_bytes().to_vec().into();
-      let modulus_length = public_key.modulus.as_bytes().len() * 8;
+            let data: ToJsBuffer = pk_info.subject_public_key.raw_bytes().to_vec().into();
+            let public_exponent: ToJsBuffer = public_key.public_exponent.as_bytes().to_vec().into();
+            let modulus_length = public_key.modulus.as_bytes().len() * 8;
 
-      Ok(ImportKeyResult::Rsa {
-        raw_data: RustRawKeyData::Public(data),
-        modulus_length,
-        public_exponent,
-      })
+            Ok(ImportKeyResult::Rsa {
+                raw_data: RustRawKeyData::Public(data),
+                modulus_length,
+                public_exponent,
+            })
+        }
+        KeyData::Pkcs8(data) => {
+            // 2-3.
+            let pk_info = PrivateKeyInfo::from_der(&data)?;
+
+            // 4-5.
+            let alg = pk_info.algorithm.oid;
+
+            // 6-7. (skipped, only support rsaEncryption for interoperability)
+            if alg != RSA_ENCRYPTION_OID {
+                return Err(ImportKeyError::UnsupportedAlgorithm);
+            }
+
+            // 8-9.
+            let private_key = rsa::pkcs1::RsaPrivateKey::from_der(pk_info.private_key)?;
+
+            let bytes_consumed = private_key.encoded_len()?;
+
+            if bytes_consumed != rsa::pkcs1::der::Length::new(pk_info.private_key.len() as u16) {
+                return Err(ImportKeyError::PrivateKeyTooLong);
+            }
+
+            let data: ToJsBuffer = pk_info.private_key.to_vec().into();
+            let public_exponent = private_key.public_exponent.as_bytes().to_vec().into();
+            let modulus_length = private_key.modulus.as_bytes().len() * 8;
+
+            Ok(ImportKeyResult::Rsa {
+                raw_data: RustRawKeyData::Private(data),
+                modulus_length,
+                public_exponent,
+            })
+        }
+        KeyData::JwkPublicRsa { .. } | KeyData::JwkPrivateRsa { .. } => {
+            import_key_rsa_jwk(key_data)
+        }
+        _ => Err(SharedError::UnsupportedFormat.into()),
     }
-    KeyData::Pkcs8(data) => {
-      // 2-3.
-      let pk_info = PrivateKeyInfo::from_der(&data)?;
-
-      // 4-5.
-      let alg = pk_info.algorithm.oid;
-
-      // 6-7. (skipped, only support rsaEncryption for interoperability)
-      if alg != RSA_ENCRYPTION_OID {
-        return Err(ImportKeyError::UnsupportedAlgorithm);
-      }
-
-      // 8-9.
-      let private_key =
-        rsa::pkcs1::RsaPrivateKey::from_der(pk_info.private_key)?;
-
-      let bytes_consumed = private_key.encoded_len()?;
-
-      if bytes_consumed
-        != rsa::pkcs1::der::Length::new(pk_info.private_key.len() as u16)
-      {
-        return Err(ImportKeyError::PrivateKeyTooLong);
-      }
-
-      let data: ToJsBuffer = pk_info.private_key.to_vec().into();
-      let public_exponent =
-        private_key.public_exponent.as_bytes().to_vec().into();
-      let modulus_length = private_key.modulus.as_bytes().len() * 8;
-
-      Ok(ImportKeyResult::Rsa {
-        raw_data: RustRawKeyData::Private(data),
-        modulus_length,
-        public_exponent,
-      })
-    }
-    KeyData::JwkPublicRsa { .. } | KeyData::JwkPrivateRsa { .. } => {
-      import_key_rsa_jwk(key_data)
-    }
-    _ => Err(SharedError::UnsupportedFormat.into()),
-  }
 }
 
 fn decode_b64url_to_field_bytes<C: elliptic_curve::Curve>(
-  b64: &str,
+    b64: &str,
 ) -> Result<elliptic_curve::FieldBytes<C>, ImportKeyError> {
-  jwt_b64_int_or_err!(val, b64, InvalidB64Coordinate);
+    jwt_b64_int_or_err!(val, b64, InvalidB64Coordinate);
 
-  let mut bytes = elliptic_curve::FieldBytes::<C>::default();
-  let original_bytes = val.as_bytes();
-  let mut new_bytes: Vec<u8> = vec![];
-  if original_bytes.len() < bytes.len() {
-    new_bytes = vec![0; bytes.len() - original_bytes.len()];
-  }
-  new_bytes.extend_from_slice(original_bytes);
+    let mut bytes = elliptic_curve::FieldBytes::<C>::default();
+    let original_bytes = val.as_bytes();
+    let mut new_bytes: Vec<u8> = vec![];
+    if original_bytes.len() < bytes.len() {
+        new_bytes = vec![0; bytes.len() - original_bytes.len()];
+    }
+    new_bytes.extend_from_slice(original_bytes);
 
-  let val = new_bytes.as_slice();
+    let val = new_bytes.as_slice();
 
-  if val.len() != bytes.len() {
-    return Err(ImportKeyError::InvalidB64Coordinate);
-  }
-  bytes.copy_from_slice(val);
+    if val.len() != bytes.len() {
+        return Err(ImportKeyError::InvalidB64Coordinate);
+    }
+    bytes.copy_from_slice(val);
 
-  Ok(bytes)
+    Ok(bytes)
 }
 
 /// A JWK's 'd': exactly the curve's field size (RFC 7518 6.2.2.1), with
 /// none of the padding decode_b64url_to_field_bytes allows for coordinates
 /// (isolane; Deno pads it).
 fn decode_b64url_exact_field_bytes<C: elliptic_curve::Curve>(
-  b64: &str,
+    b64: &str,
 ) -> Result<elliptic_curve::FieldBytes<C>, ImportKeyError> {
-  let bytes = BASE64_URL_SAFE_FORGIVING
-    .decode(b64)
-    .map_err(|_| ImportKeyError::InvalidB64Coordinate)?;
-  let mut out = elliptic_curve::FieldBytes::<C>::default();
-  if bytes.len() != out.len() {
-    return Err(ImportKeyError::InvalidJWKPrivateKey);
-  }
-  out.copy_from_slice(&bytes);
-  Ok(out)
+    let bytes = BASE64_URL_SAFE_FORGIVING
+        .decode(b64)
+        .map_err(|_| ImportKeyError::InvalidB64Coordinate)?;
+    let mut out = elliptic_curve::FieldBytes::<C>::default();
+    if bytes.len() != out.len() {
+        return Err(ImportKeyError::InvalidJWKPrivateKey);
+    }
+    out.copy_from_slice(&bytes);
+    Ok(out)
 }
 
 /// A base64url field, decoded as is (its length is checked against the
 /// curve's by the caller).
 fn decode_b64url_exact_field_bytes_or(
-  b64: &str,
-  err: ImportKeyError,
+    b64: &str,
+    err: ImportKeyError,
 ) -> Result<Vec<u8>, ImportKeyError> {
-  BASE64_URL_SAFE_FORGIVING.decode(b64).map_err(|_| err)
+    BASE64_URL_SAFE_FORGIVING.decode(b64).map_err(|_| err)
 }
 
 fn import_key_ec_jwk_to_point(
-  x: String,
-  y: String,
-  named_curve: EcNamedCurve,
+    x: String,
+    y: String,
+    named_curve: EcNamedCurve,
 ) -> Result<Vec<u8>, ImportKeyError> {
-  let point_bytes = match named_curve {
-    EcNamedCurve::P256 => {
-      let x = decode_b64url_to_field_bytes::<p256::NistP256>(&x)?;
-      let y = decode_b64url_to_field_bytes::<p256::NistP256>(&y)?;
+    let point_bytes = match named_curve {
+        EcNamedCurve::P256 => {
+            let x = decode_b64url_to_field_bytes::<p256::NistP256>(&x)?;
+            let y = decode_b64url_to_field_bytes::<p256::NistP256>(&y)?;
 
-      p256::EncodedPoint::from_affine_coordinates(&x, &y, false).to_bytes()
-    }
-    EcNamedCurve::P384 => {
-      let x = decode_b64url_to_field_bytes::<p384::NistP384>(&x)?;
-      let y = decode_b64url_to_field_bytes::<p384::NistP384>(&y)?;
+            p256::EncodedPoint::from_affine_coordinates(&x, &y, false).to_bytes()
+        }
+        EcNamedCurve::P384 => {
+            let x = decode_b64url_to_field_bytes::<p384::NistP384>(&x)?;
+            let y = decode_b64url_to_field_bytes::<p384::NistP384>(&y)?;
 
-      p384::EncodedPoint::from_affine_coordinates(&x, &y, false).to_bytes()
-    }
-    EcNamedCurve::P521 => {
-      let x = decode_b64url_to_field_bytes::<p521::NistP521>(&x)?;
-      let y = decode_b64url_to_field_bytes::<p521::NistP521>(&y)?;
+            p384::EncodedPoint::from_affine_coordinates(&x, &y, false).to_bytes()
+        }
+        EcNamedCurve::P521 => {
+            let x = decode_b64url_to_field_bytes::<p521::NistP521>(&x)?;
+            let y = decode_b64url_to_field_bytes::<p521::NistP521>(&y)?;
 
-      p521::EncodedPoint::from_affine_coordinates(&x, &y, false).to_bytes()
-    }
-  };
+            p521::EncodedPoint::from_affine_coordinates(&x, &y, false).to_bytes()
+        }
+    };
 
-  Ok(point_bytes.to_vec())
+    Ok(point_bytes.to_vec())
 }
 
 fn import_key_ec_jwk(
-  key_data: KeyData,
-  named_curve: EcNamedCurve,
+    key_data: KeyData,
+    named_curve: EcNamedCurve,
 ) -> Result<ImportKeyResult, ImportKeyError> {
-  match key_data {
-    KeyData::JwkPublicEc { x, y } => {
-      let point_bytes = import_key_ec_jwk_to_point(x, y, named_curve)?;
+    match key_data {
+        KeyData::JwkPublicEc { x, y } => {
+            let point_bytes = import_key_ec_jwk_to_point(x, y, named_curve)?;
 
-      Ok(ImportKeyResult::Ec {
-        raw_data: RustRawKeyData::Public(point_bytes.into()),
-      })
+            Ok(ImportKeyResult::Ec {
+                raw_data: RustRawKeyData::Public(point_bytes.into()),
+            })
+        }
+        KeyData::JwkPrivateEc { x, y, d } => {
+            // isolane: 'x' and 'y' must be d's public key, at the field size
+            // (Deno ignores them).
+            let x = decode_b64url_exact_field_bytes_or(&x, ImportKeyError::InvalidB64Coordinate)?;
+            let y = decode_b64url_exact_field_bytes_or(&y, ImportKeyError::InvalidB64Coordinate)?;
+            let matches = |point: &[u8]| {
+                point.len() == 1 + x.len() + y.len()
+                    && point[1..1 + x.len()] == x[..]
+                    && point[1 + x.len()..] == y[..]
+            };
+            let pkcs8_der = match named_curve {
+                EcNamedCurve::P256 => {
+                    let d = decode_b64url_exact_field_bytes::<p256::NistP256>(&d)?;
+                    let pk = p256::SecretKey::from_bytes(&d)?;
+                    if !matches(pk.public_key().to_encoded_point(false).as_bytes()) {
+                        return Err(ImportKeyError::InvalidJWKPrivateKey);
+                    }
+
+                    pk.to_pkcs8_der()
+                        .map_err(|_| ImportKeyError::InvalidJWKPrivateKey)?
+                }
+                EcNamedCurve::P384 => {
+                    let d = decode_b64url_exact_field_bytes::<p384::NistP384>(&d)?;
+                    let pk = p384::SecretKey::from_bytes(&d)?;
+                    if !matches(pk.public_key().to_encoded_point(false).as_bytes()) {
+                        return Err(ImportKeyError::InvalidJWKPrivateKey);
+                    }
+
+                    pk.to_pkcs8_der()
+                        .map_err(|_| ImportKeyError::InvalidJWKPrivateKey)?
+                }
+                EcNamedCurve::P521 => {
+                    let d = decode_b64url_exact_field_bytes::<p521::NistP521>(&d)?;
+                    let pk = p521::SecretKey::from_bytes(&d)?;
+                    if !matches(pk.public_key().to_encoded_point(false).as_bytes()) {
+                        return Err(ImportKeyError::InvalidJWKPrivateKey);
+                    }
+
+                    pk.to_pkcs8_der()
+                        .map_err(|_| ImportKeyError::InvalidJWKPrivateKey)?
+                }
+            };
+
+            Ok(ImportKeyResult::Ec {
+                raw_data: RustRawKeyData::Private(pkcs8_der.as_bytes().to_vec().into()),
+            })
+        }
+        _ => Err(ImportKeyError::InvalidKeyData),
     }
-    KeyData::JwkPrivateEc { x, y, d } => {
-      // isolane: 'x' and 'y' must be d's public key, at the field size
-      // (Deno ignores them).
-      let x = decode_b64url_exact_field_bytes_or(&x, ImportKeyError::InvalidB64Coordinate)?;
-      let y = decode_b64url_exact_field_bytes_or(&y, ImportKeyError::InvalidB64Coordinate)?;
-      let matches = |point: &[u8]| {
-        point.len() == 1 + x.len() + y.len()
-          && point[1..1 + x.len()] == x[..]
-          && point[1 + x.len()..] == y[..]
-      };
-      let pkcs8_der = match named_curve {
-        EcNamedCurve::P256 => {
-          let d = decode_b64url_exact_field_bytes::<p256::NistP256>(&d)?;
-          let pk = p256::SecretKey::from_bytes(&d)?;
-          if !matches(pk.public_key().to_encoded_point(false).as_bytes()) {
-            return Err(ImportKeyError::InvalidJWKPrivateKey);
-          }
-
-          pk.to_pkcs8_der()
-            .map_err(|_| ImportKeyError::InvalidJWKPrivateKey)?
-        }
-        EcNamedCurve::P384 => {
-          let d = decode_b64url_exact_field_bytes::<p384::NistP384>(&d)?;
-          let pk = p384::SecretKey::from_bytes(&d)?;
-          if !matches(pk.public_key().to_encoded_point(false).as_bytes()) {
-            return Err(ImportKeyError::InvalidJWKPrivateKey);
-          }
-
-          pk.to_pkcs8_der()
-            .map_err(|_| ImportKeyError::InvalidJWKPrivateKey)?
-        }
-        EcNamedCurve::P521 => {
-          let d = decode_b64url_exact_field_bytes::<p521::NistP521>(&d)?;
-          let pk = p521::SecretKey::from_bytes(&d)?;
-          if !matches(pk.public_key().to_encoded_point(false).as_bytes()) {
-            return Err(ImportKeyError::InvalidJWKPrivateKey);
-          }
-
-          pk.to_pkcs8_der()
-            .map_err(|_| ImportKeyError::InvalidJWKPrivateKey)?
-        }
-      };
-
-      Ok(ImportKeyResult::Ec {
-        raw_data: RustRawKeyData::Private(pkcs8_der.as_bytes().to_vec().into()),
-      })
-    }
-    _ => Err(ImportKeyError::InvalidKeyData),
-  }
 }
 
 pub struct ECParametersSpki {
-  pub named_curve_alg: spki::der::asn1::ObjectIdentifier,
+    pub named_curve_alg: spki::der::asn1::ObjectIdentifier,
 }
 
 impl<'a> TryFrom<spki::der::asn1::AnyRef<'a>> for ECParametersSpki {
-  type Error = spki::der::Error;
+    type Error = spki::der::Error;
 
-  fn try_from(
-    any: spki::der::asn1::AnyRef<'a>,
-  ) -> spki::der::Result<ECParametersSpki> {
-    let x = any.try_into()?;
+    fn try_from(any: spki::der::asn1::AnyRef<'a>) -> spki::der::Result<ECParametersSpki> {
+        let x = any.try_into()?;
 
-    Ok(Self { named_curve_alg: x })
-  }
+        Ok(Self { named_curve_alg: x })
+    }
 }
 
 fn import_key_ec(
-  key_data: KeyData,
-  named_curve: EcNamedCurve,
+    key_data: KeyData,
+    named_curve: EcNamedCurve,
 ) -> Result<ImportKeyResult, ImportKeyError> {
-  match key_data {
-    KeyData::Raw(data) => {
-      // The point is parsed and validated, ultimately the original data is
-      // returned though.
-      match named_curve {
-        EcNamedCurve::P256 => {
-          // 1-2.
-          let point = p256::EncodedPoint::from_bytes(&data)
-            .map_err(|_| ImportKeyError::InvalidP256ECPoint)?;
-          // 3.
-          if point.is_identity() {
-            return Err(ImportKeyError::InvalidP256ECPoint);
-          }
+    match key_data {
+        KeyData::Raw(data) => {
+            // The point is parsed and validated, ultimately the original data is
+            // returned though.
+            match named_curve {
+                EcNamedCurve::P256 => {
+                    // 1-2.
+                    let point = p256::EncodedPoint::from_bytes(&data)
+                        .map_err(|_| ImportKeyError::InvalidP256ECPoint)?;
+                    // 3.
+                    if point.is_identity() {
+                        return Err(ImportKeyError::InvalidP256ECPoint);
+                    }
+                }
+                EcNamedCurve::P384 => {
+                    // 1-2.
+                    let point = p384::EncodedPoint::from_bytes(&data)
+                        .map_err(|_| ImportKeyError::InvalidP384ECPoint)?;
+                    // 3.
+                    if point.is_identity() {
+                        return Err(ImportKeyError::InvalidP384ECPoint);
+                    }
+                }
+                EcNamedCurve::P521 => {
+                    // 1-2.
+                    let point = p521::EncodedPoint::from_bytes(&data)
+                        .map_err(|_| ImportKeyError::InvalidP521ECPoint)?;
+                    // 3.
+                    if point.is_identity() {
+                        return Err(ImportKeyError::InvalidP521ECPoint);
+                    }
+                }
+            };
+            Ok(ImportKeyResult::Ec {
+                raw_data: RustRawKeyData::Public(data.to_vec().into()),
+            })
         }
-        EcNamedCurve::P384 => {
-          // 1-2.
-          let point = p384::EncodedPoint::from_bytes(&data)
-            .map_err(|_| ImportKeyError::InvalidP384ECPoint)?;
-          // 3.
-          if point.is_identity() {
-            return Err(ImportKeyError::InvalidP384ECPoint);
-          }
-        }
-        EcNamedCurve::P521 => {
-          // 1-2.
-          let point = p521::EncodedPoint::from_bytes(&data)
-            .map_err(|_| ImportKeyError::InvalidP521ECPoint)?;
-          // 3.
-          if point.is_identity() {
-            return Err(ImportKeyError::InvalidP521ECPoint);
-          }
-        }
-      };
-      Ok(ImportKeyResult::Ec {
-        raw_data: RustRawKeyData::Public(data.to_vec().into()),
-      })
-    }
-    KeyData::Pkcs8(data) => {
-      let pk = PrivateKeyInfo::from_der(data.as_ref())
-        .map_err(|_| ImportKeyError::ExpectedValidPkcs8Data)?;
-      let named_curve_alg = pk
-        .algorithm
-        .parameters
-        .ok_or(ImportKeyError::MalformedParameters)?
-        .try_into()
-        .map_err(|_| ImportKeyError::MalformedParameters)?;
+        KeyData::Pkcs8(data) => {
+            let pk = PrivateKeyInfo::from_der(data.as_ref())
+                .map_err(|_| ImportKeyError::ExpectedValidPkcs8Data)?;
+            let named_curve_alg = pk
+                .algorithm
+                .parameters
+                .ok_or(ImportKeyError::MalformedParameters)?
+                .try_into()
+                .map_err(|_| ImportKeyError::MalformedParameters)?;
 
-      let pk_named_curve = match named_curve_alg {
-        // id-secp256r1
-        ID_SECP256R1_OID => Some(EcNamedCurve::P256),
-        // id-secp384r1
-        ID_SECP384R1_OID => Some(EcNamedCurve::P384),
-        // id-secp521r1
-        ID_SECP521R1_OID => Some(EcNamedCurve::P521),
-        _ => None,
-      };
+            let pk_named_curve = match named_curve_alg {
+                // id-secp256r1
+                ID_SECP256R1_OID => Some(EcNamedCurve::P256),
+                // id-secp384r1
+                ID_SECP384R1_OID => Some(EcNamedCurve::P384),
+                // id-secp521r1
+                ID_SECP521R1_OID => Some(EcNamedCurve::P521),
+                _ => None,
+            };
 
-      if pk_named_curve != Some(named_curve) {
-        return Err(ImportKeyError::CurveMismatch);
-      }
-
-      Ok(ImportKeyResult::Ec {
-        raw_data: RustRawKeyData::Private(data.to_vec().into()),
-      })
-    }
-    KeyData::Spki(data) => {
-      // 2-3.
-      let pk_info = spki::SubjectPublicKeyInfoRef::try_from(&*data)?;
-
-      // 4.
-      let alg = pk_info.algorithm.oid;
-      // id-ecPublicKey
-      if alg != elliptic_curve::ALGORITHM_OID {
-        return Err(ImportKeyError::UnsupportedAlgorithm);
-      }
-
-      // 5-7.
-      let params = ECParametersSpki::try_from(
-        pk_info
-          .algorithm
-          .parameters
-          .ok_or(ImportKeyError::MalformedParameters)?,
-      )
-      .map_err(|_| ImportKeyError::MalformedParameters)?;
-
-      // 8-9.
-      let named_curve_alg = params.named_curve_alg;
-      let pk_named_curve = match named_curve_alg {
-        // id-secp256r1
-        ID_SECP256R1_OID => Some(EcNamedCurve::P256),
-        // id-secp384r1
-        ID_SECP384R1_OID => Some(EcNamedCurve::P384),
-        // id-secp521r1
-        ID_SECP521R1_OID => Some(EcNamedCurve::P521),
-        _ => None,
-      };
-
-      // 10.
-      let encoded_key;
-
-      if let Some(pk_named_curve) = pk_named_curve {
-        let pk = pk_info.subject_public_key;
-
-        encoded_key = pk.raw_bytes().to_vec();
-
-        let bytes_consumed = match named_curve {
-          EcNamedCurve::P256 => {
-            let point = p256::EncodedPoint::from_bytes(&*encoded_key)
-              .map_err(|_| ImportKeyError::InvalidP256ECSPKIData)?;
-            if point.is_identity() {
-              return Err(ImportKeyError::InvalidP256ECPoint);
+            if pk_named_curve != Some(named_curve) {
+                return Err(ImportKeyError::CurveMismatch);
             }
 
-            point.as_bytes().len()
-          }
-          EcNamedCurve::P384 => {
-            let point = p384::EncodedPoint::from_bytes(&*encoded_key)
-              .map_err(|_| ImportKeyError::InvalidP384ECSPKIData)?;
+            Ok(ImportKeyResult::Ec {
+                raw_data: RustRawKeyData::Private(data.to_vec().into()),
+            })
+        }
+        KeyData::Spki(data) => {
+            // 2-3.
+            let pk_info = spki::SubjectPublicKeyInfoRef::try_from(&*data)?;
 
-            if point.is_identity() {
-              return Err(ImportKeyError::InvalidP384ECPoint);
+            // 4.
+            let alg = pk_info.algorithm.oid;
+            // id-ecPublicKey
+            if alg != elliptic_curve::ALGORITHM_OID {
+                return Err(ImportKeyError::UnsupportedAlgorithm);
             }
 
-            point.as_bytes().len()
-          }
-          EcNamedCurve::P521 => {
-            let point = p521::EncodedPoint::from_bytes(&*encoded_key)
-              .map_err(|_| ImportKeyError::InvalidP521ECSPKIData)?;
+            // 5-7.
+            let params = ECParametersSpki::try_from(
+                pk_info
+                    .algorithm
+                    .parameters
+                    .ok_or(ImportKeyError::MalformedParameters)?,
+            )
+            .map_err(|_| ImportKeyError::MalformedParameters)?;
 
-            if point.is_identity() {
-              return Err(ImportKeyError::InvalidP521ECPoint);
+            // 8-9.
+            let named_curve_alg = params.named_curve_alg;
+            let pk_named_curve = match named_curve_alg {
+                // id-secp256r1
+                ID_SECP256R1_OID => Some(EcNamedCurve::P256),
+                // id-secp384r1
+                ID_SECP384R1_OID => Some(EcNamedCurve::P384),
+                // id-secp521r1
+                ID_SECP521R1_OID => Some(EcNamedCurve::P521),
+                _ => None,
+            };
+
+            // 10.
+            let encoded_key;
+
+            if let Some(pk_named_curve) = pk_named_curve {
+                let pk = pk_info.subject_public_key;
+
+                encoded_key = pk.raw_bytes().to_vec();
+
+                let bytes_consumed = match named_curve {
+                    EcNamedCurve::P256 => {
+                        let point = p256::EncodedPoint::from_bytes(&*encoded_key)
+                            .map_err(|_| ImportKeyError::InvalidP256ECSPKIData)?;
+                        if point.is_identity() {
+                            return Err(ImportKeyError::InvalidP256ECPoint);
+                        }
+
+                        point.as_bytes().len()
+                    }
+                    EcNamedCurve::P384 => {
+                        let point = p384::EncodedPoint::from_bytes(&*encoded_key)
+                            .map_err(|_| ImportKeyError::InvalidP384ECSPKIData)?;
+
+                        if point.is_identity() {
+                            return Err(ImportKeyError::InvalidP384ECPoint);
+                        }
+
+                        point.as_bytes().len()
+                    }
+                    EcNamedCurve::P521 => {
+                        let point = p521::EncodedPoint::from_bytes(&*encoded_key)
+                            .map_err(|_| ImportKeyError::InvalidP521ECSPKIData)?;
+
+                        if point.is_identity() {
+                            return Err(ImportKeyError::InvalidP521ECPoint);
+                        }
+
+                        point.as_bytes().len()
+                    }
+                };
+
+                if bytes_consumed != pk_info.subject_public_key.raw_bytes().len() {
+                    return Err(ImportKeyError::PublicKeyTooLong);
+                }
+
+                // 11.
+                if named_curve != pk_named_curve {
+                    return Err(ImportKeyError::CurveMismatch);
+                }
+            } else {
+                return Err(ImportKeyError::UnsupportedNamedCurve);
             }
 
-            point.as_bytes().len()
-          }
-        };
-
-        if bytes_consumed != pk_info.subject_public_key.raw_bytes().len() {
-          return Err(ImportKeyError::PublicKeyTooLong);
+            Ok(ImportKeyResult::Ec {
+                raw_data: RustRawKeyData::Public(encoded_key.into()),
+            })
         }
-
-        // 11.
-        if named_curve != pk_named_curve {
-          return Err(ImportKeyError::CurveMismatch);
+        KeyData::JwkPublicEc { .. } | KeyData::JwkPrivateEc { .. } => {
+            import_key_ec_jwk(key_data, named_curve)
         }
-      } else {
-        return Err(ImportKeyError::UnsupportedNamedCurve);
-      }
-
-      Ok(ImportKeyResult::Ec {
-        raw_data: RustRawKeyData::Public(encoded_key.into()),
-      })
+        _ => Err(SharedError::UnsupportedFormat.into()),
     }
-    KeyData::JwkPublicEc { .. } | KeyData::JwkPrivateEc { .. } => {
-      import_key_ec_jwk(key_data, named_curve)
-    }
-    _ => Err(SharedError::UnsupportedFormat.into()),
-  }
 }
 
-fn import_key_aes(
-  key_data: KeyData,
-) -> Result<ImportKeyResult, ImportKeyError> {
-  Ok(match key_data {
-    KeyData::JwkSecret { k } => {
-      let data = BASE64_URL_SAFE_FORGIVING
-        .decode(k)
-        .map_err(|_| ImportKeyError::InvalidKeyData)?;
-      ImportKeyResult::Hmac {
-        raw_data: RustRawKeyData::Secret(data.into()),
-      }
-    }
-    _ => return Err(SharedError::UnsupportedFormat.into()),
-  })
+fn import_key_aes(key_data: KeyData) -> Result<ImportKeyResult, ImportKeyError> {
+    Ok(match key_data {
+        KeyData::JwkSecret { k } => {
+            let data = BASE64_URL_SAFE_FORGIVING
+                .decode(k)
+                .map_err(|_| ImportKeyError::InvalidKeyData)?;
+            ImportKeyResult::Hmac {
+                raw_data: RustRawKeyData::Secret(data.into()),
+            }
+        }
+        _ => return Err(SharedError::UnsupportedFormat.into()),
+    })
 }
 
-fn import_key_hmac(
-  key_data: KeyData,
-) -> Result<ImportKeyResult, ImportKeyError> {
-  Ok(match key_data {
-    KeyData::JwkSecret { k } => {
-      let data = BASE64_URL_SAFE_FORGIVING
-        .decode(k)
-        .map_err(|_| ImportKeyError::InvalidKeyData)?;
-      ImportKeyResult::Hmac {
-        raw_data: RustRawKeyData::Secret(data.into()),
-      }
-    }
-    _ => return Err(SharedError::UnsupportedFormat.into()),
-  })
+fn import_key_hmac(key_data: KeyData) -> Result<ImportKeyResult, ImportKeyError> {
+    Ok(match key_data {
+        KeyData::JwkSecret { k } => {
+            let data = BASE64_URL_SAFE_FORGIVING
+                .decode(k)
+                .map_err(|_| ImportKeyError::InvalidKeyData)?;
+            ImportKeyResult::Hmac {
+                raw_data: RustRawKeyData::Secret(data.into()),
+            }
+        }
+        _ => return Err(SharedError::UnsupportedFormat.into()),
+    })
 }

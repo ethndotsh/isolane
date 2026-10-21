@@ -37,9 +37,13 @@ mod linux {
     use super::Level;
     use std::collections::BTreeMap;
 
-    use landlock::{Access, AccessFs, AccessNet, CompatLevel, Compatible, Ruleset, RulesetAttr, RulesetStatus, ABI};
+    use landlock::{
+        Access, AccessFs, AccessNet, CompatLevel, Compatible, Ruleset, RulesetAttr, RulesetStatus,
+        ABI,
+    };
     use seccompiler::{
-        BpfProgram, SeccompAction, SeccompCmpArgLen, SeccompCmpOp, SeccompCondition, SeccompFilter, SeccompRule,
+        BpfProgram, SeccompAction, SeccompCmpArgLen, SeccompCmpOp, SeccompCondition, SeccompFilter,
+        SeccompRule,
     };
 
     /// Deny all filesystem access and TCP bind/connect. Already-open fds
@@ -111,13 +115,16 @@ mod linux {
     /// thread names (Rust's std and V8 name every thread) and V8 naming its
     /// anonymous mappings (`v8-sandbox`, `v8-pointer-table`). Any other
     /// option fails with EPERM, and those in PRCTL_KILLED kill the worker.
-    pub const PRCTL_ALLOWED: &[(libc::c_int, Option<libc::c_int>)] =
-        &[(libc::PR_SET_NAME, None), (libc::PR_SET_VMA, Some(libc::PR_SET_VMA_ANON_NAME))];
+    pub const PRCTL_ALLOWED: &[(libc::c_int, Option<libc::c_int>)] = &[
+        (libc::PR_SET_NAME, None),
+        (libc::PR_SET_VMA, Some(libc::PR_SET_VMA_ANON_NAME)),
+    ];
 
     /// `prctl` options that only an attacker would use: making the process
     /// dumpable (so same-user processes could read its memory or ptrace it),
     /// naming a ptracer, or rewriting the memory map's metadata.
-    const PRCTL_KILLED: &[libc::c_int] = &[libc::PR_SET_DUMPABLE, libc::PR_SET_PTRACER, libc::PR_SET_MM];
+    const PRCTL_KILLED: &[libc::c_int] =
+        &[libc::PR_SET_DUMPABLE, libc::PR_SET_PTRACER, libc::PR_SET_MM];
 
     /// Filesystem calls fail with EACCES instead of killing the process, as
     /// Landlock would answer them: V8, ICU, and abseil probe files lazily
@@ -163,7 +170,9 @@ mod linux {
     ///
     /// The kernel applies the most restrictive result across filters.
     pub fn seccomp() -> Result<Level, String> {
-        let arch = std::env::consts::ARCH.try_into().map_err(|e| format!("seccomp: {e:?}"))?;
+        let arch = std::env::consts::ARCH
+            .try_into()
+            .map_err(|e| format!("seccomp: {e:?}"))?;
         let err = |e: seccompiler::BackendError| format!("seccomp: {e}");
 
         let no_clone3 = SeccompFilter::new(
@@ -183,7 +192,9 @@ mod linux {
 
         // Each rule is one way to be outside the allowed options (the
         // conditions in a rule all hold; any rule matching refuses).
-        let arg = |n: u8, op: SeccompCmpOp, v: libc::c_int| SeccompCondition::new(n, SeccompCmpArgLen::Dword, op, v as u64).map_err(err);
+        let arg = |n: u8, op: SeccompCmpOp, v: libc::c_int| {
+            SeccompCondition::new(n, SeccompCmpArgLen::Dword, op, v as u64).map_err(err)
+        };
         // PR_SET_NO_NEW_PRIVS passes too: installing each later filter calls
         // it (it can only ever add a restriction), and the allowlist, which
         // must be last since it refuses seccomp() itself, kills the rest.
@@ -198,7 +209,13 @@ mod linux {
         .map_err(err)?];
         for &(option, sub) in PRCTL_ALLOWED {
             if let Some(sub) = sub {
-                outside.push(SeccompRule::new(vec![arg(0, SeccompCmpOp::Eq, option)?, arg(1, SeccompCmpOp::Ne, sub)?]).map_err(err)?);
+                outside.push(
+                    SeccompRule::new(vec![
+                        arg(0, SeccompCmpOp::Eq, option)?,
+                        arg(1, SeccompCmpOp::Ne, sub)?,
+                    ])
+                    .map_err(err)?,
+                );
             }
         }
         let prctl_options = SeccompFilter::new(
@@ -211,7 +228,10 @@ mod linux {
         let prctl_killed = SeccompFilter::new(
             BTreeMap::from([(
                 libc::SYS_prctl,
-                PRCTL_KILLED.iter().map(|&o| SeccompRule::new(vec![arg(0, SeccompCmpOp::Eq, o)?]).map_err(err)).collect::<Result<_, _>>()?,
+                PRCTL_KILLED
+                    .iter()
+                    .map(|&o| SeccompRule::new(vec![arg(0, SeccompCmpOp::Eq, o)?]).map_err(err))
+                    .collect::<Result<_, _>>()?,
             )]),
             SeccompAction::Allow,
             SeccompAction::KillProcess,
@@ -221,13 +241,26 @@ mod linux {
 
         // Syscalls refused by the filters above must pass this one, or its
         // kill (the most restrictive action) would win.
-        let mut rules: BTreeMap<i64, Vec<SeccompRule>> =
-            ALLOWED.iter().chain(FILE_SYSCALLS).map(|&s| (s, vec![])).collect();
+        let mut rules: BTreeMap<i64, Vec<SeccompRule>> = ALLOWED
+            .iter()
+            .chain(FILE_SYSCALLS)
+            .map(|&s| (s, vec![]))
+            .collect();
         rules.insert(libc::SYS_clone3, vec![]);
         // A thread as pthread_create makes one: sharing memory, files, the
         // filesystem context, and signal handlers, in no new namespace.
-        let shared = (libc::CLONE_VM | libc::CLONE_FS | libc::CLONE_FILES | libc::CLONE_SIGHAND | libc::CLONE_THREAD) as u64;
-        let thread_only = SeccompCondition::new(0, SeccompCmpArgLen::Qword, SeccompCmpOp::MaskedEq(shared), shared).map_err(err)?;
+        let shared = (libc::CLONE_VM
+            | libc::CLONE_FS
+            | libc::CLONE_FILES
+            | libc::CLONE_SIGHAND
+            | libc::CLONE_THREAD) as u64;
+        let thread_only = SeccompCondition::new(
+            0,
+            SeccompCmpArgLen::Qword,
+            SeccompCmpOp::MaskedEq(shared),
+            shared,
+        )
+        .map_err(err)?;
         let namespaces = (libc::CLONE_NEWNS
             | libc::CLONE_NEWCGROUP
             | libc::CLONE_NEWUTS
@@ -236,9 +269,24 @@ mod linux {
             | libc::CLONE_NEWPID
             | libc::CLONE_NEWNET
             | libc::CLONE_VFORK) as u64;
-        let no_namespaces = SeccompCondition::new(0, SeccompCmpArgLen::Qword, SeccompCmpOp::MaskedEq(namespaces), 0).map_err(err)?;
-        rules.insert(libc::SYS_clone, vec![SeccompRule::new(vec![thread_only, no_namespaces]).map_err(err)?]);
-        let allowlist = SeccompFilter::new(rules, SeccompAction::KillProcess, SeccompAction::Allow, arch).map_err(err)?;
+        let no_namespaces = SeccompCondition::new(
+            0,
+            SeccompCmpArgLen::Qword,
+            SeccompCmpOp::MaskedEq(namespaces),
+            0,
+        )
+        .map_err(err)?;
+        rules.insert(
+            libc::SYS_clone,
+            vec![SeccompRule::new(vec![thread_only, no_namespaces]).map_err(err)?],
+        );
+        let allowlist = SeccompFilter::new(
+            rules,
+            SeccompAction::KillProcess,
+            SeccompAction::Allow,
+            arch,
+        )
+        .map_err(err)?;
 
         for filter in [no_clone3, no_files, prctl_options, prctl_killed, allowlist] {
             let prog: BpfProgram = filter.try_into().map_err(err)?;
@@ -259,10 +307,16 @@ mod linux {
 pub fn memory_limit(bytes: u64) -> Result<(), String> {
     #[cfg(target_os = "linux")]
     {
-        let lim = libc::rlimit { rlim_cur: bytes, rlim_max: bytes };
+        let lim = libc::rlimit {
+            rlim_cur: bytes,
+            rlim_max: bytes,
+        };
         // SAFETY: setrlimit reads a valid, initialized rlimit.
         if unsafe { libc::setrlimit(libc::RLIMIT_DATA, &lim) } != 0 {
-            return Err(format!("setrlimit(RLIMIT_DATA): {}", std::io::Error::last_os_error()));
+            return Err(format!(
+                "setrlimit(RLIMIT_DATA): {}",
+                std::io::Error::last_os_error()
+            ));
         }
     }
     #[cfg(not(target_os = "linux"))]
@@ -276,11 +330,20 @@ pub fn memory_limit(bytes: u64) -> Result<(), String> {
 /// other workers' threads; seccomp already forbids creating processes.
 fn resource_limits() -> Result<(), String> {
     #[cfg(target_os = "linux")]
-    for (resource, name) in [(libc::RLIMIT_CORE, "RLIMIT_CORE"), (libc::RLIMIT_FSIZE, "RLIMIT_FSIZE")] {
-        let zero = libc::rlimit { rlim_cur: 0, rlim_max: 0 };
+    for (resource, name) in [
+        (libc::RLIMIT_CORE, "RLIMIT_CORE"),
+        (libc::RLIMIT_FSIZE, "RLIMIT_FSIZE"),
+    ] {
+        let zero = libc::rlimit {
+            rlim_cur: 0,
+            rlim_max: 0,
+        };
         // SAFETY: as above.
         if unsafe { libc::setrlimit(resource, &zero) } != 0 {
-            return Err(format!("setrlimit({name}): {}", std::io::Error::last_os_error()));
+            return Err(format!(
+                "setrlimit({name}): {}",
+                std::io::Error::last_os_error()
+            ));
         }
     }
     Ok(())

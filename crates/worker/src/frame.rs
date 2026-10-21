@@ -22,7 +22,10 @@ pub fn read_frame(r: &mut impl Read) -> io::Result<Option<Vec<u8>>> {
     }
     let len = u32::from_le_bytes(len) as usize;
     if len > MAX_FRAME {
-        return Err(io::Error::new(io::ErrorKind::InvalidData, format!("frame of {len} bytes exceeds the limit")));
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("frame of {len} bytes exceeds the limit"),
+        ));
     }
     let mut buf = vec![0u8; len];
     r.read_exact(&mut buf)?;
@@ -58,8 +61,11 @@ pub fn split(frame: &[u8]) -> io::Result<(&[u8], &[u8])> {
         return Ok((frame, &[]));
     }
     let bad = |m: &str| io::Error::new(io::ErrorKind::InvalidData, m.to_string());
-    let header = frame.get(1..BINARY_HEADER).ok_or_else(|| bad("truncated binary frame"))?;
-    let json_len = u32::from_le_bytes(header.try_into().expect("the length field is 4 bytes")) as usize;
+    let header = frame
+        .get(1..BINARY_HEADER)
+        .ok_or_else(|| bad("truncated binary frame"))?;
+    let json_len =
+        u32::from_le_bytes(header.try_into().expect("the length field is 4 bytes")) as usize;
     let rest = &frame[BINARY_HEADER..];
     if json_len > rest.len() {
         return Err(bad("binary frame's JSON overruns it"));
@@ -74,7 +80,9 @@ pub struct Writer<W: Write> {
 
 impl<W: Write> Writer<W> {
     pub fn new(inner: W) -> Self {
-        Writer { inner: Mutex::new(inner) }
+        Writer {
+            inner: Mutex::new(inner),
+        }
     }
 
     /// Write one frame. A write failure means the supervisor is gone, and a
@@ -89,7 +97,10 @@ impl<W: Write> Writer<W> {
     /// supervisor refuses a listed attachment in a plain frame. Callers check
     /// `fits` first.
     pub fn send_with_bytes(&self, msg: &impl serde::Serialize, attached: &[&[u8]]) {
-        self.send_json(&serde_json::to_vec(msg).expect("protocol messages serialize"), attached);
+        self.send_json(
+            &serde_json::to_vec(msg).expect("protocol messages serialize"),
+            attached,
+        );
     }
 
     /// `send_with_bytes` for a message already serialized to `json`.
@@ -97,7 +108,8 @@ impl<W: Write> Writer<W> {
         let bytes: usize = attached.iter().map(|b| b.len()).sum();
         let mut w = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         let ok = if attached.is_empty() {
-            w.write_all(&(json.len() as u32).to_le_bytes()).and_then(|_| w.write_all(json))
+            w.write_all(&(json.len() as u32).to_le_bytes())
+                .and_then(|_| w.write_all(json))
         } else {
             let total = BINARY_HEADER + json.len() + bytes;
             let mut r = w

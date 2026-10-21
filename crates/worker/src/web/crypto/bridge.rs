@@ -32,7 +32,11 @@ pub fn from_v8(scope: &mut v8::PinScope, value: v8::Local<v8::Value>) -> Result<
     from_v8_at(scope, value, 0)
 }
 
-fn from_v8_at(scope: &mut v8::PinScope, value: v8::Local<v8::Value>, depth: usize) -> Result<Val, String> {
+fn from_v8_at(
+    scope: &mut v8::PinScope,
+    value: v8::Local<v8::Value>,
+    depth: usize,
+) -> Result<Val, String> {
     if depth > MAX_DEPTH {
         return Err("argument nests too deeply".into());
     }
@@ -52,13 +56,17 @@ fn from_v8_at(scope: &mut v8::PinScope, value: v8::Local<v8::Value>, depth: usiz
         return Ok(Val::Str(value.to_rust_string_lossy(scope)));
     }
     if value.is_array_buffer() || value.is_array_buffer_view() {
-        return copy_bytes(scope, value).map(Val::Bytes).ok_or_else(|| "expected a buffer".into());
+        return copy_bytes(scope, value)
+            .map(Val::Bytes)
+            .ok_or_else(|| "expected a buffer".into());
     }
     if let Ok(array) = v8::Local::<v8::Array>::try_from(value) {
         // Grows as it goes: a sparse array's length isn't its size.
         let mut out = Vec::with_capacity((array.length() as usize).min(64));
         for i in 0..array.length() {
-            let item = array.get_index(scope, i).ok_or("can't read an array element")?;
+            let item = array
+                .get_index(scope, i)
+                .ok_or("can't read an array element")?;
             out.push(from_v8_at(scope, item, depth + 1)?);
         }
         return Ok(Val::Seq(out));
@@ -69,9 +77,14 @@ fn from_v8_at(scope: &mut v8::PinScope, value: v8::Local<v8::Value>, depth: usiz
             .ok_or("can't read an object's properties")?;
         let mut out = Vec::with_capacity((names.length() as usize).min(64));
         for i in 0..names.length() {
-            let key = names.get_index(scope, i).ok_or("can't read a property name")?;
+            let key = names
+                .get_index(scope, i)
+                .ok_or("can't read a property name")?;
             let item = object.get(scope, key).ok_or("can't read a property")?;
-            out.push((key.to_rust_string_lossy(scope), from_v8_at(scope, item, depth + 1)?));
+            out.push((
+                key.to_rust_string_lossy(scope),
+                from_v8_at(scope, item, depth + 1)?,
+            ));
         }
         return Ok(Val::Map(out));
     }
@@ -85,7 +98,9 @@ pub fn to_v8<'s>(scope: &mut v8::PinScope<'s, '_>, val: &Val) -> v8::Local<'s, v
         Val::Null => v8::null(scope).into(),
         Val::Bool(b) => v8::Boolean::new(scope, *b).into(),
         Val::Num(n) => v8::Number::new(scope, *n).into(),
-        Val::Str(s) => v8::String::new(scope, s).map(Into::into).unwrap_or_else(|| v8::undefined(scope).into()),
+        Val::Str(s) => v8::String::new(scope, s)
+            .map(Into::into)
+            .unwrap_or_else(|| v8::undefined(scope).into()),
         Val::Bytes(b) => new_u8array(scope, b).into(),
         Val::Seq(items) => {
             let elements: Vec<_> = items.iter().map(|v| to_v8(scope, v)).collect();
@@ -94,7 +109,9 @@ pub fn to_v8<'s>(scope: &mut v8::PinScope<'s, '_>, val: &Val) -> v8::Local<'s, v
         Val::Map(entries) => {
             let object = v8::Object::new(scope);
             for (k, v) in entries {
-                let Some(key) = v8::String::new(scope, k) else { continue };
+                let Some(key) = v8::String::new(scope, k) else {
+                    continue;
+                };
                 let value = to_v8(scope, v);
                 object.set(scope, key.into(), value);
             }
@@ -143,7 +160,6 @@ impl ser::Serialize for ToJsBuffer {
         s.serialize_bytes(&self.0)
     }
 }
-
 
 // ---- Val → Rust ----
 
@@ -201,7 +217,10 @@ impl<'de> de::Deserializer<'de> for Val {
             Val::Str(s) => visitor.visit_string(s),
             Val::Bytes(b) => visitor.visit_byte_buf(b),
             Val::Seq(items) => visitor.visit_seq(Seq(items.into_iter())),
-            Val::Map(entries) => visitor.visit_map(Map { entries: entries.into_iter(), value: None }),
+            Val::Map(entries) => visitor.visit_map(Map {
+                entries: entries.into_iter(),
+                value: None,
+            }),
         }
     }
 
@@ -236,11 +255,17 @@ impl<'de> de::Deserializer<'de> for Val {
                 let (variant, value) = entries.pop().expect("the guard checked for one entry");
                 visitor.visit_enum(Enum { variant, value })
             }
-            _ => Err(de::Error::custom("expected an enum (a string or an object with one key)")),
+            _ => Err(de::Error::custom(
+                "expected an enum (a string or an object with one key)",
+            )),
         }
     }
 
-    fn deserialize_newtype_struct<V: Visitor<'de>>(self, _name: &'static str, visitor: V) -> Result<V::Value, Error> {
+    fn deserialize_newtype_struct<V: Visitor<'de>>(
+        self,
+        _name: &'static str,
+        visitor: V,
+    ) -> Result<V::Value, Error> {
         visitor.visit_newtype_struct(self)
     }
 
@@ -254,7 +279,10 @@ struct Seq(std::vec::IntoIter<Val>);
 
 impl<'de> SeqAccess<'de> for Seq {
     type Error = Error;
-    fn next_element_seed<T: DeserializeSeed<'de>>(&mut self, seed: T) -> Result<Option<T::Value>, Error> {
+    fn next_element_seed<T: DeserializeSeed<'de>>(
+        &mut self,
+        seed: T,
+    ) -> Result<Option<T::Value>, Error> {
         self.0.next().map(|v| seed.deserialize(v)).transpose()
     }
 }
@@ -266,7 +294,10 @@ struct Map {
 
 impl<'de> MapAccess<'de> for Map {
     type Error = Error;
-    fn next_key_seed<K: DeserializeSeed<'de>>(&mut self, seed: K) -> Result<Option<K::Value>, Error> {
+    fn next_key_seed<K: DeserializeSeed<'de>>(
+        &mut self,
+        seed: K,
+    ) -> Result<Option<K::Value>, Error> {
         match self.entries.next() {
             Some((k, v)) => {
                 self.value = Some(v);
@@ -304,7 +335,11 @@ impl<'de> de::VariantAccess<'de> for Val {
     fn tuple_variant<V: Visitor<'de>>(self, _len: usize, visitor: V) -> Result<V::Value, Error> {
         de::Deserializer::deserialize_any(self, visitor)
     }
-    fn struct_variant<V: Visitor<'de>>(self, _fields: &'static [&'static str], visitor: V) -> Result<V::Value, Error> {
+    fn struct_variant<V: Visitor<'de>>(
+        self,
+        _fields: &'static [&'static str],
+        visitor: V,
+    ) -> Result<V::Value, Error> {
         de::Deserializer::deserialize_any(self, visitor)
     }
 }
@@ -404,10 +439,19 @@ impl ser::Serializer for Serializer {
     fn serialize_unit_struct(self, _name: &'static str) -> Result<Val, Error> {
         Ok(Val::Null)
     }
-    fn serialize_unit_variant(self, _name: &'static str, _index: u32, variant: &'static str) -> Result<Val, Error> {
+    fn serialize_unit_variant(
+        self,
+        _name: &'static str,
+        _index: u32,
+        variant: &'static str,
+    ) -> Result<Val, Error> {
         Ok(Val::Str(variant.to_owned()))
     }
-    fn serialize_newtype_struct<T: ?Sized + Serialize>(self, _name: &'static str, value: &T) -> Result<Val, Error> {
+    fn serialize_newtype_struct<T: ?Sized + Serialize>(
+        self,
+        _name: &'static str,
+        value: &T,
+    ) -> Result<Val, Error> {
         value.serialize(self)
     }
     fn serialize_newtype_variant<T: ?Sized + Serialize>(
@@ -417,7 +461,10 @@ impl ser::Serializer for Serializer {
         variant: &'static str,
         value: &T,
     ) -> Result<Val, Error> {
-        Ok(Val::Map(vec![(variant.to_owned(), value.serialize(Serializer)?)]))
+        Ok(Val::Map(vec![(
+            variant.to_owned(),
+            value.serialize(Serializer)?,
+        )]))
     }
     fn serialize_seq(self, len: Option<usize>) -> Result<SeqOut, Error> {
         Ok(SeqOut(Vec::with_capacity(len.unwrap_or(0))))
@@ -435,10 +482,16 @@ impl ser::Serializer for Serializer {
         variant: &'static str,
         len: usize,
     ) -> Result<TupleVariantOut, Error> {
-        Ok(TupleVariantOut { variant, items: Vec::with_capacity(len) })
+        Ok(TupleVariantOut {
+            variant,
+            items: Vec::with_capacity(len),
+        })
     }
     fn serialize_map(self, len: Option<usize>) -> Result<MapOut, Error> {
-        Ok(MapOut { entries: Vec::with_capacity(len.unwrap_or(0)), key: None })
+        Ok(MapOut {
+            entries: Vec::with_capacity(len.unwrap_or(0)),
+            key: None,
+        })
     }
     fn serialize_struct(self, _name: &'static str, len: usize) -> Result<MapOut, Error> {
         self.serialize_map(Some(len))
@@ -450,7 +503,13 @@ impl ser::Serializer for Serializer {
         variant: &'static str,
         len: usize,
     ) -> Result<VariantOut, Error> {
-        Ok(VariantOut { variant, inner: MapOut { entries: Vec::with_capacity(len), key: None } })
+        Ok(VariantOut {
+            variant,
+            inner: MapOut {
+                entries: Vec::with_capacity(len),
+                key: None,
+            },
+        })
     }
 }
 
@@ -496,7 +555,10 @@ impl ser::SerializeTupleVariant for TupleVariantOut {
         Ok(())
     }
     fn end(self) -> Result<Val, Error> {
-        Ok(Val::Map(vec![(self.variant.to_owned(), Val::Seq(self.items))]))
+        Ok(Val::Map(vec![(
+            self.variant.to_owned(),
+            Val::Seq(self.items),
+        )]))
     }
 }
 
@@ -508,7 +570,10 @@ impl ser::SerializeMap for MapOut {
         Ok(())
     }
     fn serialize_value<T: ?Sized + Serialize>(&mut self, value: &T) -> Result<(), Error> {
-        let key = self.key.take().ok_or_else(|| <Error as ser::Error>::custom("a map value without a key"))?;
+        let key = self
+            .key
+            .take()
+            .ok_or_else(|| <Error as ser::Error>::custom("a map value without a key"))?;
         self.entries.push((key, value.serialize(Serializer)?));
         Ok(())
     }
@@ -520,8 +585,13 @@ impl ser::SerializeMap for MapOut {
 impl ser::SerializeStruct for MapOut {
     type Ok = Val;
     type Error = Error;
-    fn serialize_field<T: ?Sized + Serialize>(&mut self, key: &'static str, value: &T) -> Result<(), Error> {
-        self.entries.push((key.to_owned(), value.serialize(Serializer)?));
+    fn serialize_field<T: ?Sized + Serialize>(
+        &mut self,
+        key: &'static str,
+        value: &T,
+    ) -> Result<(), Error> {
+        self.entries
+            .push((key.to_owned(), value.serialize(Serializer)?));
         Ok(())
     }
     fn end(self) -> Result<Val, Error> {
@@ -532,11 +602,18 @@ impl ser::SerializeStruct for MapOut {
 impl ser::SerializeStructVariant for VariantOut {
     type Ok = Val;
     type Error = Error;
-    fn serialize_field<T: ?Sized + Serialize>(&mut self, key: &'static str, value: &T) -> Result<(), Error> {
+    fn serialize_field<T: ?Sized + Serialize>(
+        &mut self,
+        key: &'static str,
+        value: &T,
+    ) -> Result<(), Error> {
         ser::SerializeStruct::serialize_field(&mut self.inner, key, value)
     }
     fn end(self) -> Result<Val, Error> {
-        Ok(Val::Map(vec![(self.variant.to_owned(), Val::Map(self.inner.entries))]))
+        Ok(Val::Map(vec![(
+            self.variant.to_owned(),
+            Val::Map(self.inner.entries),
+        )]))
     }
 }
 
@@ -573,13 +650,24 @@ mod tests {
     }
 
     fn map(entries: Vec<(&str, Val)>) -> Val {
-        Val::Map(entries.into_iter().map(|(k, v)| (k.to_owned(), v)).collect())
+        Val::Map(
+            entries
+                .into_iter()
+                .map(|(k, v)| (k.to_owned(), v))
+                .collect(),
+        )
     }
 
     #[test]
     fn deserializes_tagged_and_flattened() {
         let val = map(vec![
-            ("key", map(vec![("type", Val::Str("secret".into())), ("data", Val::Bytes(vec![1, 2]))])),
+            (
+                "key",
+                map(vec![
+                    ("type", Val::Str("secret".into())),
+                    ("data", Val::Bytes(vec![1, 2])),
+                ]),
+            ),
             ("algorithm", Val::Str("AES-GCM".into())),
             ("iv", Val::Bytes(vec![3; 12])),
             ("additionalData", Val::Null),
@@ -588,7 +676,14 @@ mod tests {
         let opts: Opts = deserialize(val).unwrap();
         let KeyData::Secret(k) = opts.key;
         assert_eq!(&*k, &[1, 2]);
-        assert_eq!(opts.algorithm, Alg::AesGcm { iv: vec![3; 12], additional_data: None, tag_length: 128 });
+        assert_eq!(
+            opts.algorithm,
+            Alg::AesGcm {
+                iv: vec![3; 12],
+                additional_data: None,
+                tag_length: 128
+            }
+        );
     }
 
     #[derive(Serialize)]

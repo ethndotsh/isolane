@@ -205,7 +205,11 @@ fn serve(lock_down: bool, memory_limit: Option<u64>, web_background: bool) -> Ex
         sandbox_secure: sandbox_secure(),
         lockdown,
     });
-    let mut worker = Worker { out, vms: HashMap::new(), failed: HashMap::new() };
+    let mut worker = Worker {
+        out,
+        vms: HashMap::new(),
+        failed: HashMap::new(),
+    };
     let mut stdin = BufReader::new(std::io::stdin().lock());
     match worker.run(&mut stdin) {
         Ok(()) => ExitCode::SUCCESS,
@@ -215,7 +219,11 @@ fn serve(lock_down: bool, memory_limit: Option<u64>, web_background: bool) -> Ex
 
 /// Set the process up for guests: time zone, lockdown, V8, the memory
 /// limit. Reports which lockdown layers are in place.
-fn start(lock_down: bool, memory_limit: Option<u64>, web_background: bool) -> Result<lockdown::Report, Exit> {
+fn start(
+    lock_down: bool,
+    memory_limit: Option<u64>,
+    web_background: bool,
+) -> Result<lockdown::Report, Exit> {
     // Every guest sees UTC: the host's time zone (Date#getTimezoneOffset,
     // Intl's default zone) would say where the machine is. Set while the
     // process is still single-threaded, before ICU first reads it.
@@ -226,7 +234,11 @@ fn start(lock_down: bool, memory_limit: Option<u64>, web_background: bool) -> Re
     // Lockdown order matters: Landlock before V8 starts threads, seccomp
     // (on all threads) after V8 has initialized. A layer the host lacks
     // reports None; a layer that is available but fails to apply is fatal.
-    let landlock = if lock_down { lockdown::before_v8() } else { Ok(none) };
+    let landlock = if lock_down {
+        lockdown::before_v8()
+    } else {
+        Ok(none)
+    };
     let landlock = landlock.map_err(|e| fatal(Exit::Lockdown, e))?;
     init_v8();
     // The web platform's snapshot is embedded in release builds. Without
@@ -236,9 +248,11 @@ fn start(lock_down: bool, memory_limit: Option<u64>, web_background: bool) -> Re
     // and a web VM that comes sooner waits for the rest. Either way it's
     // memory operations only, the same under the lockdown below.
     if web_background {
-        let _ = std::thread::Builder::new().name("web-snapshot".into()).spawn(|| {
-            web::snapshot();
-        });
+        let _ = std::thread::Builder::new()
+            .name("web-snapshot".into())
+            .spawn(|| {
+                web::snapshot();
+            });
     }
     // The limit is for guests, on top of what V8 has already mapped writable
     // (on x64 mostly its JIT code range: ~550 MiB of address space, little
@@ -254,7 +268,11 @@ fn start(lock_down: bool, memory_limit: Option<u64>, web_background: bool) -> Re
             "the V8 sandbox is not securely configured; refusing to run guest code",
         ));
     }
-    let seccomp = if lock_down { lockdown::after_v8() } else { Ok(none) };
+    let seccomp = if lock_down {
+        lockdown::after_v8()
+    } else {
+        Ok(none)
+    };
     let seccomp = seccomp.map_err(|e| fatal(Exit::Lockdown, e))?;
     Ok(lockdown::Report { landlock, seccomp })
 }
@@ -318,8 +336,16 @@ impl Worker {
                     // A well-formed create whose config doesn't fit (a limit
                     // out of range): that isolate's evals fail, the worker
                     // carries on.
-                    let Some(vm) = create_id(json) else { return Err(bad_message(e)) };
-                    self.failed.insert(vm, fail(ErrorCode::Internal, format!("the isolate's config is invalid: {e}")));
+                    let Some(vm) = create_id(json) else {
+                        return Err(bad_message(e));
+                    };
+                    self.failed.insert(
+                        vm,
+                        fail(
+                            ErrorCode::Internal,
+                            format!("the isolate's config is invalid: {e}"),
+                        ),
+                    );
                     continue;
                 }
             };
@@ -334,17 +360,63 @@ impl Worker {
     fn handle(&mut self, msg: In, attached: &[u8]) -> Result<(), Exit> {
         match msg {
             In::Create { vm, config } => self.create(vm, config),
-            In::Eval { vm, req, code, filename, last } => {
-                self.eval(vm, req, VmMsg::Eval { req, job: Job::Code { code, filename }, last });
+            In::Eval {
+                vm,
+                req,
+                code,
+                filename,
+                last,
+            } => {
+                self.eval(
+                    vm,
+                    req,
+                    VmMsg::Eval {
+                        req,
+                        job: Job::Code { code, filename },
+                        last,
+                    },
+                );
             }
-            In::Call { vm, req, name, args, bin } => {
-                let bytes = split_attached(attached, bin).ok_or_else(|| bad_message("call bytes don't match the frame"))?;
-                self.eval(vm, req, VmMsg::Eval { req, job: Job::Call { name, args, bytes }, last: false });
+            In::Call {
+                vm,
+                req,
+                name,
+                args,
+                bin,
+            } => {
+                let bytes = split_attached(attached, bin)
+                    .ok_or_else(|| bad_message("call bytes don't match the frame"))?;
+                self.eval(
+                    vm,
+                    req,
+                    VmMsg::Eval {
+                        req,
+                        job: Job::Call { name, args, bytes },
+                        last: false,
+                    },
+                );
             }
-            In::HostReply { vm, call, ok, value, error, error_name, error_code, bin } => {
-                let bytes = split_attached(attached, bin).ok_or_else(|| bad_message("host reply bytes don't match the frame"))?;
+            In::HostReply {
+                vm,
+                call,
+                ok,
+                value,
+                error,
+                error_name,
+                error_code,
+                bin,
+            } => {
+                let bytes = split_attached(attached, bin)
+                    .ok_or_else(|| bad_message("host reply bytes don't match the frame"))?;
                 if let Some((tx, _)) = self.vms.get(&vm) {
-                    let reply = vm::Reply { ok, value, error, error_name, error_code, bytes };
+                    let reply = vm::Reply {
+                        ok,
+                        value,
+                        error,
+                        error_name,
+                        error_code,
+                        bytes,
+                    };
                     let _ = tx.send(VmMsg::HostReply { call, reply });
                 }
             }
@@ -374,7 +446,13 @@ impl Worker {
             // Out of threads or memory: this VM's evals fail, the worker
             // carries on.
             Err(e) => {
-                self.failed.insert(vm, limit("workerMemoryBytes", format!("the isolate could not start: {e}")));
+                self.failed.insert(
+                    vm,
+                    limit(
+                        "workerMemoryBytes",
+                        format!("the isolate could not start: {e}"),
+                    ),
+                );
             }
         }
     }
@@ -496,12 +574,31 @@ fn escape_test(probe: &str) -> ExitCode {
             // its file table: both killed (the kernel would refuse the first
             // with EINVAL; the filter refuses it first).
             "clone-namespace" => {
-                let flags = libc::CLONE_VM | libc::CLONE_FS | libc::CLONE_FILES | libc::CLONE_SIGHAND | libc::CLONE_THREAD | libc::CLONE_NEWNS;
-                libc::syscall(libc::SYS_clone, flags as libc::c_ulong, std::ptr::null::<u8>(), 0usize, 0usize, 0usize)
+                let flags = libc::CLONE_VM
+                    | libc::CLONE_FS
+                    | libc::CLONE_FILES
+                    | libc::CLONE_SIGHAND
+                    | libc::CLONE_THREAD
+                    | libc::CLONE_NEWNS;
+                libc::syscall(
+                    libc::SYS_clone,
+                    flags as libc::c_ulong,
+                    std::ptr::null::<u8>(),
+                    0usize,
+                    0usize,
+                    0usize,
+                )
             }
             "clone-unshared" => {
                 let flags = libc::CLONE_VM | libc::CLONE_SIGHAND | libc::CLONE_THREAD;
-                libc::syscall(libc::SYS_clone, flags as libc::c_ulong, std::ptr::null::<u8>(), 0usize, 0usize, 0usize)
+                libc::syscall(
+                    libc::SYS_clone,
+                    flags as libc::c_ulong,
+                    std::ptr::null::<u8>(),
+                    0usize,
+                    0usize,
+                    0usize,
+                )
             }
             // Killed: dumpable would let same-user processes ptrace the
             // worker or read its memory through /proc.
@@ -545,7 +642,10 @@ fn main() -> ExitCode {
     if args.first().map(String::as_str) == Some("--escape-test") {
         return escape_test(args.get(1).map(String::as_str).unwrap_or_default());
     }
-    if let Some(path) = args.first().and_then(|a| a.strip_prefix("--make-web-snapshot=")) {
+    if let Some(path) = args
+        .first()
+        .and_then(|a| a.strip_prefix("--make-web-snapshot="))
+    {
         return make_web_snapshot(path);
     }
     let mut mode = None;

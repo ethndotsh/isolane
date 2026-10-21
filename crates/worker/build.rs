@@ -12,9 +12,13 @@ fn main() {
     println!("cargo::rustc-check-cfg=cfg(isolane_embedded_snapshot)");
     println!("cargo:rerun-if-env-changed=ISOLANE_WEB_SNAPSHOT");
     if let Some(path) = std::env::var_os("ISOLANE_WEB_SNAPSHOT").filter(|p| !p.is_empty()) {
-        let path = std::fs::canonicalize(&path).unwrap_or_else(|e| panic!("ISOLANE_WEB_SNAPSHOT={}: {e}", Path::new(&path).display()));
+        let path = std::fs::canonicalize(&path)
+            .unwrap_or_else(|e| panic!("ISOLANE_WEB_SNAPSHOT={}: {e}", Path::new(&path).display()));
         println!("cargo:rerun-if-changed={}", path.display());
-        println!("cargo:rustc-env=ISOLANE_WEB_SNAPSHOT_PATH={}", path.display());
+        println!(
+            "cargo:rustc-env=ISOLANE_WEB_SNAPSHOT_PATH={}",
+            path.display()
+        );
         println!("cargo:rustc-cfg=isolane_embedded_snapshot");
     }
 
@@ -26,7 +30,12 @@ fn main() {
     let mut hash = Fnv::new();
     for file in &files {
         println!("cargo:rerun-if-changed={}", file.display());
-        hash.write(file.strip_prefix(&runtime).expect("collect returns paths under runtime/").to_string_lossy().as_bytes());
+        hash.write(
+            file.strip_prefix(&runtime)
+                .expect("collect returns paths under runtime/")
+                .to_string_lossy()
+                .as_bytes(),
+        );
         hash.write(&std::fs::read(file).unwrap_or_else(|e| panic!("{}: {e}", file.display())));
     }
     println!("cargo:rustc-env=ISOLANE_RUNTIME_HASH={:016x}", hash.0);
@@ -34,7 +43,9 @@ fn main() {
 
 fn collect(dir: &Path, out: &mut Vec<PathBuf>) {
     for entry in std::fs::read_dir(dir).unwrap_or_else(|e| panic!("{}: {e}", dir.display())) {
-        let path = entry.unwrap_or_else(|e| panic!("{}: {e}", dir.display())).path();
+        let path = entry
+            .unwrap_or_else(|e| panic!("{}: {e}", dir.display()))
+            .path();
         if path.is_dir() {
             println!("cargo:rerun-if-changed={}", path.display());
             collect(&path, out);

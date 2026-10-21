@@ -17,7 +17,11 @@ pub(super) struct Mailbox {
 
 impl Mailbox {
     pub(super) fn new(rx: Receiver<VmMsg>) -> Mailbox {
-        Mailbox { rx, replies: RefCell::new(VecDeque::new()), later: RefCell::new(VecDeque::new()) }
+        Mailbox {
+            rx,
+            replies: RefCell::new(VecDeque::new()),
+            later: RefCell::new(VecDeque::new()),
+        }
     }
 
     /// The next message during an eval: held replies first. Evals that

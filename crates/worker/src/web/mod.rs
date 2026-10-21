@@ -16,7 +16,9 @@
 
 mod base64;
 mod snapshot;
-pub use snapshot::{embedded_status as snapshot_status, external_references, make as make_snapshot, snapshot};
+pub use snapshot::{
+    embedded_status as snapshot_status, external_references, make as make_snapshot, snapshot,
+};
 mod clone;
 mod compression;
 mod encoding;
@@ -27,7 +29,11 @@ mod urlpattern;
 
 macro_rules! runtime_js {
     ($path:literal) => {
-        include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../runtime/", $path))
+        include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../runtime/",
+            $path
+        ))
     };
 }
 
@@ -45,30 +51,102 @@ const GLOBALS: &str = runtime_js!("globals.js");
 
 /// Vendored scripts, by the specifier Deno's JS loads them with.
 const EXT: &[(&str, &str)] = &[
-    ("ext:deno_webidl/00_webidl.js", runtime_js!("deno/ext/webidl/00_webidl.js")),
-    ("ext:deno_web/00_infra.js", runtime_js!("deno/ext/web/00_infra.js")),
-    ("ext:deno_web/00_url.js", runtime_js!("deno/ext/web/00_url.js")),
-    ("ext:deno_web/01_dom_exception.js", runtime_js!("deno/ext/web/01_dom_exception.js")),
-    ("ext:deno_web/01_mimesniff.js", runtime_js!("deno/ext/web/01_mimesniff.js")),
-    ("ext:deno_web/01_urlpattern.js", runtime_js!("deno/ext/web/01_urlpattern.js")),
-    ("ext:deno_web/02_event.js", runtime_js!("deno/ext/web/02_event.js")),
-    ("ext:deno_web/02_structured_clone.js", runtime_js!("deno/ext/web/02_structured_clone.js")),
-    ("ext:deno_web/02_timers.js", runtime_js!("deno/ext/web/02_timers.js")),
-    ("ext:deno_web/03_abort_signal.js", runtime_js!("deno/ext/web/03_abort_signal.js")),
-    ("ext:deno_web/04_global_interfaces.js", runtime_js!("deno/ext/web/04_global_interfaces.js")),
-    ("ext:deno_web/05_base64.js", runtime_js!("deno/ext/web/05_base64.js")),
-    ("ext:deno_web/06_streams.js", runtime_js!("deno/ext/web/06_streams.js")),
-    ("ext:deno_web/08_text_encoding.js", runtime_js!("deno/ext/web/08_text_encoding.js")),
-    ("ext:deno_web/09_file.js", runtime_js!("deno/ext/web/09_file.js")),
-    ("ext:deno_web/10_filereader.js", runtime_js!("deno/ext/web/10_filereader.js")),
-    ("ext:deno_web/13_message_port.js", runtime_js!("deno/ext/web/13_message_port.js")),
-    ("ext:deno_web/14_compression.js", runtime_js!("deno/ext/web/14_compression.js")),
-    ("ext:deno_web/15_performance.js", runtime_js!("deno/ext/web/15_performance.js")),
-    ("ext:deno_fetch/20_headers.js", runtime_js!("deno/ext/fetch/20_headers.js")),
-    ("ext:deno_fetch/21_formdata.js", runtime_js!("deno/ext/fetch/21_formdata.js")),
-    ("ext:deno_fetch/22_body.js", runtime_js!("deno/ext/fetch/22_body.js")),
-    ("ext:deno_fetch/23_request.js", runtime_js!("deno/ext/fetch/23_request.js")),
-    ("ext:deno_fetch/23_response.js", runtime_js!("deno/ext/fetch/23_response.js")),
+    (
+        "ext:deno_webidl/00_webidl.js",
+        runtime_js!("deno/ext/webidl/00_webidl.js"),
+    ),
+    (
+        "ext:deno_web/00_infra.js",
+        runtime_js!("deno/ext/web/00_infra.js"),
+    ),
+    (
+        "ext:deno_web/00_url.js",
+        runtime_js!("deno/ext/web/00_url.js"),
+    ),
+    (
+        "ext:deno_web/01_dom_exception.js",
+        runtime_js!("deno/ext/web/01_dom_exception.js"),
+    ),
+    (
+        "ext:deno_web/01_mimesniff.js",
+        runtime_js!("deno/ext/web/01_mimesniff.js"),
+    ),
+    (
+        "ext:deno_web/01_urlpattern.js",
+        runtime_js!("deno/ext/web/01_urlpattern.js"),
+    ),
+    (
+        "ext:deno_web/02_event.js",
+        runtime_js!("deno/ext/web/02_event.js"),
+    ),
+    (
+        "ext:deno_web/02_structured_clone.js",
+        runtime_js!("deno/ext/web/02_structured_clone.js"),
+    ),
+    (
+        "ext:deno_web/02_timers.js",
+        runtime_js!("deno/ext/web/02_timers.js"),
+    ),
+    (
+        "ext:deno_web/03_abort_signal.js",
+        runtime_js!("deno/ext/web/03_abort_signal.js"),
+    ),
+    (
+        "ext:deno_web/04_global_interfaces.js",
+        runtime_js!("deno/ext/web/04_global_interfaces.js"),
+    ),
+    (
+        "ext:deno_web/05_base64.js",
+        runtime_js!("deno/ext/web/05_base64.js"),
+    ),
+    (
+        "ext:deno_web/06_streams.js",
+        runtime_js!("deno/ext/web/06_streams.js"),
+    ),
+    (
+        "ext:deno_web/08_text_encoding.js",
+        runtime_js!("deno/ext/web/08_text_encoding.js"),
+    ),
+    (
+        "ext:deno_web/09_file.js",
+        runtime_js!("deno/ext/web/09_file.js"),
+    ),
+    (
+        "ext:deno_web/10_filereader.js",
+        runtime_js!("deno/ext/web/10_filereader.js"),
+    ),
+    (
+        "ext:deno_web/13_message_port.js",
+        runtime_js!("deno/ext/web/13_message_port.js"),
+    ),
+    (
+        "ext:deno_web/14_compression.js",
+        runtime_js!("deno/ext/web/14_compression.js"),
+    ),
+    (
+        "ext:deno_web/15_performance.js",
+        runtime_js!("deno/ext/web/15_performance.js"),
+    ),
+    (
+        "ext:deno_fetch/20_headers.js",
+        runtime_js!("deno/ext/fetch/20_headers.js"),
+    ),
+    (
+        "ext:deno_fetch/21_formdata.js",
+        runtime_js!("deno/ext/fetch/21_formdata.js"),
+    ),
+    (
+        "ext:deno_fetch/22_body.js",
+        runtime_js!("deno/ext/fetch/22_body.js"),
+    ),
+    (
+        "ext:deno_fetch/23_request.js",
+        runtime_js!("deno/ext/fetch/23_request.js"),
+    ),
+    (
+        "ext:deno_fetch/23_response.js",
+        runtime_js!("deno/ext/fetch/23_response.js"),
+    ),
     // WebCrypto: Deno's JS, owned by isolane since Deno moved it to Rust.
     ("ext:deno_crypto/00_crypto.js", runtime_js!("crypto.js")),
     // isolane's fetch() over the network broker (in place of 26_fetch.js).
@@ -85,8 +163,8 @@ type Args<'a> = v8::FunctionCallbackArguments<'a>;
 type Rv<'a> = v8::ReturnValue<'a, v8::Value>;
 
 pub(crate) use crate::bytes::{copy_bytes, new_u8array, with_bytes, with_bytes_mut, with_u32s_mut};
-pub(crate) use crate::js::{guest_string, throw_range, throw_type};
 use crate::js;
+pub(crate) use crate::js::{guest_string, throw_range, throw_type};
 
 fn string_arg(scope: &mut v8::PinScope, args: &Args, i: i32) -> String {
     args.get(i).to_rust_string_lossy(scope)
@@ -136,17 +214,36 @@ fn compile_ext(scope: &mut v8::PinScope, args: Args, mut rv: Rv) {
         wrapped.push_str(line);
     }
     wrapped.push_str("\n})");
-    let Some(code) = v8::String::new(scope, &wrapped) else { return };
+    let Some(code) = v8::String::new(scope, &wrapped) else {
+        return;
+    };
     let name = js::short_string(scope, &specifier);
     let origin = script_origin(scope, name);
-    let Some(script) = v8::Script::compile(scope, code, Some(&origin)) else { return };
+    let Some(script) = v8::Script::compile(scope, code, Some(&origin)) else {
+        return;
+    };
     if let Some(f) = script.run(scope) {
         rv.set(f);
     }
 }
 
-fn script_origin<'s>(scope: &mut v8::PinScope<'s, '_>, name: v8::Local<'s, v8::String>) -> v8::ScriptOrigin<'s> {
-    v8::ScriptOrigin::new(scope, name.into(), 0, 0, false, 0, None, false, false, false, None)
+fn script_origin<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    name: v8::Local<'s, v8::String>,
+) -> v8::ScriptOrigin<'s> {
+    v8::ScriptOrigin::new(
+        scope,
+        name.into(),
+        0,
+        0,
+        false,
+        0,
+        None,
+        false,
+        false,
+        false,
+        None,
+    )
 }
 
 fn is_array_buffer(_: &mut v8::PinScope, args: Args, mut rv: Rv) {
@@ -177,7 +274,9 @@ fn is_string_object(_: &mut v8::PinScope, args: Args, mut rv: Rv) {
 
 /// `core.encode`: a string to UTF-8 bytes (lone surrogates → U+FFFD).
 fn encode(scope: &mut v8::PinScope, args: Args, mut rv: Rv) {
-    let Some(s) = args.get(0).to_string(scope) else { return };
+    let Some(s) = args.get(0).to_string(scope) else {
+        return;
+    };
     let mut out = vec![0u8; s.utf8_length(scope)];
     let n = s.write_utf8_v2(scope, &mut out, v8::WriteFlags::kReplaceInvalidUtf8, None);
     out.truncate(n);
@@ -257,7 +356,11 @@ fn op_now(scope: &mut v8::PinScope, args: Args, _rv: Rv) {
 
 fn op_time_origin(scope: &mut v8::PinScope, args: Args, _rv: Rv) {
     let ms = crate::clock::time_origin_ms();
-    expose_time(scope, args.get(0), std::time::Duration::from_secs_f64(ms.max(0.0) / 1000.0));
+    expose_time(
+        scope,
+        args.get(0),
+        std::time::Duration::from_secs_f64(ms.max(0.0) / 1000.0),
+    );
 }
 
 /// Write [seconds, subsecond nanoseconds] as two native-endian u32s.
@@ -358,7 +461,9 @@ fn object_of<'s>(scope: &mut v8::PinScope<'s, '_>, natives: Natives) -> v8::Loca
     let obj = v8::Object::new(scope);
     for (name, f) in natives {
         let key = js::short_string(scope, name);
-        let func = v8::Function::builder_raw(f).build(scope).expect("build web native");
+        let func = v8::Function::builder_raw(f)
+            .build(scope)
+            .expect("build web native");
         obj.set(scope, key.into(), func.into());
     }
     obj
@@ -372,7 +477,11 @@ fn max_timers(scope: &mut v8::PinScope, _args: Args, mut rv: Rv) {
 
 // ---- setup ----
 
-fn run_script<'s>(scope: &mut v8::PinScope<'s, '_>, name: &str, source: &str) -> Option<v8::Local<'s, v8::Value>> {
+fn run_script<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    name: &str,
+    source: &str,
+) -> Option<v8::Local<'s, v8::Value>> {
     let code = v8::String::new(scope, source)?;
     let name = js::short_string(scope, name);
     let origin = script_origin(scope, name);
@@ -391,10 +500,16 @@ fn call<'s>(
 
 /// Bootstrap the web platform in the current context: primordials,
 /// core.js, globals.js. Returns globals.js's `{ configure, materialize }`.
-fn bootstrap<'s>(scope: &mut v8::PinScope<'s, '_>, global: v8::Local<'s, v8::Object>) -> Result<v8::Local<'s, v8::Object>, String> {
+fn bootstrap<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    global: v8::Local<'s, v8::Object>,
+) -> Result<v8::Local<'s, v8::Object>, String> {
     v8::tc_scope!(let tc, scope);
     let failed = |tc: &mut v8::PinnedRef<v8::TryCatch<v8::HandleScope>>, step: &str| {
-        let msg = tc.exception().map(|e| e.to_rust_string_lossy(tc)).unwrap_or_else(|| "unknown error".into());
+        let msg = tc
+            .exception()
+            .map(|e| e.to_rust_string_lossy(tc))
+            .unwrap_or_else(|| "unknown error".into());
         format!("web platform setup failed ({step}): {msg}")
     };
 
@@ -427,7 +542,9 @@ fn bootstrap<'s>(scope: &mut v8::PinScope<'s, '_>, global: v8::Local<'s, v8::Obj
     let Some(globals) = run_script(tc, "isolane:globals.js", GLOBALS) else {
         return Err(failed(tc, "globals.js"));
     };
-    let Some(handle) = call(tc, globals, &[bootstrap]).and_then(|h| v8::Local::<v8::Object>::try_from(h).ok()) else {
+    let Some(handle) =
+        call(tc, globals, &[bootstrap]).and_then(|h| v8::Local::<v8::Object>::try_from(h).ok())
+    else {
         return Err(failed(tc, "globals.js"));
     };
     Ok(handle)
@@ -444,7 +561,10 @@ fn call_method<'s>(
     let key = js::short_string(tc, method);
     let ran = handle.get(tc, key.into()).and_then(|f| call(tc, f, args));
     if ran.is_none() {
-        let msg = tc.exception().map(|e| e.to_rust_string_lossy(tc)).unwrap_or_else(|| "unknown error".into());
+        let msg = tc
+            .exception()
+            .map(|e| e.to_rust_string_lossy(tc))
+            .unwrap_or_else(|| "unknown error".into());
         return Err(format!("web platform setup failed ({method}): {msg}"));
     }
     Ok(())
@@ -452,7 +572,11 @@ fn call_method<'s>(
 
 /// The VM's own web settings: its base URL (and `location`), its timers,
 /// its time origin.
-fn configure_with<'s>(scope: &mut v8::PinScope<'s, '_>, handle: v8::Local<'s, v8::Object>, base_url: Option<&str>) -> Result<(), String> {
+fn configure_with<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    handle: v8::Local<'s, v8::Object>,
+    base_url: Option<&str>,
+) -> Result<(), String> {
     let url = match base_url {
         // The supervisor checked it's an absolute http(s) URL.
         Some(url) => js::short_string(scope, url).into(),
@@ -463,7 +587,11 @@ fn configure_with<'s>(scope: &mut v8::PinScope<'s, '_>, handle: v8::Local<'s, v8
 
 /// Install the web platform in a fresh context (no snapshot), lazily: each
 /// global loads its script on first use.
-pub fn install<'s>(scope: &mut v8::PinScope<'s, '_>, global: v8::Local<'s, v8::Object>, base_url: Option<&str>) -> Result<(), String> {
+pub fn install<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    global: v8::Local<'s, v8::Object>,
+    base_url: Option<&str>,
+) -> Result<(), String> {
     let handle = bootstrap(scope, global)?;
     configure_with(scope, handle, base_url)
 }
@@ -473,9 +601,15 @@ pub fn install<'s>(scope: &mut v8::PinScope<'s, '_>, global: v8::Local<'s, v8::O
 const SNAPSHOT_HANDLE: &str = "__isolane_web_setup";
 
 /// Configure a context created from the snapshot.
-pub fn configure<'s>(scope: &mut v8::PinScope<'s, '_>, global: v8::Local<'s, v8::Object>, base_url: Option<&str>) -> Result<(), String> {
+pub fn configure<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    global: v8::Local<'s, v8::Object>,
+    base_url: Option<&str>,
+) -> Result<(), String> {
     let key = js::short_string(scope, SNAPSHOT_HANDLE);
-    let handle = global.get(scope, key.into()).and_then(|h| v8::Local::<v8::Object>::try_from(h).ok());
+    let handle = global
+        .get(scope, key.into())
+        .and_then(|h| v8::Local::<v8::Object>::try_from(h).ok());
     global.delete(scope, key.into());
     let Some(handle) = handle else {
         return Err("web platform setup failed: the snapshot has no setup handle".into());

@@ -19,7 +19,9 @@ pub fn data_url(scope: &mut v8::PinScope, args: Args, mut rv: Rv) {
         return;
     };
     let mime = url.mime_type().to_string();
-    let Some(mime) = guest_string(scope, &mime) else { return };
+    let Some(mime) = guest_string(scope, &mime) else {
+        return;
+    };
     let mime: v8::Local<v8::Value> = mime.into();
     let body: v8::Local<v8::Value> = new_u8array(scope, &body).into();
     rv.set(v8::Array::new_with_elements(scope, &[mime, body]).into());

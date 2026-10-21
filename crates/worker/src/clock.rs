@@ -23,7 +23,9 @@ pub enum Mode {
     Frozen,
     Real,
     #[serde(rename_all = "camelCase")]
-    Fixed { fixed_ms: f64 },
+    Fixed {
+        fixed_ms: f64,
+    },
 }
 
 thread_local! {
@@ -38,7 +40,10 @@ thread_local! {
 }
 
 fn wall_ms() -> f64 {
-    SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs_f64() * 1000.0).unwrap_or(0.0)
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs_f64() * 1000.0)
+        .unwrap_or(0.0)
 }
 
 /// Use `mode` for this thread's VM.
@@ -64,9 +69,15 @@ pub fn set_mode(mode: Mode) {
 /// I/O happened: a frozen clock moves to the current time, in whole ms.
 pub fn advance() {
     if let Mode::Frozen = MODE.with(|m| m.get()) {
-        let ms = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_millis() as f64).unwrap_or(0.0);
+        let ms = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_millis() as f64)
+            .unwrap_or(0.0);
         NOW.with(|now| now.set(Some(ms)));
-        let elapsed = START.with(|s| s.get()).map(|s| s.elapsed()).unwrap_or_default();
+        let elapsed = START
+            .with(|s| s.get())
+            .map(|s| s.elapsed())
+            .unwrap_or_default();
         // Whole milliseconds, like the frozen Date.
         ELAPSED.with(|e| e.set(Duration::from_millis(elapsed.as_millis() as u64)));
     }
@@ -77,7 +88,10 @@ pub fn advance() {
 pub fn performance_now() -> Duration {
     match MODE.with(|m| m.get()) {
         Mode::Frozen => ELAPSED.with(|e| e.get()),
-        Mode::Real => START.with(|s| s.get()).map(|s| s.elapsed()).unwrap_or_default(),
+        Mode::Real => START
+            .with(|s| s.get())
+            .map(|s| s.elapsed())
+            .unwrap_or_default(),
         Mode::Fixed { .. } => Duration::ZERO,
     }
 }

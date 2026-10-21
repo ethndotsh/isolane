@@ -38,7 +38,10 @@ fn host_object<'s>(scope: &mut v8::PinScope<'s, '_>) -> v8::Local<'s, v8::Privat
 /// `describe()`'s data, rebuilt by the deserializer registered with
 /// core.registerPrivateCloneable for its `type`.
 pub fn set_host_object(scope: &mut v8::PinScope, args: Args, _rv: Rv) {
-    if let (Ok(obj), Ok(f)) = (v8::Local::<v8::Object>::try_from(args.get(0)), v8::Local::<v8::Function>::try_from(args.get(1))) {
+    if let (Ok(obj), Ok(f)) = (
+        v8::Local::<v8::Object>::try_from(args.get(0)),
+        v8::Local::<v8::Function>::try_from(args.get(1)),
+    ) {
         let key = host_object(scope);
         obj.set_private(scope, key, f.into());
     }
@@ -66,7 +69,9 @@ fn refused(scope: &mut v8::PinScope, object: v8::Local<v8::Object>) -> Option<bo
         if obj.has_private(scope, key)? {
             return Some(true);
         }
-        current = obj.get_prototype(scope).and_then(|p| v8::Local::<v8::Object>::try_from(p).ok());
+        current = obj
+            .get_prototype(scope)
+            .and_then(|p| v8::Local::<v8::Object>::try_from(p).ok());
     }
     Some(false)
 }
@@ -108,7 +113,11 @@ impl Delegate {
 }
 
 impl v8::ValueSerializerImpl for Delegate {
-    fn throw_data_clone_error<'s>(&self, scope: &mut v8::PinScope<'s, '_>, message: v8::Local<'s, v8::String>) {
+    fn throw_data_clone_error<'s>(
+        &self,
+        scope: &mut v8::PinScope<'s, '_>,
+        message: v8::Local<'s, v8::String>,
+    ) {
         self.clone_error(scope, message);
     }
 
@@ -118,7 +127,11 @@ impl v8::ValueSerializerImpl for Delegate {
 
     /// Branded objects: Deno marks the prototype (URLPrototype), so look
     /// along the prototype chain.
-    fn is_host_object<'s>(&self, scope: &mut v8::PinScope<'s, '_>, object: v8::Local<'s, v8::Object>) -> Option<bool> {
+    fn is_host_object<'s>(
+        &self,
+        scope: &mut v8::PinScope<'s, '_>,
+        object: v8::Local<'s, v8::Object>,
+    ) -> Option<bool> {
         if refused(scope, object)? {
             return Some(true);
         }
@@ -146,7 +159,10 @@ impl v8::ValueSerializerImpl for Delegate {
         if let Some(list) = &self.host_objects {
             let list = v8::Local::new(scope, list);
             for i in 0..list.length() {
-                if list.get_index(scope, i).is_some_and(|v| v.strict_equals(object.into())) {
+                if list
+                    .get_index(scope, i)
+                    .is_some_and(|v| v.strict_equals(object.into()))
+                {
                     serializer.write_uint32(i);
                     return Some(true);
                 }
@@ -154,7 +170,8 @@ impl v8::ValueSerializerImpl for Delegate {
         }
         if !refused(scope, object)? {
             let private = host_object(scope);
-            if let Ok(f) = v8::Local::<v8::Function>::try_from(object.get_private(scope, private)?) {
+            if let Ok(f) = v8::Local::<v8::Function>::try_from(object.get_private(scope, private)?)
+            {
                 let data = f.call(scope, object.into(), &[])?;
                 serializer.write_uint32(IN_BAND_PRIVATE);
                 let context = scope.get_current_context();
@@ -216,7 +233,9 @@ fn global<'a, T>(scope: &mut v8::PinScope, value: v8::Local<'a, v8::Value>) -> O
 where
     v8::Local<'a, T>: TryFrom<v8::Local<'a, v8::Value>>,
 {
-    v8::Local::<T>::try_from(value).ok().map(|v| v8::Global::new(scope, v))
+    v8::Local::<T>::try_from(value)
+        .ok()
+        .map(|v| v8::Global::new(scope, v))
 }
 
 /// Serialize `value` with `writer`, transferring the ArrayBuffers in
@@ -306,7 +325,9 @@ pub fn structured_clone(scope: &mut v8::PinScope, args: Args, mut rv: Rv) {
         ..Default::default()
     };
     let (writer, reader) = (delegate(scope), delegate(scope));
-    let Some(data) = serialize(scope, writer, args.get(0), None) else { return };
+    let Some(data) = serialize(scope, writer, args.get(0), None) else {
+        return;
+    };
     if let Some(v) = deserialize(scope, reader, &data, None) {
         rv.set(v);
     }

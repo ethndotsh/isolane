@@ -77,7 +77,10 @@ pub fn next_timer() -> Option<NextTimer> {
         return None;
     }
     let wait = (next - now_ms()).max(0.0);
-    Some(NextTimer { due: Duration::from_secs_f64(wait / 1000.0), refed: REFED.with(|r| r.get()) > 0 })
+    Some(NextTimer {
+        due: Duration::from_secs_f64(wait / 1000.0),
+        refed: REFED.with(|r| r.get()) > 0,
+    })
 }
 
 /// Run one due timer's callback (after moving a frozen clock forward).

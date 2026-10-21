@@ -25,7 +25,11 @@ pub fn string(scope: &mut v8::PinScope, value: v8::Local<v8::Value>, max: usize)
         value.cast::<v8::String>()
     } else {
         v8::tc_scope!(let tc, scope);
-        let converted = if value.is_symbol() { None } else { value.to_string(tc) };
+        let converted = if value.is_symbol() {
+            None
+        } else {
+            value.to_string(tc)
+        };
         if tc.has_terminated() {
             tc.rethrow();
             return String::new();
@@ -39,7 +43,8 @@ pub fn string(scope: &mut v8::PinScope, value: v8::Local<v8::Value>, max: usize)
     let mut buf = vec![0u8; max.min(s.length().saturating_mul(3))];
     let n = s.write_utf8_v2(scope, &mut buf, v8::WriteFlags::kReplaceInvalidUtf8, None);
     buf.truncate(n);
-    let mut out = String::from_utf8(buf).unwrap_or_else(|e| String::from_utf8_lossy(e.as_bytes()).into_owned());
+    let mut out = String::from_utf8(buf)
+        .unwrap_or_else(|e| String::from_utf8_lossy(e.as_bytes()).into_owned());
     if n < s.utf8_length(scope) {
         out.push('…');
     }
@@ -87,7 +92,8 @@ pub enum Class<'a> {
 /// Throw `class` with `message` (clipped), and these string properties set
 /// on it (like `code`).
 pub fn throw_with(scope: &mut v8::PinScope, class: Class, message: &str, props: &[(&str, &str)]) {
-    let msg = v8::String::new(scope, prefix(message, MESSAGE_MAX)).unwrap_or_else(|| v8::String::empty(scope));
+    let msg = v8::String::new(scope, prefix(message, MESSAGE_MAX))
+        .unwrap_or_else(|| v8::String::empty(scope));
     let error = match class {
         Class::Type => v8::Exception::type_error(scope, msg),
         Class::Range => v8::Exception::range_error(scope, msg),
@@ -99,8 +105,15 @@ pub fn throw_with(scope: &mut v8::PinScope, class: Class, message: &str, props: 
         _ => None,
     };
     if let Ok(object) = v8::Local::<v8::Object>::try_from(error) {
-        for (key, value) in name.map(|n| ("name", n)).into_iter().chain(props.iter().copied()) {
-            if let (Some(k), Some(v)) = (v8::String::new(scope, key), v8::String::new(scope, prefix(value, MESSAGE_MAX))) {
+        for (key, value) in name
+            .map(|n| ("name", n))
+            .into_iter()
+            .chain(props.iter().copied())
+        {
+            if let (Some(k), Some(v)) = (
+                v8::String::new(scope, key),
+                v8::String::new(scope, prefix(value, MESSAGE_MAX)),
+            ) {
                 object.set(scope, k.into(), v.into());
             }
         }
@@ -123,7 +136,10 @@ pub fn throw_range(scope: &mut v8::PinScope, message: &str) {
 /// A JS string for text the guest can make arbitrarily long (a URL grows up
 /// to 9x when percent-encoded): past V8's maximum string length, a
 /// RangeError, as V8 throws for its own strings, instead of a panic.
-pub fn guest_string<'s>(scope: &mut v8::PinScope<'s, '_>, s: &str) -> Option<v8::Local<'s, v8::String>> {
+pub fn guest_string<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    s: &str,
+) -> Option<v8::Local<'s, v8::String>> {
     let string = v8::String::new(scope, s);
     if string.is_none() {
         throw_range(scope, "Invalid string length");

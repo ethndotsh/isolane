@@ -24,7 +24,8 @@ impl CpuClock {
         // `id` is a valid out-pointer.
         unsafe {
             let mut id: libc::clockid_t = 0;
-            (libc::pthread_getcpuclockid(libc::pthread_self(), &mut id) == 0).then_some(CpuClock(id))
+            (libc::pthread_getcpuclockid(libc::pthread_self(), &mut id) == 0)
+                .then_some(CpuClock(id))
         }
         #[cfg(not(target_os = "linux"))]
         None
@@ -35,7 +36,10 @@ impl CpuClock {
         // SAFETY: `ts` is a valid out-pointer; the clock id came from
         // pthread_getcpuclockid for a thread that outlives this watchdog.
         unsafe {
-            let mut ts = libc::timespec { tv_sec: 0, tv_nsec: 0 };
+            let mut ts = libc::timespec {
+                tv_sec: 0,
+                tv_nsec: 0,
+            };
             libc::clock_gettime(self.0, &mut ts);
             Duration::new(ts.tv_sec as u64, ts.tv_nsec as u32)
         }
@@ -89,46 +93,57 @@ impl Watchdog {
     /// Call on the VM thread (its CPU clock is the one budgets measure).
     pub(super) fn start(handle: v8::IsolateHandle) -> std::io::Result<Arc<Watchdog>> {
         let w = Arc::new(Watchdog {
-            state: Mutex::new(WatchState { deadline: None, cpu_deadline: None, fired: Fired::No, armed: false, stopping: false, eval: None, aborted: Default::default(), closed: false }),
+            state: Mutex::new(WatchState {
+                deadline: None,
+                cpu_deadline: None,
+                fired: Fired::No,
+                armed: false,
+                stopping: false,
+                eval: None,
+                aborted: Default::default(),
+                closed: false,
+            }),
             cv: Condvar::new(),
             cpu: CpuClock::current(),
             handle: handle.clone(),
         });
         let watch = w.clone();
-        let spawned = std::thread::Builder::new().stack_size(WATCHDOG_STACK).spawn(move || {
-            let mut s = watch.state.lock().expect(POISONED);
-            loop {
-                if s.closed {
-                    return;
-                }
-                let now = Instant::now();
-                if s.deadline.is_some_and(|d| now >= d) {
-                    s.deadline = None;
-                    s.cpu_deadline = None;
-                    s.fired = Fired::Wall;
-                    handle.terminate_execution();
-                    continue;
-                }
-                if let (Some(limit), Some(clock)) = (s.cpu_deadline, watch.cpu) {
-                    if clock.now() >= limit {
+        let spawned = std::thread::Builder::new()
+            .stack_size(WATCHDOG_STACK)
+            .spawn(move || {
+                let mut s = watch.state.lock().expect(POISONED);
+                loop {
+                    if s.closed {
+                        return;
+                    }
+                    let now = Instant::now();
+                    if s.deadline.is_some_and(|d| now >= d) {
                         s.deadline = None;
                         s.cpu_deadline = None;
-                        s.fired = Fired::Cpu;
+                        s.fired = Fired::Wall;
                         handle.terminate_execution();
                         continue;
                     }
-                }
-                let wall = s.deadline.map(|d| d - now);
-                let cpu = s.cpu_deadline.and(watch.cpu).map(|_| CPU_POLL);
-                s = match (wall, cpu) {
-                    (None, None) => watch.cv.wait(s).expect(POISONED),
-                    (w, c) => {
-                        let wait = w.unwrap_or(Duration::MAX).min(c.unwrap_or(Duration::MAX));
-                        watch.cv.wait_timeout(s, wait).expect(POISONED).0
+                    if let (Some(limit), Some(clock)) = (s.cpu_deadline, watch.cpu) {
+                        if clock.now() >= limit {
+                            s.deadline = None;
+                            s.cpu_deadline = None;
+                            s.fired = Fired::Cpu;
+                            handle.terminate_execution();
+                            continue;
+                        }
                     }
-                };
-            }
-        });
+                    let wall = s.deadline.map(|d| d - now);
+                    let cpu = s.cpu_deadline.and(watch.cpu).map(|_| CPU_POLL);
+                    s = match (wall, cpu) {
+                        (None, None) => watch.cv.wait(s).expect(POISONED),
+                        (w, c) => {
+                            let wait = w.unwrap_or(Duration::MAX).min(c.unwrap_or(Duration::MAX));
+                            watch.cv.wait_timeout(s, wait).expect(POISONED).0
+                        }
+                    };
+                }
+            });
         spawned.map(|_| w)
     }
 

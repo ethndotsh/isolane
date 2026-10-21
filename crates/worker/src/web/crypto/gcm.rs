@@ -44,7 +44,8 @@ fn lengths_block(a: usize, b: usize) -> Block {
 }
 
 fn inc32(counter: &mut Block) {
-    let n = u32::from_be_bytes([counter[12], counter[13], counter[14], counter[15]]).wrapping_add(1);
+    let n =
+        u32::from_be_bytes([counter[12], counter[13], counter[14], counter[15]]).wrapping_add(1);
     counter[12..].copy_from_slice(&n.to_be_bytes());
 }
 
@@ -106,7 +107,14 @@ impl Gcm {
 
 /// C || T, T being the first `tag_len` bytes (1 to 16) of the tag; None for
 /// a bad key, IV, or tag length.
-pub fn seal(length: usize, key: &[u8], iv: &[u8], aad: &[u8], plaintext: &[u8], tag_len: usize) -> Option<Vec<u8>> {
+pub fn seal(
+    length: usize,
+    key: &[u8],
+    iv: &[u8],
+    aad: &[u8],
+    plaintext: &[u8],
+    tag_len: usize,
+) -> Option<Vec<u8>> {
     if !(1..=16).contains(&tag_len) {
         return None;
     }
@@ -119,7 +127,14 @@ pub fn seal(length: usize, key: &[u8], iv: &[u8], aad: &[u8], plaintext: &[u8], 
 }
 
 /// The plaintext of C || T, if T (the last `tag_len` bytes) checks out.
-pub fn open(length: usize, key: &[u8], iv: &[u8], aad: &[u8], data: &[u8], tag_len: usize) -> Option<Vec<u8>> {
+pub fn open(
+    length: usize,
+    key: &[u8],
+    iv: &[u8],
+    aad: &[u8],
+    data: &[u8],
+    tag_len: usize,
+) -> Option<Vec<u8>> {
     if !(1..=16).contains(&tag_len) {
         return None;
     }
@@ -128,7 +143,10 @@ pub fn open(length: usize, key: &[u8], iv: &[u8], aad: &[u8], data: &[u8], tag_l
     let gcm = Gcm::new(length, key, iv)?;
     let expected = gcm.tag(aad, ciphertext);
     // Constant time, over the whole truncated tag.
-    let diff = expected[..tag_len].iter().zip(tag).fold(0u8, |acc, (a, b)| acc | (a ^ b));
+    let diff = expected[..tag_len]
+        .iter()
+        .zip(tag)
+        .fold(0u8, |acc, (a, b)| acc | (a ^ b));
     if diff != 0 {
         return None;
     }
@@ -142,7 +160,10 @@ mod tests {
     use super::*;
 
     fn hex(s: &str) -> Vec<u8> {
-        (0..s.len()).step_by(2).map(|i| u8::from_str_radix(&s[i..i + 2], 16).unwrap()).collect()
+        (0..s.len())
+            .step_by(2)
+            .map(|i| u8::from_str_radix(&s[i..i + 2], 16).unwrap())
+            .collect()
     }
 
     // The GCM spec's test case 4 (96-bit IV) and 6 (60-byte IV).
@@ -153,11 +174,17 @@ mod tests {
         let a = hex("feedfacedeadbeeffeedfacedeadbeefabaddad2");
         let iv = hex("cafebabefacedbaddecaf888");
         let out = seal(128, &key, &iv, &a, &p, 16).unwrap();
-        assert_eq!(&out[p.len()..], &hex("5bc94fbc3221a5db94fae95ae7121a47")[..]);
+        assert_eq!(
+            &out[p.len()..],
+            &hex("5bc94fbc3221a5db94fae95ae7121a47")[..]
+        );
         assert_eq!(open(128, &key, &iv, &a, &out, 16).unwrap(), p);
         let iv = hex("9313225df88406e555909c5aff5269aa6a7a9538534f7da1e4c303d2a318a728c3c0c95156809539fcf0e2429a6b525416aedbf5a0de6a57a637b39b");
         let out = seal(128, &key, &iv, &a, &p, 16).unwrap();
-        assert_eq!(&out[p.len()..], &hex("619cc5aefffe0bfa462af43c1699d050")[..]);
+        assert_eq!(
+            &out[p.len()..],
+            &hex("619cc5aefffe0bfa462af43c1699d050")[..]
+        );
         assert_eq!(open(128, &key, &iv, &a, &out, 12).map(|_| ()), None);
         let short = seal(128, &key, &iv, &a, &p, 4).unwrap();
         assert_eq!(open(128, &key, &iv, &a, &short, 4).unwrap(), p);

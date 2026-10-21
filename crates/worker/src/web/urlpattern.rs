@@ -41,13 +41,24 @@ fn too_complex(input: &StringOrInit) -> bool {
     match input {
         // A constructor string splits into components; the whole string bounds each.
         StringOrInit::String(s) => too_complex_component(s),
-        StringOrInit::Init(i) => [&i.protocol, &i.username, &i.password, &i.hostname, &i.port, &i.pathname, &i.search, &i.hash]
-            .iter()
-            .any(|f| f.as_deref().is_some_and(too_complex_component)),
+        StringOrInit::Init(i) => [
+            &i.protocol,
+            &i.username,
+            &i.password,
+            &i.hostname,
+            &i.port,
+            &i.pathname,
+            &i.search,
+            &i.hash,
+        ]
+        .iter()
+        .any(|f| f.as_deref().is_some_and(too_complex_component)),
     }
 }
 
-const COMPONENTS: [&str; 8] = ["protocol", "username", "password", "hostname", "port", "pathname", "search", "hash"];
+const COMPONENTS: [&str; 8] = [
+    "protocol", "username", "password", "hostname", "port", "pathname", "search", "hash",
+];
 
 /// The URLPatternInput the JS passes (already converted by webidl): a
 /// string, or a dictionary of optional strings.
@@ -59,7 +70,11 @@ fn input_arg(scope: &mut v8::PinScope, value: v8::Local<v8::Value>) -> Option<St
     let field = |name: &str| -> Option<Option<String>> {
         let key = v8::String::new(scope, name)?;
         let v = obj.get(scope, key.into())?;
-        Some(if v.is_null_or_undefined() { None } else { Some(v.to_rust_string_lossy(scope)) })
+        Some(if v.is_null_or_undefined() {
+            None
+        } else {
+            Some(v.to_rust_string_lossy(scope))
+        })
     };
     Some(StringOrInit::Init(UrlPatternInit {
         protocol: field("protocol")?,
@@ -77,10 +92,20 @@ fn input_arg(scope: &mut v8::PinScope, value: v8::Local<v8::Value>) -> Option<St
 fn input_len(input: &StringOrInit) -> usize {
     match input {
         StringOrInit::String(s) => s.len(),
-        StringOrInit::Init(i) => [&i.protocol, &i.username, &i.password, &i.hostname, &i.port, &i.pathname, &i.search, &i.hash, &i.base_url]
-            .iter()
-            .map(|f| f.as_deref().map_or(0, str::len))
-            .sum(),
+        StringOrInit::Init(i) => [
+            &i.protocol,
+            &i.username,
+            &i.password,
+            &i.hostname,
+            &i.port,
+            &i.pathname,
+            &i.search,
+            &i.hash,
+            &i.base_url,
+        ]
+        .iter()
+        .map(|f| f.as_deref().map_or(0, str::len))
+        .sum(),
     }
 }
 
@@ -144,15 +169,32 @@ fn enrich_error(err: urlpattern::Error, input: &StringOrInit) -> String {
 }
 
 fn single_init_component(init: &UrlPatternInit) -> Option<(&'static str, &str)> {
-    let fields = [&init.protocol, &init.username, &init.password, &init.hostname, &init.port, &init.pathname, &init.search, &init.hash];
-    let mut set = COMPONENTS.iter().zip(fields).filter_map(|(name, value)| value.as_deref().map(|value| (*name, value)));
+    let fields = [
+        &init.protocol,
+        &init.username,
+        &init.password,
+        &init.hostname,
+        &init.port,
+        &init.pathname,
+        &init.search,
+        &init.hash,
+    ];
+    let mut set = COMPONENTS
+        .iter()
+        .zip(fields)
+        .filter_map(|(name, value)| value.as_deref().map(|value| (*name, value)));
     match (set.next(), set.next()) {
         (Some(only), None) => Some(only),
         _ => None,
     }
 }
 
-fn set<'s>(scope: &mut v8::PinScope<'s, '_>, obj: v8::Local<'s, v8::Object>, key: &str, value: v8::Local<'s, v8::Value>) -> Option<()> {
+fn set<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    obj: v8::Local<'s, v8::Object>,
+    key: &str,
+    value: v8::Local<'s, v8::Value>,
+) -> Option<()> {
     let key = v8::String::new(scope, key)?;
     obj.set(scope, key.into(), value).map(|_| ())
 }
@@ -161,13 +203,20 @@ fn string<'s>(scope: &mut v8::PinScope<'s, '_>, s: &str) -> Option<v8::Local<'s,
     v8::String::new(scope, s).map(Into::into)
 }
 
-fn component<'s>(scope: &mut v8::PinScope<'s, '_>, c: &quirks::UrlPatternComponent) -> Option<v8::Local<'s, v8::Value>> {
+fn component<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    c: &quirks::UrlPatternComponent,
+) -> Option<v8::Local<'s, v8::Value>> {
     let obj = v8::Object::new(scope);
     let pattern = string(scope, &c.pattern_string)?;
     set(scope, obj, "patternString", pattern)?;
     let regexp = string(scope, &c.regexp_string)?;
     set(scope, obj, "regexpString", regexp)?;
-    let names = c.group_name_list.iter().map(|n| string(scope, n)).collect::<Option<Vec<_>>>()?;
+    let names = c
+        .group_name_list
+        .iter()
+        .map(|n| string(scope, n))
+        .collect::<Option<Vec<_>>>()?;
     let names = v8::Array::new_with_elements(scope, &names);
     set(scope, obj, "groupNameList", names.into())?;
     Some(obj.into())
@@ -176,7 +225,9 @@ fn component<'s>(scope: &mut v8::PinScope<'s, '_>, c: &quirks::UrlPatternCompone
 /// op_urlpattern_parse(input, baseURL, { ignoreCase }): each component's
 /// pattern string, regular expression, and group names, or a TypeError.
 pub fn op_urlpattern_parse(scope: &mut v8::PinScope, args: Args, mut rv: Rv) {
-    let Some((input, base)) = args_in(scope, &args) else { return };
+    let Some((input, base)) = args_in(scope, &args) else {
+        return;
+    };
     if too_complex(&input) {
         return throw_range(scope, "URLPattern pattern has too many groups");
     }
@@ -184,7 +235,8 @@ pub fn op_urlpattern_parse(scope: &mut v8::PinScope, args: Args, mut rv: Rv) {
     let ignore_case = match options.to_object(scope) {
         Some(o) => {
             let key = js::short_string(scope, "ignoreCase");
-            o.get(scope, key.into()).is_some_and(|v| v.boolean_value(scope))
+            o.get(scope, key.into())
+                .is_some_and(|v| v.boolean_value(scope))
         }
         None => false,
     };
@@ -206,7 +258,9 @@ pub fn op_urlpattern_parse(scope: &mut v8::PinScope, args: Args, mut rv: Rv) {
         &pattern.hash,
     ];
     for (name, c) in COMPONENTS.iter().zip(components) {
-        let Some(v) = component(scope, c) else { return throw_range(scope, "URLPattern result is too large") };
+        let Some(v) = component(scope, c) else {
+            return throw_range(scope, "URLPattern result is too large");
+        };
         if set(scope, obj, name, v).is_none() {
             return;
         }
@@ -221,7 +275,9 @@ pub fn op_urlpattern_parse(scope: &mut v8::PinScope, args: Args, mut rv: Rv) {
 /// eight component values concatenated, with their start offsets (and the
 /// total length) written to the buffer; null if the input isn't a URL.
 pub fn op_urlpattern_process_match_input(scope: &mut v8::PinScope, args: Args, mut rv: Rv) {
-    let Some((input, base)) = args_in(scope, &args) else { return };
+    let Some((input, base)) = args_in(scope, &args) else {
+        return;
+    };
     let processed = match quirks::process_match_input(input, base.as_deref()) {
         Ok(p) => p,
         Err(e) => return throw_type(scope, &e.to_string()),
@@ -230,7 +286,16 @@ pub fn op_urlpattern_process_match_input(scope: &mut v8::PinScope, args: Args, m
         rv.set_null();
         return;
     };
-    let fields = [&m.protocol, &m.username, &m.password, &m.hostname, &m.port, &m.pathname, &m.search, &m.hash];
+    let fields = [
+        &m.protocol,
+        &m.username,
+        &m.password,
+        &m.hostname,
+        &m.port,
+        &m.pathname,
+        &m.search,
+        &m.hash,
+    ];
     let mut offsets = [0u32; 9];
     let mut concat = String::with_capacity(fields.iter().map(|f| f.len()).sum());
     for (i, field) in fields.iter().enumerate() {

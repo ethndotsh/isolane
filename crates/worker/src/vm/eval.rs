@@ -10,13 +10,13 @@ use std::time::{Duration, Instant};
 use serde_json::value::RawValue;
 
 use super::context::Shims;
+use super::errors;
 use super::host_call::{apply_host_reply, Bridge};
 use super::mailbox::Mailbox;
 use super::watchdog::CpuClock;
 use super::{pump_tasks, Job, Output, VmMsg};
-use super::errors;
-use crate::proto::{fail, limit, ErrorCode, Failure, Out, ShimRef, Usage};
 use crate::js;
+use crate::proto::{fail, limit, ErrorCode, Failure, Out, ShimRef, Usage};
 use crate::web::timers::NextTimer;
 
 /// How often to look for V8's foreground tasks while it has background work
@@ -56,7 +56,10 @@ pub(super) fn describe(scope: &mut v8::PinScope, exception: v8::Local<v8::Value>
 
 /// `ERR_GUEST_EXCEPTION` for a thrown value: the one-line message ("stack"
 /// or the value), plus the value described (see `errors::guest_error`).
-fn guest_failure<'s>(scope: &mut v8::PinScope<'s, '_>, exception: v8::Local<'s, v8::Value>) -> Failure {
+fn guest_failure<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    exception: v8::Local<'s, v8::Value>,
+) -> Failure {
     let mut f = fail(ErrorCode::GuestException, describe(scope, exception));
     f.guest = Some(Box::new(errors::guest_error(scope, exception)));
     f
@@ -65,7 +68,9 @@ fn guest_failure<'s>(scope: &mut v8::PinScope<'s, '_>, exception: v8::Local<'s, 
 /// `ERR_GUEST_EXCEPTION` for code that didn't compile: with where, and the
 /// stack (and message) saying so, since a SyntaxError has no frames.
 fn compile_failure(tc: &mut v8::PinnedRef<v8::TryCatch<v8::HandleScope>>) -> Failure {
-    let Some(exception) = tc.exception() else { return fail(ErrorCode::GuestException, "unknown error") };
+    let Some(exception) = tc.exception() else {
+        return fail(ErrorCode::GuestException, "unknown error");
+    };
     let mut f = guest_failure(tc, exception);
     let location = tc.message().and_then(|m| errors::compile_location(tc, m));
     if let (Some(guest), Some((location, caret))) = (f.guest.as_mut(), location) {
@@ -77,7 +82,10 @@ fn compile_failure(tc: &mut v8::PinnedRef<v8::TryCatch<v8::HandleScope>>) -> Fai
 
 /// `ERR_SHIM`: the embedder's shim failed, not the guest's code.
 pub(super) fn shim_failure(shim: &ShimRef, what: String) -> Failure {
-    let mut f = fail(ErrorCode::Shim, clip(format!("the {} shim {} {what}", shim.phase, shim.filename)));
+    let mut f = fail(
+        ErrorCode::Shim,
+        clip(format!("the {} shim {} {what}", shim.phase, shim.filename)),
+    );
     f.shim = Some(shim.clone());
     f
 }
@@ -94,28 +102,39 @@ fn clip(s: String) -> String {
 ///
 /// Programs (ES modules) will look up a named export, then a method of the
 /// default export, here instead.
-fn handler<'s>(scope: &mut v8::PinScope<'s, '_>, name: &str) -> Result<Option<v8::Local<'s, v8::Function>>, ()> {
+fn handler<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    name: &str,
+) -> Result<Option<v8::Local<'s, v8::Function>>, ()> {
     if name.starts_with("__isolane_") {
         return Ok(None);
     }
-    let Some(key) = v8::String::new(scope, name) else { return Ok(None) };
+    let Some(key) = v8::String::new(scope, name) else {
+        return Ok(None);
+    };
     let global = scope.get_current_context().global(scope);
     if global.has_own_property(scope, key.into()) != Some(true) {
         return Ok(None);
     }
-    let Some(value) = global.get(scope, key.into()) else { return Err(()) };
+    let Some(value) = global.get(scope, key.into()) else {
+        return Err(());
+    };
     Ok(v8::Local::<v8::Function>::try_from(value).ok())
 }
 
 /// A call's result: bytes as they are, anything else as JSON. Bytes count
 /// against `limits.resultBytes` as JSON does.
 fn to_outcome(scope: &mut v8::PinScope, value: v8::Local<v8::Value>) -> Result<Outcome, Failure> {
-    let max = crate::limits::get().result_bytes.min(crate::frame::MAX_FRAME - FRAME_SLACK);
+    let max = crate::limits::get()
+        .result_bytes
+        .min(crate::frame::MAX_FRAME - FRAME_SLACK);
     match crate::bytes::copy_bytes_max(scope, value, max) {
         Some(Ok(bytes)) => Ok(Outcome::Bytes(bytes)),
         Some(Err(len)) => Err(limit(
             "resultBytes",
-            format!("the result is {len} bytes, more than the {max}-byte limit (limits.resultBytes)"),
+            format!(
+                "the result is {len} bytes, more than the {max}-byte limit (limits.resultBytes)"
+            ),
         )),
         None => to_json(scope, value).map(Outcome::Json),
     }
@@ -130,7 +149,9 @@ fn to_json(scope: &mut v8::PinScope, value: v8::Local<v8::Value>) -> Result<Stri
         Some(s) => {
             // Measured before it's copied out, and never more than a frame
             // can carry (an oversized frame is a protocol violation).
-            let max = crate::limits::get().result_bytes.min(crate::frame::MAX_FRAME - FRAME_SLACK);
+            let max = crate::limits::get()
+                .result_bytes
+                .min(crate::frame::MAX_FRAME - FRAME_SLACK);
             let len = s.utf8_length(tc);
             if len > max {
                 return Err(limit(
@@ -142,7 +163,10 @@ fn to_json(scope: &mut v8::PinScope, value: v8::Local<v8::Value>) -> Result<Stri
             Ok(if s == "undefined" { "null".into() } else { s })
         }
         None => {
-            let msg = tc.exception().map(|e| js::string(tc, e, errors::TEXT_MAX)).unwrap_or_default();
+            let msg = tc
+                .exception()
+                .map(|e| js::string(tc, e, errors::TEXT_MAX))
+                .unwrap_or_default();
             Err(fail(ErrorCode::NotSerializable, msg))
         }
     }
@@ -178,7 +202,6 @@ fn run(
     mailbox: &Mailbox,
     deadline: Option<Instant>,
 ) -> EvalEnd {
-
     let guest_error = |tc: &mut v8::PinnedRef<v8::TryCatch<v8::HandleScope>>| match tc.exception() {
         Some(e) => guest_failure(tc, e),
         None => fail(ErrorCode::GuestException, "unknown error"),
@@ -209,7 +232,19 @@ fn run(
             let Some(name) = v8::String::new(tc, filename.as_deref().unwrap_or("eval.js")) else {
                 return EvalEnd::Done(Err(fail(ErrorCode::Internal, "filename too large")));
             };
-            let origin = v8::ScriptOrigin::new(tc, name.into(), 0, 0, false, 0, None, false, false, false, None);
+            let origin = v8::ScriptOrigin::new(
+                tc,
+                name.into(),
+                0,
+                0,
+                false,
+                0,
+                None,
+                false,
+                false,
+                false,
+                None,
+            );
             let Some(script) = v8::Script::compile(tc, source, Some(&origin)) else {
                 return EvalEnd::Done(Err(compile_failure(tc)));
             };
@@ -229,11 +264,16 @@ fn run(
             };
             let parsed = v8::String::new(tc, args).and_then(|s| v8::json::parse(tc, s));
             let Some(array) = parsed.and_then(|v| v8::Local::<v8::Array>::try_from(v).ok()) else {
-                return EvalEnd::Done(Err(fail(ErrorCode::Internal, "call arguments are not a JSON array")));
+                return EvalEnd::Done(Err(fail(
+                    ErrorCode::Internal,
+                    "call arguments are not a JSON array",
+                )));
             };
             let mut argv: Vec<v8::Local<v8::Value>> = Vec::with_capacity(array.length() as usize);
             for i in 0..array.length() {
-                let arg = array.get_index(tc, i).unwrap_or_else(|| v8::undefined(tc).into());
+                let arg = array
+                    .get_index(tc, i)
+                    .unwrap_or_else(|| v8::undefined(tc).into());
                 argv.push(arg);
             }
             for (index, data) in bytes {
@@ -264,7 +304,9 @@ fn run(
                 Settled::Rejected => Err(promise.result(tc)),
                 Settled::Failed(f) => {
                     let f = match stage {
-                        Some(i) if f.code == ErrorCode::Unsettled => shim_failure(&shims.after[i].1, "never settled".into()),
+                        Some(i) if f.code == ErrorCode::Unsettled => {
+                            shim_failure(&shims.after[i].1, "never settled".into())
+                        }
                         _ => f,
                     };
                     return EvalEnd::Done(Err(f));
@@ -285,7 +327,11 @@ fn run(
         }
         let next = stage.map_or(0, |i| i + 1);
         let Some((func, at)) = shims.after.get(next) else {
-            return EvalEnd::Done(if call { to_outcome(tc, result) } else { to_json(tc, result).map(Outcome::Json) });
+            return EvalEnd::Done(if call {
+                to_outcome(tc, result)
+            } else {
+                to_json(tc, result).map(Outcome::Json)
+            });
         };
         let func = v8::Local::new(tc, func);
         let this: v8::Local<v8::Value> = v8::undefined(tc).into();
@@ -332,7 +378,10 @@ fn settle(
         if crate::web::timers::run_due_timer(tc) {
             continue;
         }
-        let waiting = tc.get_slot::<Rc<Bridge>>().map(|b| !b.pending.borrow().is_empty()).unwrap_or(false);
+        let waiting = tc
+            .get_slot::<Rc<Bridge>>()
+            .map(|b| !b.pending.borrow().is_empty())
+            .unwrap_or(false);
         let background = tc.has_pending_background_tasks();
         let timer = crate::web::timers::next_timer();
         // Only ref'd timers keep a pending eval waiting (AbortSignal.timeout
@@ -351,7 +400,10 @@ fn settle(
         // briefly, then look for its results.
         let left = deadline.map(|d| d.saturating_duration_since(Instant::now()));
         if left == Some(Duration::ZERO) {
-            return Settled::Failed(limit("timeoutMs", "timed out waiting for a host function or timer"));
+            return Settled::Failed(limit(
+                "timeoutMs",
+                "timed out waiting for a host function or timer",
+            ));
         }
         let mut wait = left;
         if background {
@@ -403,7 +455,13 @@ pub(super) fn run_idle_timers(scope: &mut v8::PinScope) {
 pub(super) fn refuse_all(id: u64, rx: &Receiver<VmMsg>, out: &Output, cause: String) {
     while let Ok(msg) = rx.recv() {
         match msg {
-            VmMsg::Eval { req, .. } => send_result(out, (id, req), Err(limit("workerMemoryBytes", cause.clone())), Usage::default(), None),
+            VmMsg::Eval { req, .. } => send_result(
+                out,
+                (id, req),
+                Err(limit("workerMemoryBytes", cause.clone())),
+                Usage::default(),
+                None,
+            ),
             VmMsg::HostReply { .. } => {}
             VmMsg::Dispose => return,
         }
@@ -412,26 +470,60 @@ pub(super) fn refuse_all(id: u64, rx: &Receiver<VmMsg>, out: &Output, cause: Str
 
 /// Send eval `req`'s result (`vm` is its isolate). `retired`: what the
 /// isolate's later evals fail with, if it is retired.
-pub(super) fn send_result(out: &Output, (vm, req): (u64, u64), result: Result<Outcome, Failure>, usage: Usage, retired: Option<&Failure>) {
+pub(super) fn send_result(
+    out: &Output,
+    (vm, req): (u64, u64),
+    result: Result<Outcome, Failure>,
+    usage: Usage,
+    retired: Option<&Failure>,
+) {
     // A result too large for a frame fails the eval (an oversized frame
     // would read as a protocol violation).
     let result = match result {
-        Ok(Outcome::Json(json)) if !crate::frame::fits(json.len() + 1024, 0) => {
-            Err(fail(ErrorCode::NotSerializable, "the result is larger than 64 MiB as JSON"))
-        }
-        Ok(Outcome::Bytes(bytes)) if !crate::frame::fits(1024, bytes.len()) => {
-            Err(fail(ErrorCode::NotSerializable, "the result is larger than 64 MiB"))
-        }
+        Ok(Outcome::Json(json)) if !crate::frame::fits(json.len() + 1024, 0) => Err(fail(
+            ErrorCode::NotSerializable,
+            "the result is larger than 64 MiB as JSON",
+        )),
+        Ok(Outcome::Bytes(bytes)) if !crate::frame::fits(1024, bytes.len()) => Err(fail(
+            ErrorCode::NotSerializable,
+            "the result is larger than 64 MiB",
+        )),
         r => r,
     };
     let retired = retired.map(|f| f.message.as_str());
     match result {
         Ok(Outcome::Json(json)) => {
             let value = RawValue::from_string(json).expect("V8 produced JSON");
-            out.send(&Out::Result { vm, req, ok: true, value: Some(&value), bin: None, retired, code: None, message: None, guest: None, limit: None, shim: None, usage });
+            out.send(&Out::Result {
+                vm,
+                req,
+                ok: true,
+                value: Some(&value),
+                bin: None,
+                retired,
+                code: None,
+                message: None,
+                guest: None,
+                limit: None,
+                shim: None,
+                usage,
+            });
         }
         Ok(Outcome::Bytes(bytes)) => {
-            let msg = Out::Result { vm, req, ok: true, value: None, bin: Some(bytes.len()), retired, code: None, message: None, guest: None, limit: None, shim: None, usage };
+            let msg = Out::Result {
+                vm,
+                req,
+                ok: true,
+                value: None,
+                bin: Some(bytes.len()),
+                retired,
+                code: None,
+                message: None,
+                guest: None,
+                limit: None,
+                shim: None,
+                usage,
+            };
             out.send_with_bytes(&msg, &[&bytes]);
         }
         Err(f) => out.send(&Out::Result {

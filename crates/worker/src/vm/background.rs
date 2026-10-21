@@ -54,7 +54,10 @@ static SHARED: OnceLock<Option<Shared>> = OnceLock::new();
 pub fn init_shared(ms: Option<u64>) {
     SHARED.get_or_init(|| {
         let budget = Duration::from_millis(ms?.min(crate::limits::MAX_BUDGET_MS));
-        Some(Shared { budget, state: Mutex::new((budget.as_secs_f64(), Instant::now())) })
+        Some(Shared {
+            budget,
+            state: Mutex::new((budget.as_secs_f64(), Instant::now())),
+        })
     });
 }
 
@@ -68,7 +71,8 @@ impl Shared {
         let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
         let now = Instant::now();
         let rate = self.budget.as_secs_f64() / WINDOW.as_secs_f64();
-        state.0 = (state.0 + rate * now.duration_since(state.1).as_secs_f64()).min(self.budget.as_secs_f64());
+        state.0 = (state.0 + rate * now.duration_since(state.1).as_secs_f64())
+            .min(self.budget.as_secs_f64());
         state.1 = now;
         state.0
     }
@@ -86,7 +90,12 @@ impl Shared {
         }
         let rate = self.budget.as_secs_f64() / WINDOW.as_secs_f64();
         // A millisecond's worth past zero, so the work that wakes can run.
-        Duration::from_secs_f64(if rate > 0.0 { (0.001 - balance) / rate } else { 60.0 }).min(WINDOW)
+        Duration::from_secs_f64(if rate > 0.0 {
+            (0.001 - balance) / rate
+        } else {
+            60.0
+        })
+        .min(WINDOW)
     }
 }
 
@@ -123,16 +132,26 @@ impl Batch {
 
 impl Background {
     pub(super) fn new(budget_ms: Option<u64>, clock: Option<CpuClock>) -> Background {
-        let budget = budget_ms.map(|ms| Duration::from_millis(ms.min(crate::limits::MAX_BUDGET_MS)));
+        let budget =
+            budget_ms.map(|ms| Duration::from_millis(ms.min(crate::limits::MAX_BUDGET_MS)));
         let now = Instant::now();
-        Background { budget, left: budget.unwrap_or_default(), refilled: now, clock, unreported: None, reported: now, paused: false }
+        Background {
+            budget,
+            left: budget.unwrap_or_default(),
+            refilled: now,
+            clock,
+            unreported: None,
+            reported: now,
+            paused: false,
+        }
     }
 
     /// What's left of the budget now, if there is one.
     fn remaining(&mut self) -> Option<Duration> {
         let budget = self.budget?;
         let now = Instant::now();
-        let refill = budget.mul_f64(now.duration_since(self.refilled).as_secs_f64() / WINDOW.as_secs_f64());
+        let refill =
+            budget.mul_f64(now.duration_since(self.refilled).as_secs_f64() / WINDOW.as_secs_f64());
         self.left = (self.left + refill).min(budget);
         self.refilled = now;
         Some(self.left)
@@ -141,8 +160,13 @@ impl Background {
     /// The watchdog's budgets for a batch: the eval budgets, capped by
     /// what's left of this one (on the CPU budget where there's a CPU
     /// clock, the wall budget elsewhere).
-    pub(super) fn budgets(&mut self, wall: Option<Duration>, cpu: Option<Duration>) -> (Option<Duration>, Option<Duration>) {
-        let cap = |limit: Option<Duration>, left: Duration| Some(limit.map_or(left, |l| l.min(left)));
+    pub(super) fn budgets(
+        &mut self,
+        wall: Option<Duration>,
+        cpu: Option<Duration>,
+    ) -> (Option<Duration>, Option<Duration>) {
+        let cap =
+            |limit: Option<Duration>, left: Duration| Some(limit.map_or(left, |l| l.min(left)));
         let shared = Shared::get().map(|s| Duration::from_secs_f64(s.balance().max(0.0)));
         let left = match (self.remaining(), shared) {
             (Some(a), Some(b)) => Some(a.min(b)),
@@ -166,18 +190,32 @@ impl Background {
         } else if !self.paused {
             self.paused = true;
             let ms = Shared::get().map_or(0, |s| s.budget.as_millis());
-            let of = if self.clock.is_some() { "CPU time" } else { "time" };
+            let of = if self.clock.is_some() {
+                "CPU time"
+            } else {
+                "time"
+            };
             let cause = format!(
                 "the tenant's isolates used more than {ms}ms of {of} per minute between evals together (limits.workerBackgroundMs): their timers and continuations wait until it refills"
             );
-            self.report(out, vm, /* force */ true, Some(("workerBackgroundMs", &cause)));
+            self.report(
+                out,
+                vm,
+                /* force */ true,
+                Some(("workerBackgroundMs", &cause)),
+            );
         }
         wait
     }
 
     /// Start a batch, charged at least `floor`.
     pub(super) fn start(&self, floor: Duration) -> Batch {
-        Batch { wall_start: Instant::now(), cpu_start: self.clock.map(|c| c.now()).unwrap_or_default(), floor, blocked: Duration::ZERO }
+        Batch {
+            wall_start: Instant::now(),
+            cpu_start: self.clock.map(|c| c.now()).unwrap_or_default(),
+            floor,
+            blocked: Duration::ZERO,
+        }
     }
 
     /// Charge a finished batch, plus the time it spent blocked in sync host
@@ -217,12 +255,19 @@ impl Background {
 
     /// How long until unreported usage is due to go out, if there is any.
     pub(super) fn report_due(&self) -> Option<Duration> {
-        self.unreported.map(|_| (self.reported + REPORT_EVERY).saturating_duration_since(Instant::now()))
+        self.unreported
+            .map(|_| (self.reported + REPORT_EVERY).saturating_duration_since(Instant::now()))
     }
 
     /// Send unreported usage now if it's due (or `force`), with the limit
     /// this work hit, if any.
-    pub(super) fn report(&mut self, out: &Output, vm: u64, force: bool, hit: Option<(&'static str, &str)>) {
+    pub(super) fn report(
+        &mut self,
+        out: &Output,
+        vm: u64,
+        force: bool,
+        hit: Option<(&'static str, &str)>,
+    ) {
         if !force && hit.is_none() && self.report_due().is_none_or(|d| !d.is_zero()) {
             return;
         }
@@ -231,13 +276,26 @@ impl Background {
         }
         let usage = self.unreported.take().unwrap_or_default();
         self.reported = Instant::now();
-        out.send(&Out::Usage { vm, usage, limit: hit.map(|h| h.0), message: hit.map(|h| h.1) });
+        out.send(&Out::Usage {
+            vm,
+            usage,
+            limit: hit.map(|h| h.0),
+            message: hit.map(|h| h.1),
+        });
     }
 
     /// After a batch: charge it, report its usage, and say whether the
     /// isolate is retired (`heap_hit`: it hit its heap limit; or this
     /// budget ran out, which the next eval fails with).
-    pub(super) fn settle(&mut self, batch: Batch, spent: Usage, heap_hit: bool, out: &Output, vm: u64, what: &str) -> Option<(Failure, Option<Failure>)> {
+    pub(super) fn settle(
+        &mut self,
+        batch: Batch,
+        spent: Usage,
+        heap_hit: bool,
+        out: &Output,
+        vm: u64,
+        what: &str,
+    ) -> Option<(Failure, Option<Failure>)> {
         let exhausted = self.finish(batch);
         self.record(spent);
         let retire = |cause: String| fail(ErrorCode::IsolateRetired, cause);
@@ -250,9 +308,23 @@ impl Background {
             return None;
         }
         let ms = self.budget.unwrap_or_default().as_millis();
-        let of = if self.clock.is_some() { "CPU time" } else { "time" };
+        let of = if self.clock.is_some() {
+            "CPU time"
+        } else {
+            "time"
+        };
         let cause = format!("the isolate's timers and continuations used more than {ms}ms of {of} per minute between evals (limits.backgroundMs)");
-        self.report(out, vm, /* force */ true, Some(("backgroundMs", &cause)));
-        Some((retire(format!("the isolate was retired: {cause}; create a new one")), Some(limit("backgroundMs", cause))))
+        self.report(
+            out,
+            vm,
+            /* force */ true,
+            Some(("backgroundMs", &cause)),
+        );
+        Some((
+            retire(format!(
+                "the isolate was retired: {cause}; create a new one"
+            )),
+            Some(limit("backgroundMs", cause)),
+        ))
     }
 }

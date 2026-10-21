@@ -19,7 +19,11 @@ fn value(c: u8) -> Option<u32> {
 }
 
 pub fn forgiving_decode(input: &[u8]) -> Option<Vec<u8>> {
-    let mut data: Vec<u8> = input.iter().copied().filter(|c| !matches!(c, b'\t' | b'\n' | b'\x0c' | b'\r' | b' ')).collect();
+    let mut data: Vec<u8> = input
+        .iter()
+        .copied()
+        .filter(|c| !matches!(c, b'\t' | b'\n' | b'\x0c' | b'\r' | b' '))
+        .collect();
     if data.len().is_multiple_of(4) {
         if data.ends_with(b"==") {
             data.truncate(data.len() - 2);
@@ -48,11 +52,21 @@ pub fn forgiving_decode(input: &[u8]) -> Option<Vec<u8>> {
 pub fn encode(input: &[u8]) -> String {
     let mut out = String::with_capacity(input.len().div_ceil(3) * 4);
     for chunk in input.chunks(3) {
-        let n = (chunk[0] as u32) << 16 | (*chunk.get(1).unwrap_or(&0) as u32) << 8 | *chunk.get(2).unwrap_or(&0) as u32;
+        let n = (chunk[0] as u32) << 16
+            | (*chunk.get(1).unwrap_or(&0) as u32) << 8
+            | *chunk.get(2).unwrap_or(&0) as u32;
         out.push(ALPHABET[(n >> 18) as usize & 63] as char);
         out.push(ALPHABET[(n >> 12) as usize & 63] as char);
-        out.push(if chunk.len() > 1 { ALPHABET[(n >> 6) as usize & 63] as char } else { '=' });
-        out.push(if chunk.len() > 2 { ALPHABET[n as usize & 63] as char } else { '=' });
+        out.push(if chunk.len() > 1 {
+            ALPHABET[(n >> 6) as usize & 63] as char
+        } else {
+            '='
+        });
+        out.push(if chunk.len() > 2 {
+            ALPHABET[n as usize & 63] as char
+        } else {
+            '='
+        });
     }
     out
 }
@@ -76,7 +90,12 @@ pub fn op_base64_decode(scope: &mut v8::PinScope, args: Args, mut rv: Rv) {
 pub fn op_base64_encode_from_buffer(scope: &mut v8::PinScope, args: Args, mut rv: Rv) {
     let offset = args.get(1).uint32_value(scope).unwrap_or(0) as usize;
     let length = args.get(2).uint32_value(scope).unwrap_or(0) as usize;
-    let Some(encoded) = with_bytes(scope, args.get(0), |b| offset.checked_add(length).and_then(|end| b.get(offset..end)).map(encode)) else {
+    let Some(encoded) = with_bytes(scope, args.get(0), |b| {
+        offset
+            .checked_add(length)
+            .and_then(|end| b.get(offset..end))
+            .map(encode)
+    }) else {
         throw_type(scope, "expected a buffer");
         return;
     };
@@ -103,7 +122,10 @@ pub fn op_base64_atob(scope: &mut v8::PinScope, args: Args, mut rv: Rv) {
 
 pub fn op_base64_btoa(scope: &mut v8::PinScope, args: Args, mut rv: Rv) {
     let Some(input) = byte_string(scope, args.get(0)) else {
-        throw_type(scope, "Cannot encode string: string contains characters outside of the Latin1 range");
+        throw_type(
+            scope,
+            "Cannot encode string: string contains characters outside of the Latin1 range",
+        );
         return;
     };
     let s = encode(&input);
@@ -118,7 +140,16 @@ mod tests {
 
     #[test]
     fn round_trips() {
-        for s in [&b""[..], b"f", b"fo", b"foo", b"foob", b"fooba", b"foobar", &[0, 255, 128]] {
+        for s in [
+            &b""[..],
+            b"f",
+            b"fo",
+            b"foo",
+            b"foob",
+            b"fooba",
+            b"foobar",
+            &[0, 255, 128],
+        ] {
             assert_eq!(forgiving_decode(encode(s).as_bytes()).unwrap(), s);
         }
         assert_eq!(forgiving_decode(b" Zm9v YmE= ").unwrap(), b"fooba");

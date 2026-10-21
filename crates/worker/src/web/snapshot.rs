@@ -36,9 +36,12 @@ static SNAPSHOT: OnceLock<Option<&'static [u8]>> = OnceLock::new();
 pub fn external_references() -> &'static [v8::ExternalReference] {
     REFERENCES
         .get_or_init(|| {
-            let mut refs: Vec<v8::ExternalReference> =
-                super::all_natives().map(|function| v8::ExternalReference { function }).collect();
-            refs.push(v8::ExternalReference { pointer: std::ptr::null_mut() });
+            let mut refs: Vec<v8::ExternalReference> = super::all_natives()
+                .map(|function| v8::ExternalReference { function })
+                .collect();
+            refs.push(v8::ExternalReference {
+                pointer: std::ptr::null_mut(),
+            });
             References(Box::leak(refs.into_boxed_slice()))
         })
         .0
@@ -81,7 +84,9 @@ fn embedded() -> Option<&'static [u8]> {
     match unwrap(EMBEDDED?) {
         Ok(blob) => Some(blob),
         Err(e) => {
-            eprintln!("isolane-worker: ignoring the embedded web platform snapshot ({e}); building one");
+            eprintln!(
+                "isolane-worker: ignoring the embedded web platform snapshot ({e}); building one"
+            );
             None
         }
     }
@@ -97,7 +102,11 @@ fn fingerprint() -> String {
     for (name, _) in super::native_fns().into_iter().chain(super::op_fns()) {
         natives.write(name.as_bytes());
     }
-    let build = if cfg!(feature = "dev-prebuilt") { "prebuilt" } else { "sandbox" };
+    let build = if cfg!(feature = "dev-prebuilt") {
+        "prebuilt"
+    } else {
+        "sandbox"
+    };
     format!(
         "v8 {} ({build}, {}-{}); flags {:016x}; js {}; natives {:016x}",
         v8::V8::get_version(),
@@ -124,7 +133,10 @@ fn unwrap(file: &[u8]) -> Result<&[u8], String> {
     if magic != Some(MAGIC.as_bytes()) {
         return Err("not a snapshot file".into());
     }
-    let (made, blob) = (String::from_utf8_lossy(made.unwrap_or_default()), blob.unwrap_or_default());
+    let (made, blob) = (
+        String::from_utf8_lossy(made.unwrap_or_default()),
+        blob.unwrap_or_default(),
+    );
     let this = fingerprint();
     if made != this {
         return Err(format!("made by {made}; this is {this}"));
@@ -159,7 +171,8 @@ impl Fnv {
 }
 
 fn build() -> Result<Vec<u8>, String> {
-    let mut isolate = v8::Isolate::snapshot_creator(Some(Cow::Borrowed(external_references())), None);
+    let mut isolate =
+        v8::Isolate::snapshot_creator(Some(Cow::Borrowed(external_references())), None);
     {
         v8::scope!(let scope, &mut isolate);
         let context = v8::Context::new(scope, Default::default());
@@ -169,10 +182,17 @@ fn build() -> Result<Vec<u8>, String> {
         super::call_method(scope, handle, "materialize", &[])?;
         scope.perform_microtask_checkpoint();
         let key = js::short_string(scope, super::SNAPSHOT_HANDLE);
-        global.define_own_property(scope, key.into(), handle.into(), v8::PropertyAttribute::DONT_ENUM);
+        global.define_own_property(
+            scope,
+            key.into(),
+            handle.into(),
+            v8::PropertyAttribute::DONT_ENUM,
+        );
         scope.set_default_context(context);
     }
-    let blob = isolate.create_blob(v8::FunctionCodeHandling::Keep).ok_or("V8 couldn't serialize it")?;
+    let blob = isolate
+        .create_blob(v8::FunctionCodeHandling::Keep)
+        .ok_or("V8 couldn't serialize it")?;
     // Hash tables in the snapshot must be rehashed with each VM's own hash
     // seed; a snapshot that can't be would share one seed across VMs.
     if !blob.can_be_rehashed() {

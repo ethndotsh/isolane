@@ -9,7 +9,10 @@ use std::collections::HashMap;
 
 use encoding_rs::{CoderResult, Decoder, DecoderResult, Encoding};
 
-use super::{copy_bytes, string_arg, throw_range, throw_type, with_bytes, with_bytes_mut, with_u32s_mut, Args, Rv};
+use super::{
+    copy_bytes, string_arg, throw_range, throw_type, with_bytes, with_bytes_mut, with_u32s_mut,
+    Args, Rv,
+};
 use crate::js;
 
 struct StreamDecoder {
@@ -23,10 +26,16 @@ thread_local! {
 }
 
 fn invalid_label(scope: &mut v8::PinScope, label: &str) {
-    throw_range(scope, &format!("The encoding label provided ('{label}') is invalid."));
+    throw_range(
+        scope,
+        &format!("The encoding label provided ('{label}') is invalid."),
+    );
 }
 
-fn utf16_string<'s>(scope: &mut v8::PinScope<'s, '_>, units: &[u16]) -> Option<v8::Local<'s, v8::String>> {
+fn utf16_string<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    units: &[u16],
+) -> Option<v8::Local<'s, v8::String>> {
     let s = v8::String::new_from_two_byte(scope, units, v8::NewStringType::Normal);
     if s.is_none() {
         throw_range(scope, "Value too large to decode");
@@ -35,11 +44,19 @@ fn utf16_string<'s>(scope: &mut v8::PinScope<'s, '_>, units: &[u16]) -> Option<v
 }
 
 /// Decode with `decoder`; `last` flushes it. Err(()) for fatal-mode errors.
-fn run_decoder(decoder: &mut Decoder, fatal: bool, data: &[u8], last: bool) -> Result<Vec<u16>, &'static str> {
-    let max = decoder.max_utf16_buffer_length(data.len()).ok_or("Value too large to decode")?;
+fn run_decoder(
+    decoder: &mut Decoder,
+    fatal: bool,
+    data: &[u8],
+    last: bool,
+) -> Result<Vec<u16>, &'static str> {
+    let max = decoder
+        .max_utf16_buffer_length(data.len())
+        .ok_or("Value too large to decode")?;
     let mut out = vec![0u16; max];
     if fatal {
-        let (result, _, written) = decoder.decode_to_utf16_without_replacement(data, &mut out, last);
+        let (result, _, written) =
+            decoder.decode_to_utf16_without_replacement(data, &mut out, last);
         match result {
             DecoderResult::InputEmpty => {
                 out.truncate(written);
@@ -62,7 +79,11 @@ fn run_decoder(decoder: &mut Decoder, fatal: bool, data: &[u8], last: bool) -> R
 
 fn decoder_for(label: &str, ignore_bom: bool) -> Option<Decoder> {
     let encoding = Encoding::for_label(label.as_bytes())?;
-    Some(if ignore_bom { encoding.new_decoder_without_bom_handling() } else { encoding.new_decoder_with_bom_removal() })
+    Some(if ignore_bom {
+        encoding.new_decoder_without_bom_handling()
+    } else {
+        encoding.new_decoder_with_bom_removal()
+    })
 }
 
 pub fn op_encoding_normalize_label(scope: &mut v8::PinScope, args: Args, mut rv: Rv) {
@@ -93,7 +114,11 @@ pub fn op_encoding_decode_utf8(scope: &mut v8::PinScope, args: Args, mut rv: Rv)
         throw_type(scope, "expected a buffer");
         return;
     };
-    let b: &[u8] = if !ignore_bom && b.starts_with(&[0xef, 0xbb, 0xbf]) { &b[3..] } else { &b };
+    let b: &[u8] = if !ignore_bom && b.starts_with(&[0xef, 0xbb, 0xbf]) {
+        &b[3..]
+    } else {
+        &b
+    };
     match v8::String::new_from_utf8(scope, b, v8::NewStringType::Normal) {
         Some(s) => rv.set(s.into()),
         None => throw_type(scope, "buffer exceeds maximum length"),
@@ -108,7 +133,9 @@ pub fn op_encoding_decode_single(scope: &mut v8::PinScope, args: Args, mut rv: R
         invalid_label(scope, &label);
         return;
     };
-    let Some(decoded) = with_bytes(scope, args.get(0), |b| run_decoder(&mut decoder, fatal, b, /* last */ true)) else {
+    let Some(decoded) = with_bytes(scope, args.get(0), |b| {
+        run_decoder(&mut decoder, fatal, b, /* last */ true)
+    }) else {
         throw_type(scope, "expected a buffer");
         return;
     };
@@ -148,7 +175,9 @@ pub fn decoder_decode(scope: &mut v8::PinScope, args: Args, mut rv: Rv) {
     let decoded = with_bytes(scope, args.get(0), |b| {
         DECODERS.with(|d| {
             let mut d = d.borrow_mut();
-            let r = d.get_mut(&id).map(|sd| run_decoder(&mut sd.decoder, sd.fatal, b, !stream));
+            let r = d
+                .get_mut(&id)
+                .map(|sd| run_decoder(&mut sd.decoder, sd.fatal, b, !stream));
             if !stream {
                 d.remove(&id);
             }
@@ -193,7 +222,12 @@ fn encode_into(scope: &mut v8::PinScope, args: &Args) -> Option<(usize, usize)> 
     };
     let mut utf8 = vec![0u8; dest_len];
     let mut nchars = 0;
-    let written = s.write_utf8_v2(scope, &mut utf8, v8::WriteFlags::kReplaceInvalidUtf8, Some(&mut nchars));
+    let written = s.write_utf8_v2(
+        scope,
+        &mut utf8,
+        v8::WriteFlags::kReplaceInvalidUtf8,
+        Some(&mut nchars),
+    );
     with_bytes_mut(scope, args.get(1), |dest| {
         let n = written.min(dest.len());
         dest[..n].copy_from_slice(&utf8[..n]);
@@ -218,7 +252,9 @@ pub fn op_encoding_encode_into(scope: &mut v8::PinScope, args: Args, mut rv: Rv)
 
 /// The unpacked form: [read, written] into a Uint32Array.
 pub fn op_encoding_encode_into_fallback(scope: &mut v8::PinScope, args: Args, _rv: Rv) {
-    let Some((read, written)) = encode_into(scope, &args) else { return };
+    let Some((read, written)) = encode_into(scope, &args) else {
+        return;
+    };
     let stored = with_u32s_mut(scope, args.get(2), |out| {
         if out.len() < 2 {
             return false;

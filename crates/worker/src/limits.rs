@@ -74,11 +74,13 @@ pub const MAX_BUDGET_MS: u64 = (1 << 31) - 1;
 
 impl Limits {
     pub fn timeout(&self) -> Option<Duration> {
-        self.timeout_ms.map(|ms| Duration::from_millis(ms.min(MAX_BUDGET_MS)))
+        self.timeout_ms
+            .map(|ms| Duration::from_millis(ms.min(MAX_BUDGET_MS)))
     }
 
     pub fn cpu(&self) -> Option<Duration> {
-        self.cpu_ms.map(|ms| Duration::from_millis(ms.min(MAX_BUDGET_MS)))
+        self.cpu_ms
+            .map(|ms| Duration::from_millis(ms.min(MAX_BUDGET_MS)))
     }
 }
 
