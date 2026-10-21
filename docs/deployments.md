@@ -539,13 +539,28 @@ An instance is an isolate that has evaluated the program. The
   Supabase `oneshot`'s position, for a tenant whose end users must not
   share state.
 - `concurrency` (only with `reuse`, default 1): calls that may run in one
-  instance at once. At 1, a call waits for a free instance or a new one,
-  up to `max`, then queues up to `queueMs`, like Supabase's
-  `request-wait-timeout`, then fails with `ERR_LIMIT`. Above 1, per-call
-  `cpuMs` becomes a per-instance budget, as section 3 explains.
+  instance at once. A call goes to an idle instance, else to the least
+  busy one with room, else to a new one up to `max`, else it queues, at
+  most `queue` calls (default 1,000) for up to `queueMs` each, like
+  Supabase's `request-wait-timeout`, then fails with `ERR_LIMIT`.
 
 The supervisor routes calls. It already sees every eval, so it knows which
 instances are busy without asking the worker.
+
+Above 1 (built in phase 3), the worker runs an instance's calls together on
+its event loop (`crates/worker/src/vm/calls.rs`), and sends each result as
+soon as it settles; calls that arrive while others run join them. Each
+call keeps its own wall clock: `timeoutMs` from its start. CPU can't be
+told apart by call, so, as section 3 says, the other per-eval budgets
+belong to the instance while its calls run: `cpuMs`, `hostCalls`, and
+`logBytes` each grow by their amount for every call that joins, and once
+a count limit is hit, every call that finishes before the instance goes
+idle fails with it. A call stopped part-way stops all of them and retires
+the instance (decision 3, applied to the instance): the calls that hit the
+limit fail with it, and the rest with `ERR_ISOLATE_RETIRED`, marked not
+`retryable` because they may have done part of their work. The pool's own
+retry, for a call an instance refused before running it, only retries a
+`retryable` one.
 
 ### Calls and their arguments
 
@@ -557,12 +572,26 @@ object. The default export wins only for names the module doesn't export.
 The result is validated by an optional `returns` schema, as for `eval`.
 
 `fetch(request)` builds a guest `Request` and returns a host `Response`.
-Bodies are buffered first, up to a `bodyBytes` limit, and streamed later
-through the same byte-stream machinery as the `fetch` broker, in reverse.
-`env` is the program's `env` value with host functions mounted in it, so a
-binding is `env.db.query(...)` instead of a global. `ctx.waitUntil(p)`
-keeps the instance alive after the response, under `backgroundMs`.
-`passThroughOnException` doesn't apply, since there is no origin.
+Bodies are buffered, each at most `limits.bodyBytes` (default 16 MiB): the
+request's crosses as the call's byte argument, and the response's as bytes
+attached to the result, whose JSON is the head (status, status text,
+headers). A `call` message says which kind of call it is (`kind: 'fetch'`)
+and the most body bytes the worker may send back (`maxBody`), so streaming
+can come later by replacing the bytes with a stream id, read through the
+same byte-queue machinery as the `fetch` broker, in reverse. In the guest,
+runtime/serve.js builds the `Request`, calls the handler with
+`(request, env, ctx)`, lets the `after` shims see (and replace) its
+`Response`, and then reads the body. `env` is the program's `env` value
+with host functions mounted in it, so a binding is `env.db.query(...)`
+instead of a global. `ctx.waitUntil(p)` keeps work running after the
+response, under `backgroundMs`; its rejections are reported as unhandled
+ones; the result says how many such promises are still running, and the
+pool waits for them (a `drain` call, budgeted as an eval) before it closes
+the instance. `ctx.props` and `passThroughOnException` are not offered:
+there are no per-caller props yet, and there is no origin to pass
+through to. `program.fetch` is for programs only: a classic script's
+global `fetch` is the web platform's, so `isolate.fetch` would be
+ambiguous.
 
 ### Caches and invalidation
 
@@ -596,10 +625,14 @@ the isolate, and the next request loads the app again. Warm requests take
 about 1.5 to 2 ms on the dev build, against about 13 ms for the cold first
 one.
 
-With programs, a deploy will call `tenant.load({ main, files })` and keep
-the `Program` in the app table. Each HTTP request becomes
-`program.fetch(request)`, the adapter shim and its `Outcome` schema go
-away, and redeploys of an unchanged file reuse the cache by hash.
+Since phase 3, the app is `export default { fetch(request, env, ctx) }`,
+a deploy calls `tenant.load(code)` and keeps the `Program` in the app
+table, and each HTTP request becomes `program.fetch(request)`, its body
+streamed from the socket into the request and bounded by `bodyBytes` (a
+413 past 1 MiB). The adapter and its `Outcome` schema are gone. Each app
+has up to two instances running eight requests each, since an app mostly
+waits on its deployer, and it counts page views with `ctx.waitUntil`.
+Redeploys of an unchanged file will reuse the cache by hash (phase 4).
 
 ## 6. Build plan
 
@@ -626,9 +659,11 @@ away, and redeploys of an unchanged file reuse the cache by hash.
    its turn. Type stripping refuses syntax with runtime behaviour, as
    Node.js does, rather than compiling it, and the worker keeps what it
    transformed by content hash, so a program's later instances reuse it.
-3. `fetch`: `program.fetch` with buffered bodies, and `ctx.waitUntil`. The
-   serverless example switches to `export default { fetch }`. (The pools
-   and `env` landed in phase 1.)
+3. `fetch`: `program.fetch` with buffered bodies (`limits.bodyBytes`), and
+   `ctx.waitUntil` (drained before an instance closes). The serverless
+   example switches to `export default { fetch }`. `instances.concurrency`
+   above 1 came forward from phase 6, and `instances.queue` bounds the
+   number of queued calls. (The pools and `env` landed in phase 1.) Done.
 4. Caches: per-worker code cache by content hash, a per-tenant compiled
    wasm cache, an optional supervisor-held copy with a `cacheBytes` budget,
    and the isolate pool.
@@ -643,7 +678,7 @@ away, and redeploys of an unchanged file reuse the cache by hash.
    guest's own `error.stack` keeps V8's positions. Phases 2 and 5 left
    phase 4 a seam: `module::compile` is where a code cache is consumed and
    made.
-6. Later: streaming bodies both ways, `concurrency` above 1, deploy-time
+6. Later: streaming bodies both ways, `ctx.props`, deploy-time
    type checking, RPC stubs for functions passed as arguments, and a V8
    snapshot taken after module evaluation. That last one is the V8
    counterpart of Wizer's pre-initialization: near-zero cold starts, but
