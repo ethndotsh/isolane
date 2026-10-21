@@ -384,11 +384,9 @@ fn file_module<'s>(
             default_module(scope, path, string.into())
         }
         Kind::Bytes => {
-            let bytes = source.bytes().to_vec();
-            let length = bytes.len();
-            let store = v8::ArrayBuffer::new_backing_store_from_vec(bytes).make_shared();
-            let buffer = v8::ArrayBuffer::with_backing_store(scope, &store);
-            let array = v8::Uint8Array::new(scope, buffer, 0, length).ok_or(Miss::Thrown)?;
+            // Copied into a V8-allocated buffer: the V8 sandbox refuses
+            // backing stores from Rust memory.
+            let array = crate::bytes::new_u8array(scope, source.bytes());
             default_module(scope, path, array.into())
         }
     };
