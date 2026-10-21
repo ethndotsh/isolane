@@ -441,9 +441,18 @@ isolate's `timeoutMs` for wall time. Its I/O ban (decision 2) is enforced in
 the worker: the brokers and host functions check a per-isolate "in setup"
 flag and refuse while it is set. If setup fails, `load` rejects with
 `err.guest` pointing at the failing line when it is the first instance;
-for a later instance, the call that needed it fails with the same error,
-and repeated failures mark the program unhealthy, so later calls fail fast
-until it is loaded again.
+for a later instance, the call that needed it fails with the same error.
+(Marking a program unhealthy after repeated failures, so later calls fail
+fast, is left as an idea: with no I/O, a setup that has succeeded once
+rarely fails later, and phase 1 retries the load for each call that needs
+a new instance.)
+
+As built, a refused setup operation throws an `Error` whose `code` is
+`ERR_SETUP_IO` (inside `fetch`, the `TypeError` it rejects with has that
+error as its `cause`). The guest may catch it and carry on. A load that
+fails after a refusal rejects with `ERR_SETUP_IO`, of kind `guest`, rather
+than `ERR_GUEST_EXCEPTION`, with `err.guest` as usual: the worker records
+the refusal itself, so the code doesn't depend on what the guest threw.
 
 Classic-script isolates have no such split: a stateful isolate's first
 `eval` is both its setup and an ordinary eval, and may do I/O. The ban
@@ -508,6 +517,13 @@ main module under `startupCpuMs`. A failure here rejects `load` with
 `err.guest` as for evals, with module paths as filenames. `load` resolves
 once one instance is ready, or only after the compile check when `min` is
 0 and `reuse` is off.
+
+Phase 1 builds less of this. The supervisor sends the program's files (one
+module so far) in a `load` message to each new instance, with no hashing
+and no code cache; those come with phase 4. `load` always resolves once one
+instance has loaded, also with `reuse: false`: that instance has served no
+call yet, so it serves the first one, and every later call gets a fresh
+instance.
 
 ### Instances
 
@@ -596,15 +612,19 @@ away, and redeploys of an unchanged file reuse the cache by hash.
    with one warm instance (`reuse: true`, `max: 1`) and `reuse: false`.
    The setup I/O ban, `isolane:env`, the `startupCpuMs` limit, filenames in
    errors, and `programLoad` events come with it. The serverless example
-   moves to `call('fetch', ...)` on buffered data.
+   moves to `call('fetch', ...)` on buffered data. Done, with two parts of
+   phase 3 brought forward: the pool (`min`, `max`, `idleMs`, `queueMs`,
+   routed by the supervisor, with `max` defaulting to 4) and `env` with the
+   host functions mounted in it. The serverless example calls an exported
+   `handle` through a small adapter the platform appends to the module, so
+   its line numbers are unchanged, until `program.fetch` replaces it.
 2. Multi-file programs: in-worker resolution with `oxc_resolver` over the
    tree, JSON, text, and bytes modules through synthetic modules, dynamic
    `import()`, TypeScript type stripping, and the `modules` and
    `moduleBytes` limits.
-3. Warm pools and `fetch`: `min`, `max`, `idleMs`, and `queueMs`, with
-   supervisor routing. `program.fetch` with buffered
-   bodies, `env` with host functions mounted, and `ctx.waitUntil`. The
-   serverless example switches to `export default { fetch }`.
+3. `fetch`: `program.fetch` with buffered bodies, and `ctx.waitUntil`. The
+   serverless example switches to `export default { fetch }`. (The pools
+   and `env` landed in phase 1.)
 4. Caches: per-worker code cache by content hash, a per-tenant compiled
    wasm cache, an optional supervisor-held copy with a `cacheBytes` budget,
    and the isolate pool.

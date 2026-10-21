@@ -22,6 +22,7 @@ returns the tenant's handle:
 |---|---|
 | `run(code, config?)` | Evaluate in a fresh isolate, then close it |
 | `isolate(config?)` | A stateful isolate: `eval(code, options?)` keeps globals between evals, and `call(name, args?, options?)` calls a function it defined (see [Calls](#calls)) |
+| `load(source, options?)` | A program: an ES module loaded once per instance, whose exports `program.call(name, args?, options?)` invokes in a pool of warm instances (see [Programs](#programs)) |
 | `usage()` / `resetUsage()` | Evals, failures, CPU ms, host calls, log bytes, peak memory, security events, and the worker's CPU ms as the kernel counts it (see [usage](#usage)) |
 | `release()` | Lift a quarantine early |
 | `stop()` | Stop the tenant's worker and its isolates |
@@ -93,8 +94,81 @@ throws rejects with `ERR_GUEST_EXCEPTION`, and the isolate keeps its state;
 a call stopped part-way retires the isolate. The `beforeCall` and
 `afterCall` hooks and the `call` event observe calls.
 
-Programs, `tenant.load()`, will build warm pools on this primitive; see
-`docs/deployments.md`.
+Programs, `tenant.load()`, build warm pools on this primitive.
+
+### Programs
+
+`tenant.load(source, options?)` loads a program: `source` is an ES module,
+and the program's calls invoke its exports. It resolves to a `Program` once
+the first instance (an isolate that has evaluated the module) is ready, so
+a syntax error or an exception in the module's top-level code rejects
+`load` itself, with `err.guest` saying where.
+
+```js
+const program = await runtime.tenant('acme').load(
+  `
+  import { env } from 'isolane:env';
+  let served = 0;
+  export default {
+    async fetch(request) {
+      served++;
+      return { user: await env.db.getUser(request.id), served };
+    },
+  };
+`,
+  { env: { region: 'eu' }, host: { db: { getUser } }, filename: 'src/index.js' },
+);
+await program.call('fetch', [{ id: 1 }]); // { user: ..., served: 1 }
+await program.call('fetch', [{ id: 2 }]); // { user: ..., served: 2 }: warm
+await program.close();
+```
+
+The options are an isolate's configuration for the instances (`limits`,
+`web`, `fetch`, `hooks`, and the rest), and three of the program's own:
+
+- `filename`: the main module's path, its name in stack traces. Default
+  `main.js`.
+- `env`: a JSON object, which the module imports as
+  `import { env } from 'isolane:env'`. The `host` functions are mounted in
+  it (`env.db.getUser`) instead of on the global.
+- `instances`: how instances are kept. `reuse` (default `true`) keeps them
+  warm: each serves call after call, one at a time, and module state
+  persists between them. `reuse: false` gives every call a fresh instance,
+  for end users who must not share state. `min` (default 0) instances are
+  kept ready, `max` (default 4) caps them, `idleMs` (default 30 s) closes
+  idle ones down to `min`, and a call that finds every instance busy at
+  `max` waits up to `queueMs` (default 10 s), then fails with `ERR_LIMIT`
+  (`err.limit` is `instances.queueMs`).
+
+`program.call(name, args?, options?)` calls the named export, or else a
+method of the default export, with the default export as `this`
+(`export default { fetch }`, a class instance, a Hono app); methods every
+object inherits (`toString`) are not handlers. Arguments, the result, and
+`options` work as for `isolate.call`. A name the program doesn't export
+fails with `ERR_HANDLER_NOT_FOUND`.
+
+Evaluating the module is the instance's setup, and it has its own rules.
+It runs under `limits.startupCpuMs` (default 1 s, Linux) in place of
+`cpuMs`, and `timeoutMs` as its wall clock. It can't do I/O: `fetch`,
+`connect()`, `fs`, and host functions throw an error with code
+`ERR_SETUP_IO` while the module evaluates, and if setup fails after one,
+`load` rejects with `ERR_SETUP_IO` (kind `guest`). Timers work, and clients
+that connect lazily, on their first query, keep their connection from call
+to call. The clock advances when setup starts and when each call starts.
+A module can import only `isolane:env` for now; `import()` is refused.
+
+Each call is an eval, as for `isolate.call`. A handler that throws rejects
+with `ERR_GUEST_EXCEPTION`, and its instance stays in service. A call
+stopped part-way (`timeoutMs`, `cpuMs`, its signal) retires its instance,
+as do running out of memory, `backgroundMs`, and worker recycling; the
+program replaces it, and calls waiting for an instance go to the
+replacement. `program.usage()` reports its calls, failures, loads, live,
+busy, and queued instances, and CPU time. `program.close()` refuses new
+calls and queued ones (`ERR_PROGRAM_CLOSED`), waits for those running,
+and closes the instances; `await using` does the same. Events from a
+program's instances (`call`, `log`, `limit`, `guestError`, `policyDenial`)
+carry its `program` id, and `programLoad` (`onProgramLoad`) reports each
+instance's load, with `durationMs` and, if it failed, `error`.
 
 Runtime-only options: `workerPath` (default: the installed
 `@isolane/worker-*` package, or `$ISOLANE_WORKER`), `strict` (default
@@ -112,7 +186,8 @@ set at three levels:
 1. the runtime's `defaults`,
 2. each tenant's: `tenants(name)` returns any part of the config (for
    example by plan),
-3. each call: `tenant.run(code, config)`, `tenant.isolate(config)`.
+3. each call: `tenant.run(code, config)`, `tenant.isolate(config)`,
+   `tenant.load(source, options)`.
 
 Later levels win field by field. `host` and `globals` merge by name,
 `limits` by field, and `hooks` and `shims` accumulate. A malformed config
@@ -431,11 +506,12 @@ hooks run.
 |---|---|---|
 | `beforeHostCall` / `afterHostCall` | interceptor | can `deny()` (`ERR_DENIED`) or replace the arguments / result |
 | `beforeEval` / `afterEval` | interceptor | can `deny()` or replace the code / result |
-| `beforeCall` / `afterCall` | interceptor | can `deny()` or replace the arguments / result of an `isolate.call` |
+| `beforeCall` / `afterCall` | interceptor | can `deny()` or replace the arguments / result of an `isolate.call` or `program.call` |
 | `onLog` | event | guest `console` output (up to `limits.logBytes` per eval) |
 | `onGuestError` | event | an exception in a timer or task, or a promise rejected with no handler (see [Errors](#errors)) |
 | `onLimit` | event | any limit hit |
 | `onPolicyDenial` | event | a `fetch`, `connect`, or `fs` refusal (including a name that resolves only to private addresses) |
+| `onProgramLoad` | event | a program's instance loaded, or failed to (see [Programs](#programs)) |
 | `onSecurityEvent` | event | a worker crash, protocol violation, or unresponsive worker |
 | `onWorker` | event | a tenant's worker started, is being recycled (`workerLifetimeMs`, `workerEvals`), or exited |
 
@@ -475,6 +551,7 @@ await acme.run(app.code, {
 |---|---|---|
 | `timeoutMs` | 30 s | isolate, per eval or call (retires the isolate) |
 | `cpuMs` | none | isolate, per eval or call (Linux; retires the isolate) |
+| `startupCpuMs` | 1 s | isolate, a program's setup (Linux; in place of `cpuMs`) |
 | `heapBytes` | 128 MiB | isolate |
 | `timers` | 10,000 | isolate (a `RangeError` in the guest) |
 | `backgroundMs` | 1 s per minute | isolate, work between evals (retires the isolate) |
@@ -555,7 +632,7 @@ input.
 Isolate limits can be set at every level; tenant limits at the runtime and
 in `tenants(name)`; `tenants` on the runtime only. Each is an integer of at
 least 1 (`heapBytes` at least 1 MiB, `workerMemoryBytes` at least 64 MiB).
-Durations (`timeoutMs`, `cpuMs`, `backgroundMs`, `idleMs`,
+Durations (`timeoutMs`, `cpuMs`, `startupCpuMs`, `backgroundMs`, `idleMs`,
 `workerBackgroundMs`, `workerLifetimeMs`, and the policies' `*Ms` limits)
 are at most 2^31 - 1 ms, `timers` at most 2^32 - 1, and `heapBytes` at most
 4 GiB; anything else is `ERR_INVALID_CONFIG`. `DEFAULT_LIMITS` and
@@ -566,7 +643,7 @@ three effects:
 
 | Effect | Limits |
 |---|---|
-| The eval fails with `ERR_LIMIT` (`err.limit` names it) | `timeoutMs`, `cpuMs`, `heapBytes`, `backgroundMs`, `codeBytes`, `resultBytes`, `pendingHostCalls`, `hostCalls`, `pendingHostCallBytes`, `isolates`, `pendingEvals`, `workerMemoryBytes`, `tenants` |
+| The eval fails with `ERR_LIMIT` (`err.limit` names it) | `timeoutMs`, `cpuMs`, `startupCpuMs`, `heapBytes`, `backgroundMs`, `codeBytes`, `resultBytes`, `pendingHostCalls`, `hostCalls`, `pendingHostCallBytes`, `isolates`, `pendingEvals`, `workerMemoryBytes`, `tenants`, and a program's `instances.queueMs` |
 | The guest's operation fails, and the eval continues | `timers` (a `RangeError`), `decompressedBytes` (the stream errors), and the policies' limits, named by their path (`fetch.limits.requests`, `connect.limits.connections`, `fs.limits.writtenBytes`, ...) |
 | Output is cut | `logBytes`, `logLineBytes` |
 
@@ -612,9 +689,9 @@ Every failure is an `IsolaneError` with `code`, `kind`, `retryable`, and
 
 | Kind | Codes |
 |---|---|
-| `guest` | `ERR_GUEST_EXCEPTION` (see `err.guest`), `ERR_UNSETTLED`, `ERR_NOT_SERIALIZABLE`, `ERR_INVALID_RETURN`, `ERR_HANDLER_NOT_FOUND` |
+| `guest` | `ERR_GUEST_EXCEPTION` (see `err.guest`), `ERR_UNSETTLED`, `ERR_NOT_SERIALIZABLE`, `ERR_INVALID_RETURN`, `ERR_HANDLER_NOT_FOUND`, `ERR_SETUP_IO` |
 | `limit` | `ERR_LIMIT` (see `err.limit`), `ERR_ISOLATE_RETIRED` |
-| `usage` | `ERR_INVALID_CONFIG`, `ERR_ISOLATE_CLOSED`, `ERR_RUNTIME_CLOSED`, `ERR_ABORTED`, `ERR_DENIED`, `ERR_SHIM` |
+| `usage` | `ERR_INVALID_CONFIG`, `ERR_ISOLATE_CLOSED`, `ERR_RUNTIME_CLOSED`, `ERR_PROGRAM_CLOSED`, `ERR_ABORTED`, `ERR_DENIED`, `ERR_SHIM` |
 | `security` | `ERR_TENANT_QUARANTINED` |
 | `infrastructure` | `ERR_WORKER_CRASHED`, `ERR_WORKER_UNRESPONSIVE`, `ERR_WORKER_INCOMPATIBLE`, `ERR_ISOLATION_UNAVAILABLE`, `ERR_INTERNAL` |
 

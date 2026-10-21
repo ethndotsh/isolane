@@ -27,11 +27,21 @@ await acme.run('db.getUser(42).then((u) => u.plan)', {
   host: { db: { getUser: async (id) => users.find(id) } },
 });
 
-// A stateful isolate loads code once; each call invokes it with data.
-using app = acme.isolate();
-await app.eval('async function handle(request) { return { path: request.path } }');
-await app.call('handle', [{ path: '/users/1' }]); // { path: '/users/1' }
+// A program is an ES module loaded once into a pool of warm instances;
+// each call invokes one of its exports with data.
+await using app = await acme.load(`
+  import { env } from 'isolane:env';
+  export default { async fetch(request) { return env.db.getUser(request.id); } };
+`, { host: { db: { getUser: async (id) => users.find(id) } } });
+await app.call('fetch', [{ id: 42 }]);
 ```
+
+A program's top-level code is its setup: it runs once per instance, under
+its own CPU budget, and can't do I/O, which belongs in its handlers.
+Instances serve one call at a time and keep module state between calls;
+the pool starts more as calls need them, queues calls when all are busy,
+and replaces an instance that a limit stopped. See
+[Programs](docs/guide.md#programs).
 
 ## Security model
 
