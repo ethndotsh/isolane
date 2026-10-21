@@ -165,11 +165,12 @@ test('setup runs under limits.timeoutMs, and limits.startupCpuMs on Linux', asyn
   await assert.rejects(load('for (;;) {}', { limits: { timeoutMs: 100 } }), limit('timeoutMs'));
   if (process.platform === 'linux') {
     await assert.rejects(load('for (;;) {}', { limits: { startupCpuMs: 50, timeoutMs: 10_000 } }), limit('startupCpuMs'));
-    // Calls are held to cpuMs, not startupCpuMs.
-    const program = await load('const end = Date.now(); export function spin(ms) { const t = performance.now(); while (performance.now() - t < ms); return 1; }', {
-      limits: { startupCpuMs: 50, cpuMs: 1_000 },
+    // Calls are held to cpuMs, not startupCpuMs. (The clock is frozen while
+    // a call runs, so the spin counts iterations: well over 50 ms of CPU.)
+    const program = await load('export function spin(n) { let x = 0; for (let i = 0; i < n; i++) x = (x + i) | 0; return x === x ? 1 : 0; }', {
+      limits: { startupCpuMs: 50, cpuMs: 5_000 },
     });
-    assert.equal(await program.call('spin', [100]), 1);
+    assert.equal(await program.call('spin', [3e8]), 1);
     await program.close();
   }
   await assert.rejects(load('export {}', { limits: { startupCpuMs: 0 } }), code('ERR_INVALID_CONFIG'));
