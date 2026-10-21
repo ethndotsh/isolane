@@ -157,7 +157,8 @@ A third pass ranked what's left by worst case:
 | `connect()` is the Sockets API (Cloudflare's, also a WinterTC draft): a `Socket` with `readable` (a byte stream, read from the broker only when the guest reads) and `writable` streams, `opened`/`closed`, `close()`, `allowHalfOpen`, and `startTls()` for `secureTransport: 'starttls'`. The broker upgrades the same connection with node:tls (the policy checks are unchanged) and refuses to upgrade over unread bytes (STARTTLS injection). `connect.ca` for private CAs. Needs `web: true`. postgres.js's Workers build runs from a guest (bundled with esbuild; `test/postgres.test.mjs`, a Postgres service in CI) | done |
 | Sockets API, next: the `cloudflare:sockets` module (`import { connect } from 'cloudflare:sockets'`) once ES modules land, so postgres.js and friends need no alias | planned (with ES modules) |
 | Sockets API, next: a bytes limit per isolate, counted both ways in the broker | done (`connect.limits.transferBytes`, 1 GiB) |
-| Sockets API, next: `SocketInfo.localAddress` (left out: it would show the guest the host's own address) and `socket.closed` without a reader (today a peer's close or error is seen when the guest reads) | idea |
+| Sockets API: `socket.closed` settles when the peer hangs up or the connection fails, whether or not the guest reads (a `watch` operation on the socket broker; unread bytes stay readable). An open socket counts as I/O in flight, so it keeps a pending eval waiting | done |
+| Sockets API: `SocketInfo.localAddress`, left out because it would show the guest the host's own address | idea |
 | A Postgres TLS (`sslmode=require`, STARTTLS) end-to-end test, with a Postgres configured for SSL and `connect.ca` | planned |
 | `fs`: brokered, confined to `root`, read-only by default, no symlink escapes, no host paths in errors | done |
 | `console` → `onLog` (per-eval byte budget) | done |

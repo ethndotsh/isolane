@@ -8,6 +8,7 @@
 //   read(id) → the next bytes, or null at the end
 //   write(id, bytes), end(id) (half-close), close(id)
 //   startTls(id, { servername }) → { id, remoteAddress } (the upgraded socket)
+//   watch(id) → settles when the connection closes, rejecting if it failed
 //
 // The readable side reads from the broker only when the guest reads
 // (highWaterMark 0), so bytes the guest hasn't asked for stay in the broker,
@@ -128,6 +129,24 @@ class Socket {
     ignore(this.#opened);
     this.#id = PromisePrototypeThen(info, (i) => i.id);
     PromisePrototypeCatch(info, (err) => this.#fail(err));
+    // `closed` settles when the connection does, whether or not the guest
+    // reads. Bytes it hasn't read stay readable: the readable side still
+    // ends (or errors) once it gets to the end of them. The watch is I/O in
+    // flight, so an open socket keeps a pending eval waiting.
+    PromisePrototypeThen(this.#id, (id) => {
+      let watched;
+      try {
+        watched = transport("watch", id);
+      } catch {
+        return; // refused (limits.pendingHostCalls): closed settles as the guest reads
+      }
+      // An upgraded socket's `closed` waits for the upgrade instead (startTls).
+      PromisePrototypeThen(
+        watched,
+        () => this.#upgraded || this.#resolveClosed(),
+        (err) => this.#upgraded || this.#rejectClosed(err),
+      );
+    }, () => {});
 
     this.#readable = new ReadableStream({
       __proto__: null,

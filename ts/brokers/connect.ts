@@ -44,6 +44,9 @@ interface GuestSocket {
   queue: ByteQueue;
   /** The connection is gone; the entry stays only until the guest reads what's left. */
   closed?: boolean;
+  /** Settles when the connection does (`watch`): rejected if it failed. */
+  gone: Promise<void>;
+  settle: (err?: Error) => void;
   /** What the guest gets back from open and startTls. */
   remoteAddress: string;
 }
@@ -53,7 +56,9 @@ interface GuestSocket {
  * connection is checked against the policy, then carried out here.
  *   open({ hostname, port, tls }) → { id, remoteAddress }
  *   read(id) → bytes, or null at the end; write(id, bytes); end(id) (half-close);
- *   close(id); startTls(id, { servername }) → { id, remoteAddress }
+ *   close(id); startTls(id, { servername }) → { id, remoteAddress };
+ *   watch(id) → settles when the connection closes, rejecting if it failed
+ *   (so the guest's `socket.closed` settles whether or not it reads)
  */
 export function connectBroker(policy: ConnectPolicy, report: BrokerReporter = NO_REPORTER): { fn: BrokerFunction; dispose: () => void } {
   if (!policy || (!Array.isArray(policy.hosts) && typeof policy.hosts !== 'function')) {
@@ -120,7 +125,12 @@ export function connectBroker(policy: ConnectPolicy, report: BrokerReporter = NO
     const id = nextId++;
     const queue = new ByteQueue(SOCKET_HIGH_WATER);
     queue.source = socket;
-    const g: GuestSocket = { socket, queue, remoteAddress };
+    let settle!: (err?: Error) => void;
+    const gone = new Promise<void>((resolve, reject) => {
+      settle = (err) => (err ? reject(err) : resolve());
+    });
+    gone.catch(() => {});
+    const g: GuestSocket = { socket, queue, gone, settle, remoteAddress };
     socket.on('data', (chunk: Buffer) => {
       if (overTransfer(chunk.length)) return socket.destroy(transferError());
       queue.push(chunk);
@@ -133,6 +143,7 @@ export function connectBroker(policy: ConnectPolicy, report: BrokerReporter = NO
       // socket stops counting against connect.limits.connections.
       if (!queue.size && !queue.error && !queue.waiting) forget(id);
       queue.end();
+      settle(queue.error);
     });
     socket.setTimeout(idleTimeoutMs, () => socket.destroy(new Error('idle timeout')));
     sockets.set(id, g);
@@ -195,6 +206,12 @@ export function connectBroker(policy: ConnectPolicy, report: BrokerReporter = NO
     return data; // null: end of stream
   };
 
+  /** Settles when the connection closes; one that's already gone and forgotten has. */
+  const watch = (id: unknown): Promise<void> => {
+    if (typeof id === 'number' && forgotten.has(id)) return Promise.resolve();
+    return get(id).gone;
+  };
+
   const write = async (id: unknown, data: unknown) => {
     const g = get(id);
     if (!(data instanceof Uint8Array)) throw new TypeError('socket.write: malformed data');
@@ -223,6 +240,7 @@ export function connectBroker(policy: ConnectPolicy, report: BrokerReporter = NO
     g.socket.removeAllListeners('close');
     g.socket.setTimeout(0);
     g.queue.end();
+    g.settle();
   };
 
   const startTls = async (id: unknown, raw: unknown) => {
@@ -259,6 +277,7 @@ export function connectBroker(policy: ConnectPolicy, report: BrokerReporter = NO
     sockets.delete(id as number);
     g.socket.destroy();
     g.queue.end();
+    g.settle();
   };
 
   const fn: BrokerFunction = (op: unknown, ...args: unknown[]) => {
@@ -268,6 +287,7 @@ export function connectBroker(policy: ConnectPolicy, report: BrokerReporter = NO
     if (op === 'end') return end(args[0]);
     if (op === 'startTls') return startTls(args[0], args[1]);
     if (op === 'close') return close(args[0]);
+    if (op === 'watch') return watch(args[0]);
     throw new TypeError('socket: unknown operation');
   };
   const dispose = () => {

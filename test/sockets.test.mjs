@@ -311,6 +311,29 @@ test('a connection the server closed stops counting once its data is read', asyn
   });
 });
 
+test('closed settles when the peer hangs up, without the guest reading', async () => {
+  const sayAndHangUp = await listen(createTcpServer((sock) => sock.end('bye')));
+  const reset = await listen(
+    createTcpServer((sock) => {
+      sock.on('error', () => {});
+      setTimeout(() => sock.resetAndDestroy(), 20);
+    }),
+  );
+  const out = await run(
+    `const a = connect('localhost:${sayAndHangUp}');
+     const closed = await a.closed.then(() => 'resolved', (e) => e.message);
+     // What arrived before the hang-up is still there to read.
+     const text = await new Response(a.readable).text();
+     const b = connect('localhost:${reset}');
+     const failed = await b.closed.then(() => 'resolved', (e) => e.message);
+     return { closed, text, failed };`,
+    { hosts: [`localhost:${sayAndHangUp}`, `localhost:${reset}`], privateNetworks: true },
+  );
+  assert.equal(out.closed, 'resolved');
+  assert.equal(out.text, 'bye');
+  assert.match(out.failed, /^socket error: .*ECONNRESET/);
+});
+
 test('a closed isolate closes its sockets', async () => {
   let closed;
   const seen = new Promise((r) => (closed = r));

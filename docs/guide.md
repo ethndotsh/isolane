@@ -205,6 +205,10 @@ const secure = socket.startTls(); // the same connection, now TLS
 - `socket.readable` is a byte stream (BYOB readers work); `socket.writable`
   takes bytes. `opened` resolves with `{ remoteAddress }`. `close()` closes
   both directions and resolves with `closed`.
+- `closed` resolves when the connection closes and rejects if it fails,
+  whether or not the guest is reading. Bytes that arrived before the peer
+  hung up remain readable afterwards. An open socket counts as I/O in
+  flight, so an eval waiting on a promise keeps waiting while one is open.
 
 TLS checks the server's certificate against Node's default roots, or
 against `ca` (PEM text, or a list) for a private CA such as a cloud

@@ -325,6 +325,25 @@ test('connect broker: transferBytes counts both ways, across sockets', async () 
   await assert.rejects(sock('write', b.id, Buffer.from('123456')), /moved its 16 bytes \(connect.limits.transferBytes\)/);
 });
 
+test('connect broker: watch settles when the connection closes', async () => {
+  const hangUp = createTcpServer((s) => s.end('bye'));
+  await new Promise((r) => hangUp.listen(0, '127.0.0.1', r));
+  after(() => hangUp.close());
+  const port = hangUp.address().port;
+  const { fn: sock } = connectBroker({ hosts: [`localhost:${tcpPort}`, `localhost:${port}`], privateNetworks: true });
+  // The peer hangs up: settled with the data still unread, then readable.
+  const a = await sock('open', { hostname: 'localhost', port });
+  await sock('watch', a.id);
+  assert.equal(String(await sock('read', a.id)), 'bye');
+  assert.equal(await sock('read', a.id), null);
+  // Closed by the guest, and closed already.
+  const b = await sock('open', { hostname: 'localhost', port: tcpPort });
+  const watched = sock('watch', b.id);
+  await sock('close', b.id);
+  await watched;
+  await assert.rejects(async () => sock('watch', b.id), /socket is closed/);
+});
+
 test('the prelude needs the web platform for each policy', () => {
   for (const [policy, fn] of [['connect', '__isolane_socket'], ['fetch', '__isolane_fetch'], ['fs', '__isolane_fs']]) {
     const caps = capabilities({ globals: {}, [policy]: policy === 'fs' ? { root: tmpdir() } : tcpLocal }, new Set(), NO_REPORT);
