@@ -29,7 +29,7 @@ use std::sync::Arc;
 
 use frame::{read_frame, Writer};
 use proto::{fail, limit, ErrorCode, Failure, In, Out};
-use vm::{VmConfig, VmMsg};
+use vm::{Output, VmConfig, VmMsg};
 
 unsafe extern "C" {
     // rusty_v8's binding for v8::internal::SandboxIsEnabled().
@@ -194,27 +194,40 @@ fn make_web_snapshot(path: &str) -> ExitCode {
 }
 
 fn serve(lock_down: bool, memory_limit: Option<u64>, web_background: bool) -> ExitCode {
+    let lockdown = match start(lock_down, memory_limit, web_background) {
+        Ok(report) => report,
+        Err(exit) => return exit.into(),
+    };
+    let out = Arc::new(Writer::new(std::io::stdout()));
+    out.send(&Out::Ready {
+        protocol: proto::PROTOCOL_VERSION,
+        v8: v8::V8::get_version(),
+        sandbox_secure: sandbox_secure(),
+        lockdown,
+    });
+    let mut worker = Worker { out, vms: HashMap::new(), failed: HashMap::new() };
+    let mut stdin = BufReader::new(std::io::stdin().lock());
+    match worker.run(&mut stdin) {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(exit) => exit.into(),
+    }
+}
+
+/// Set the process up for guests: time zone, lockdown, V8, the memory
+/// limit. Reports which lockdown layers are in place.
+fn start(lock_down: bool, memory_limit: Option<u64>, web_background: bool) -> Result<lockdown::Report, Exit> {
     // Every guest sees UTC: the host's time zone (Date#getTimezoneOffset,
     // Intl's default zone) would say where the machine is. Set while the
     // process is still single-threaded, before ICU first reads it.
     std::env::set_var("TZ", "UTC");
-    if let Err(e) = lockdown::close_inherited_fds() {
-        eprintln!("isolane-worker: {e}");
-        return ExitCode::from(1);
-    }
+    lockdown::close_inherited_fds().map_err(|e| fatal(Exit::Startup, e))?;
     let mut status = memory_limit.and_then(|_| std::fs::File::open("/proc/self/status").ok());
     let none = lockdown::Level::None;
     // Lockdown order matters: Landlock before V8 starts threads, seccomp
     // (on all threads) after V8 has initialized. A layer the host lacks
     // reports None; a layer that is available but fails to apply is fatal.
     let landlock = if lock_down { lockdown::before_v8() } else { Ok(none) };
-    let landlock = match landlock {
-        Ok(level) => level,
-        Err(e) => {
-            eprintln!("isolane-worker: {e}");
-            return ExitCode::from(5);
-        }
-    };
+    let landlock = landlock.map_err(|e| fatal(Exit::Lockdown, e))?;
     init_v8();
     // The web platform's snapshot is embedded in release builds. Without
     // one (or with another build's), it's built when the first web VM wants
@@ -232,144 +245,167 @@ fn serve(lock_down: bool, memory_limit: Option<u64>, web_background: bool) -> Ex
     // of it in use).
     if let Some(bytes) = memory_limit {
         let baseline = status.as_mut().and_then(read_vm_data).unwrap_or(0) * 1024;
-        if let Err(e) = lockdown::memory_limit(baseline + bytes) {
-            eprintln!("isolane-worker: {e}");
-            return ExitCode::from(5);
-        }
+        lockdown::memory_limit(baseline + bytes).map_err(|e| fatal(Exit::Lockdown, e))?;
     }
     drop(status);
     if !sandbox_secure() && !cfg!(feature = "dev-prebuilt") {
-        eprintln!("isolane-worker: the V8 sandbox is not securely configured; refusing to run guest code");
-        return ExitCode::from(3);
+        return Err(fatal(
+            Exit::InsecureSandbox,
+            "the V8 sandbox is not securely configured; refusing to run guest code",
+        ));
     }
     let seccomp = if lock_down { lockdown::after_v8() } else { Ok(none) };
-    let seccomp = match seccomp {
-        Ok(level) => level,
-        Err(e) => {
-            eprintln!("isolane-worker: {e}");
-            return ExitCode::from(5);
-        }
-    };
+    let seccomp = seccomp.map_err(|e| fatal(Exit::Lockdown, e))?;
+    Ok(lockdown::Report { landlock, seccomp })
+}
 
-    let out = Arc::new(Writer::new(std::io::stdout()));
-    out.send(&Out::Ready {
-        protocol: proto::PROTOCOL_VERSION,
-        v8: v8::V8::get_version(),
-        sandbox_secure: sandbox_secure(),
-        lockdown: lockdown::Report { landlock, seccomp },
-    });
+/// How the worker exits when it can't go on. The supervisor tells an
+/// out-of-memory exit by its code (`OutOfMemory`, which it also defines);
+/// the others it reports as a crash, with the line the worker printed.
+#[derive(Clone, Copy)]
+pub enum Exit {
+    /// Couldn't set the process up (closing inherited descriptors).
+    Startup = 1,
+    /// Bad command-line arguments.
+    Usage = 2,
+    /// The V8 sandbox isn't securely configured.
+    InsecureSandbox = 3,
+    /// A corrupt frame or a message that breaks the protocol.
+    Protocol = 4,
+    /// A lockdown layer (or the memory limit) is available but failed.
+    Lockdown = 5,
+    /// V8 ran out of memory under the worker's memory limit (`vm::out_of_memory`).
+    OutOfMemory = 6,
+}
 
-    let mut vms: HashMap<u64, (Sender<VmMsg>, vm::Stopper)> = HashMap::new();
-    let mut failed: HashMap<u64, Failure> = HashMap::new();
-    let mut stdin = BufReader::new(std::io::stdin().lock());
-    loop {
-        let frame = match read_frame(&mut stdin) {
-            Ok(Some(f)) => f,
-            // Supervisor gone (EOF) or a corrupt stream: either way, stop.
-            Ok(None) => return ExitCode::SUCCESS,
-            Err(e) => {
-                eprintln!("isolane-worker: bad frame: {e}");
-                return ExitCode::from(4);
-            }
-        };
-        let (json, attached) = match frame::split(&frame) {
-            Ok(parts) => parts,
-            Err(e) => {
-                eprintln!("isolane-worker: bad frame: {e}");
-                return ExitCode::from(4);
-            }
-        };
-        let msg: In = match serde_json::from_slice(json) {
-            Ok(m) => m,
-            Err(e) => {
-                // A well-formed create whose config doesn't fit (a limit out
-                // of range): that isolate's evals fail, the worker carries on.
-                if let Some(vm) = create_id(json) {
-                    failed.insert(vm, fail(ErrorCode::Internal, format!("the isolate's config is invalid: {e}")));
+impl From<Exit> for ExitCode {
+    fn from(exit: Exit) -> ExitCode {
+        ExitCode::from(exit as u8)
+    }
+}
+
+/// Print why the worker is exiting; returns how.
+fn fatal(exit: Exit, why: impl std::fmt::Display) -> Exit {
+    eprintln!("isolane-worker: {why}");
+    exit
+}
+
+fn bad_frame(e: std::io::Error) -> Exit {
+    fatal(Exit::Protocol, format_args!("bad frame: {e}"))
+}
+
+fn bad_message(why: impl std::fmt::Display) -> Exit {
+    fatal(Exit::Protocol, format_args!("bad message: {why}"))
+}
+
+/// The worker's isolates, as the supervisor's messages create and drive them.
+struct Worker {
+    out: Output,
+    vms: HashMap<u64, (Sender<VmMsg>, vm::Stopper)>,
+    /// Isolates whose evals fail with this, from their create on.
+    failed: HashMap<u64, Failure>,
+}
+
+impl Worker {
+    /// Handle messages until the supervisor goes away (EOF), or breaks the
+    /// protocol.
+    fn run(&mut self, stdin: &mut impl std::io::Read) -> Result<(), Exit> {
+        while let Some(frame) = read_frame(stdin).map_err(bad_frame)? {
+            let (json, attached) = frame::split(&frame).map_err(bad_frame)?;
+            let msg: In = match serde_json::from_slice(json) {
+                Ok(m) => m,
+                Err(e) => {
+                    // A well-formed create whose config doesn't fit (a limit
+                    // out of range): that isolate's evals fail, the worker
+                    // carries on.
+                    let Some(vm) = create_id(json) else { return Err(bad_message(e)) };
+                    self.failed.insert(vm, fail(ErrorCode::Internal, format!("the isolate's config is invalid: {e}")));
                     continue;
                 }
-                eprintln!("isolane-worker: bad message: {e}");
-                return ExitCode::from(4);
+            };
+            if !attached.is_empty() && !matches!(msg, In::HostReply { .. }) {
+                return Err(bad_message("bytes attached to a message that takes none"));
             }
-        };
-        if !attached.is_empty() && !matches!(msg, In::HostReply { .. }) {
-            eprintln!("isolane-worker: bad message: bytes attached to a message that takes none");
-            return ExitCode::from(4);
+            self.handle(msg, attached)?;
         }
+        Ok(())
+    }
+
+    fn handle(&mut self, msg: In, attached: &[u8]) -> Result<(), Exit> {
         match msg {
-            In::Create { vm, limits, time, random, eval, wasm, web, base_url, functions, prelude, shims } => {
-                vm::init_shared_background(limits.worker_background_ms);
-                let (tx, rx) = mpsc::channel();
-                let config = VmConfig { limits, time, seed: random.seed, eval, wasm, web, base_url, functions, prelude, shims };
-                match vm::spawn(vm, config, rx, out.clone()) {
-                    Ok(stopper) => {
-                        vms.insert(vm, (tx, stopper));
-                    }
-                    // Out of threads or memory: this VM's evals fail, the
-                    // worker carries on.
-                    Err(e) => {
-                        failed.insert(vm, limit("workerMemoryBytes", format!("the isolate could not start: {e}")));
-                    }
-                }
-            }
-            In::Eval { vm, req, code, filename, last } => {
-                let refuse = |f: proto::Failure| {
-                    out.send(&Out::Result {
-                        req,
-                        ok: false,
-                        value: None,
-                        code: Some(f.code),
-                        message: Some(&f.message),
-                        guest: None,
-                        limit: f.limit,
-                        shim: None,
-                        usage: Default::default(),
-                    })
-                };
-                if let Some(failure) = failed.get(&vm) {
-                    refuse(failure.clone());
-                    continue;
-                }
-                let sent = vms.get(&vm).map(|(tx, _)| tx.send(VmMsg::Eval { req, code, filename, last }).is_ok());
-                if sent != Some(true) {
-                    refuse(fail(ErrorCode::IsolateClosed, "the isolate has been closed"));
-                }
-            }
+            In::Create { vm, config } => self.create(vm, config),
+            In::Eval { vm, req, code, filename, last } => self.eval(vm, req, VmMsg::Eval { req, code, filename, last }),
             In::HostReply { vm, call, ok, value, error, error_name, error_code, bin } => {
                 // The attached bytes, split as `bin` says, all of them.
                 let mut bytes = Vec::with_capacity(bin.len());
                 let mut rest = attached;
                 for (path, len) in bin {
                     if len > rest.len() {
-                        eprintln!("isolane-worker: bad message: host reply bytes overrun the frame");
-                        return ExitCode::from(4);
+                        return Err(bad_message("host reply bytes overrun the frame"));
                     }
                     let (b, r) = rest.split_at(len);
                     bytes.push((path, b.to_vec()));
                     rest = r;
                 }
                 if !rest.is_empty() {
-                    eprintln!("isolane-worker: bad message: unclaimed bytes in a host reply");
-                    return ExitCode::from(4);
+                    return Err(bad_message("unclaimed bytes in a host reply"));
                 }
-                if let Some((tx, _)) = vms.get(&vm) {
+                if let Some((tx, _)) = self.vms.get(&vm) {
                     let reply = vm::Reply { ok, value, error, error_name, error_code, bytes };
                     let _ = tx.send(VmMsg::HostReply { call, reply });
                 }
             }
             In::Abort { vm, req } => {
-                if let Some((_, stopper)) = vms.get(&vm) {
+                if let Some((_, stopper)) = self.vms.get(&vm) {
                     stopper.abort(req);
                 }
             }
             In::Dispose { vm } => {
-                failed.remove(&vm);
-                if let Some((tx, stopper)) = vms.remove(&vm) {
+                self.failed.remove(&vm);
+                if let Some((tx, stopper)) = self.vms.remove(&vm) {
                     let _ = tx.send(VmMsg::Dispose);
                     stopper.stop();
                 }
             }
         }
+        Ok(())
+    }
+
+    fn create(&mut self, vm: u64, config: VmConfig) {
+        vm::init_shared_background(config.limits.worker_background_ms);
+        let (tx, rx) = mpsc::channel();
+        match vm::spawn(vm, config, rx, self.out.clone()) {
+            Ok(stopper) => {
+                self.vms.insert(vm, (tx, stopper));
+            }
+            // Out of threads or memory: this VM's evals fail, the worker
+            // carries on.
+            Err(e) => {
+                self.failed.insert(vm, limit("workerMemoryBytes", format!("the isolate could not start: {e}")));
+            }
+        }
+    }
+
+    /// Queue an eval on its VM, or answer it with why the VM can't run it.
+    fn eval(&mut self, vm: u64, req: u64, eval: VmMsg) {
+        let failure = match self.failed.get(&vm) {
+            Some(failure) => failure.clone(),
+            None => match self.vms.get(&vm) {
+                Some((tx, _)) if tx.send(eval).is_ok() => return,
+                _ => fail(ErrorCode::IsolateClosed, "the isolate has been closed"),
+            },
+        };
+        self.out.send(&Out::Result {
+            req,
+            ok: false,
+            value: None,
+            code: Some(failure.code),
+            message: Some(&failure.message),
+            guest: None,
+            limit: failure.limit,
+            shim: None,
+            usage: Default::default(),
+        });
     }
 }
 
@@ -398,7 +434,7 @@ fn escape_test(probe: &str) -> ExitCode {
         // Landlock alone (no seccomp): opening a file must be refused.
         if let Err(e) = lockdown::before_v8() {
             eprintln!("{e}");
-            return ExitCode::from(5);
+            return Exit::Lockdown.into();
         }
         locked("LOCKED");
         return match std::fs::File::open("/etc/hostname") {
@@ -414,12 +450,12 @@ fn escape_test(probe: &str) -> ExitCode {
     }
     if let Err(e) = lockdown::before_v8() {
         eprintln!("{e}");
-        return ExitCode::from(5);
+        return Exit::Lockdown.into();
     }
     init_v8();
     if let Err(e) = lockdown::after_v8() {
         eprintln!("{e}");
-        return ExitCode::from(5);
+        return Exit::Lockdown.into();
     }
     locked("LOCKED");
     let path = CString::new("/etc/hostname").unwrap();
@@ -484,7 +520,7 @@ fn escape_test(probe: &str) -> ExitCode {
             }
             _ => {
                 eprintln!("unknown probe {probe}");
-                return ExitCode::from(2);
+                return Exit::Usage.into();
             }
         }
     };
@@ -512,7 +548,7 @@ fn main() -> ExitCode {
                 Ok(n) => memory_limit = Some(n),
                 Err(_) => {
                     eprintln!("isolane-worker: bad --memory-bytes {n}");
-                    return ExitCode::from(2);
+                    return Exit::Usage.into();
                 }
             }
         } else if mode.is_none() {
@@ -529,7 +565,7 @@ fn main() -> ExitCode {
             eprintln!(
                 "usage: isolane-worker [--serve | --self-check | --no-lockdown] [--memory-bytes=BYTES] [--prepare-web] | --make-web-snapshot=FILE (got {other})"
             );
-            ExitCode::from(2)
+            Exit::Usage.into()
         }
     }
 }

@@ -72,16 +72,36 @@ const VM_THREAD_STACK: usize = 4 << 20;
 
 /// An isolate's configuration, as `create` sends it (named as in the public
 /// config).
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct VmConfig {
+    #[serde(default)]
     pub limits: crate::limits::Limits,
+    /// The guest's wall clock.
+    #[serde(default)]
     pub time: crate::clock::Mode,
-    pub seed: Option<u64>,
+    #[serde(default)]
+    pub random: crate::proto::Random,
+    /// `eval` and `new Function`.
+    #[serde(default)]
     pub eval: bool,
+    /// Keep the WebAssembly global and allow compiling modules.
+    #[serde(default)]
     pub wasm: bool,
+    /// Install the WinterTC web platform globals (src/web/).
+    #[serde(default)]
     pub web: bool,
+    /// The web platform's base URL (`web.baseUrl`): relative URLs resolve
+    /// against it, and `location` exists.
     pub base_url: Option<String>,
+    /// Host functions, in the order host calls name them (by index).
+    #[serde(default)]
     pub functions: Vec<crate::proto::FunctionSpec>,
+    /// Trusted setup run in the context before guest code (the
+    /// supervisor's fetch/fs/connect wrappers, and `globals`).
     pub prelude: Option<String>,
+    /// The embedder's shims (`shims`), in the order they run.
+    #[serde(default)]
     pub shims: crate::proto::Shims,
 }
 
@@ -259,7 +279,7 @@ pub unsafe extern "C" fn out_of_memory(_location: *const std::ffi::c_char, _deta
         std::process::exit(OOM_EXIT_CODE);
     }
 }
-pub const OOM_EXIT_CODE: i32 = 6;
+pub const OOM_EXIT_CODE: i32 = crate::Exit::OutOfMemory as i32;
 
 // ---- the VM thread ----
 
@@ -328,7 +348,7 @@ impl Guard<'_> {
 fn vm_main(id: u64, config: VmConfig, rx: Receiver<VmMsg>, out: Output, stopper: Arc<StopperState>) {
     crate::limits::set(config.limits);
     crate::clock::set_mode(config.time);
-    SEED.with(|seed| seed.set(config.seed));
+    SEED.with(|seed| seed.set(config.random.seed));
     let timeout = config.limits.timeout();
     let cpu = config.limits.cpu();
     let mut params = v8::CreateParams::default();

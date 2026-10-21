@@ -13,39 +13,13 @@ pub const PROTOCOL_VERSION: u32 = 5;
 #[derive(Deserialize)]
 #[serde(tag = "t", rename_all = "camelCase")]
 pub enum In {
-    /// A new isolate. Fields are named as in the public config.
-    #[serde(rename_all = "camelCase")]
+    /// A new isolate, its config inline beside `vm`.
     Create {
         vm: u64,
-        #[serde(default)]
-        limits: crate::limits::Limits,
-        /// The guest's wall clock.
-        #[serde(default)]
-        time: crate::clock::Mode,
-        #[serde(default)]
-        random: Random,
-        /// `eval` and `new Function`.
-        #[serde(default)]
-        eval: bool,
-        /// Keep the WebAssembly global and allow compiling modules.
-        #[serde(default)]
-        wasm: bool,
-        /// Install the WinterTC web platform globals (src/web/).
-        #[serde(default)]
-        web: bool,
-        /// The web platform's base URL (`web.baseUrl`): relative URLs
-        /// resolve against it, and `location` exists.
-        base_url: Option<String>,
-        /// Host functions, in the order host calls name them (by index).
-        #[serde(default)]
-        functions: Vec<FunctionSpec>,
-        /// Trusted setup run in the context before guest code (the
-        /// supervisor's fetch/fs/connect wrappers, and `globals`).
-        prelude: Option<String>,
-        /// The embedder's shims (`shims`), in the order they run.
-        #[serde(default)]
-        shims: Shims,
+        #[serde(flatten)]
+        config: crate::vm::VmConfig,
     },
+    #[serde(rename_all = "camelCase")]
     Eval {
         vm: u64,
         req: u64,
@@ -309,7 +283,7 @@ pub enum Out<'a> {
     HostCall {
         vm: u64,
         call: u64,
-        /// The host function, by its index in `Create::functions`.
+        /// The host function, by its index in `VmConfig::functions`.
         #[serde(rename = "fn")]
         function: u32,
         args: &'a RawValue,
