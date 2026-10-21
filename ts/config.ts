@@ -42,6 +42,10 @@ export interface IsolateLimits {
   logLineBytes?: number;
   /** Source code per eval (UTF-8 bytes). Default 16 MiB. */
   codeBytes?: number;
+  /** Files in a program (`tenant.load`). Default 1,000. */
+  modules?: number;
+  /** A program's files together, with their paths (bytes). At most a frame. Default 32 MiB. */
+  moduleBytes?: number;
   /** Completion value per eval, as JSON. Default 16 MiB. */
   resultBytes?: number;
   /** Output of one decompression call (DecompressionStream). Default 128 MiB. */
@@ -122,6 +126,8 @@ export const DEFAULT_LIMITS = Object.freeze({
   logBytes: 1024 ** 2,
   logLineBytes: 16 * 1024,
   codeBytes: 16 * 1024 ** 2,
+  modules: 1_000,
+  moduleBytes: 32 * 1024 ** 2,
   resultBytes: 16 * 1024 ** 2,
   decompressedBytes: 128 * 1024 ** 2,
   pendingHostCalls: 1_000,
@@ -166,7 +172,7 @@ export const MAX_DURATION_MS = 2 ** 31 - 1;
 /** Every limit, with defaults filled in (`null` where a limit is off). */
 export type ResolvedLimits = { [K in keyof (Limits & RuntimeLimits)]-?: Exclude<(Limits & RuntimeLimits)[K], undefined> };
 
-const ISOLATE_LIMITS = new Set(['timeoutMs', 'cpuMs', 'startupCpuMs', 'heapBytes', 'timers', 'backgroundMs', 'logBytes', 'logLineBytes', 'codeBytes', 'resultBytes', 'decompressedBytes', 'pendingHostCalls', 'hostCalls', 'pendingHostCallBytes']);
+const ISOLATE_LIMITS = new Set(['timeoutMs', 'cpuMs', 'startupCpuMs', 'heapBytes', 'timers', 'backgroundMs', 'logBytes', 'logLineBytes', 'codeBytes', 'modules', 'moduleBytes', 'resultBytes', 'decompressedBytes', 'pendingHostCalls', 'hostCalls', 'pendingHostCallBytes']);
 const TENANT_LIMITS = new Set(['isolates', 'pendingEvals', 'workerMemoryBytes', 'idleMs', 'workerBackgroundMs', 'workerLifetimeMs', 'workerEvals']);
 const NULLABLE = new Set(['timeoutMs', 'cpuMs', 'startupCpuMs', 'heapBytes', 'backgroundMs', 'workerMemoryBytes', 'workerBackgroundMs', 'workerLifetimeMs', 'workerEvals']);
 const MINIMUM: Record<string, number> = { workerMemoryBytes: 64 * 1024 ** 2, heapBytes: 1024 ** 2 };
@@ -187,6 +193,8 @@ const MAXIMUM: Record<string, number> = {
   heapBytes: 4 * 1024 ** 3,
   pendingHostCalls: 2 ** 32 - 1,
   hostCalls: 2 ** 32 - 1,
+  // A program's files cross in one frame (64 MiB), with room for the rest.
+  moduleBytes: 64 * 1024 ** 2 - 64 * 1024,
 };
 
 export type Level = 'defaults' | 'tenant' | 'call';

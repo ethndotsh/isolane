@@ -53,6 +53,12 @@ async function typed() {
   // @ts-expect-error instances fields are named
   void rt.tenant('t').load('', { instances: { size: 2 } });
   rt.on('programLoad', (e) => void (e.durationMs satisfies number));
+  void rt.tenant('t').load(
+    { main: 'src/index.ts', files: { 'src/index.ts': 'export {}', 'logo.png': new Uint8Array(1) } },
+    { ts: { mode: 'transform', experimentalDecorators: true }, jsx: { runtime: 'classic', factory: 'h' }, define: { DEBUG: 'false' }, modules: { 'node:fs': './fs.js', 'isolane:kv': { get: (key: string) => key } } },
+  );
+  // @ts-expect-error ts.mode is strip or transform
+  void rt.tenant('t').load('', { ts: { mode: 'compile' } });
   void fromProgram;
   void loads;
   void total;

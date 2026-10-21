@@ -7,11 +7,12 @@ import { resolve as resolvePath } from 'node:path';
 import { resolve, validateConfig, validateLimits, type IsolateConfig, type ResolvedConfig, type ResolvedLimits, type RuntimeLimits } from './config.js';
 import { IsolaneError, abortedError, invalidConfig, limitError } from './errors.js';
 import { Emitter, HookChain, validateHooks, type Hooks, type RuntimeEvents } from './hooks.js';
-import { LOAD, OBSERVE, Program, USABLE, resolveInstances, type InstancesOptions } from './program.js';
+import { resolveModules, type ModuleLoadOptions, type ProgramSource } from './modules.js';
+import { LOAD, OBSERVE, Program, USABLE, resolveInstances, type InstancesOptions, type ProgramFiles } from './program.js';
 import { checkReturn, isStandardSchema, type StandardSchemaV1 } from './schema.js';
 import { resolveWorkerBinary } from './worker-binary.js';
 import { SpareWorker, TenantWorker, emptyUsage, exitCode, isOutOfMemory, type IsolateState, type ProgramSpec, type TenantUsage } from './worker-pool.js';
-import { WorkerProcess, meetsStrict, type IsolationInfo, type WorkerExit, type WorkerUsage } from './worker.js';
+import { WorkerProcess, meetsStrict, type IsolationInfo, type ModuleOptionsWire, type WorkerExit, type WorkerUsage } from './worker.js';
 
 /** What `isolationReport()` finds: the host's isolation, and whether strict mode accepts it. */
 export type IsolationReport = IsolationInfo & { meetsStrict: boolean };
@@ -55,8 +56,8 @@ export interface CallOptions<S extends AnySchema | undefined = undefined> {
 }
 
 /** Options for `tenant.load()`: an isolate's config for its instances, and the program's own. */
-export interface LoadOptions extends IsolateConfig {
-  /** The main module's path: its name in stack traces. Default `main.js`. */
+export interface LoadOptions extends IsolateConfig, ModuleLoadOptions {
+  /** For a single-module source: its path, and its name in stack traces. Default `main.js`. */
   filename?: string;
   /**
    * What `import { env } from 'isolane:env'` gives the program: a JSON
@@ -360,29 +361,27 @@ export class Runtime {
   }
 
   /** @internal Load a program for `tenant`: its first instance is evaluated before this resolves. */
-  async [LOAD_PROGRAM](tenant: string, source: string, options: LoadOptions): Promise<Program> {
-    if (typeof source !== 'string') {
-      throw invalidConfig('source', 'must be the main module\'s source (a string); multi-file programs ({ main, files }) are not supported yet');
-    }
+  async [LOAD_PROGRAM](tenant: string, source: string | ProgramSource, options: LoadOptions): Promise<Program> {
     if (options === null || typeof options !== 'object') throw invalidConfig('', 'load() options must be an object');
-    const { filename, env, instances, ...config } = options;
-    const main = checkFilename(filename) ?? 'main.js';
-    const spec: ProgramSpec = { id: this.#nextProgram++, env: checkEnv(env) };
+    const { filename, env, instances, modules, ts, jsx, define, ...config } = options;
+    const program = resolveModules(source, checkFilename(filename), { modules, ts, jsx, define });
+    const spec: ProgramSpec = { id: this.#nextProgram++, env: checkEnv(env), hostModules: program.hostModules };
     const pool = resolveInstances(instances);
     validateConfig(config, '', 'call');
     if (this.#closed) throw new IsolaneError('ERR_RUNTIME_CLOSED', 'isolane: the runtime is closed');
     const levels = resolve([this.#runtimeLayer(), this.#defaults, this.#tenantLayer(tenant), config], this.#limits);
-    const program = new Program({
+    const loaded = new Program({
       id: spec.id,
       tenant,
-      main,
-      files: Object.freeze({ [main]: source }),
+      main: program.main,
+      files: program.files,
+      options: program.options,
       instances: pool,
       create: () => this[CREATE](tenant, config, spec),
       chain: new HookChain(levels.hooks, this.#emitter, spec.id),
     });
-    await program.start();
-    return program;
+    await loaded.start();
+    return loaded;
   }
 
   // ---- internals ----
@@ -539,13 +538,17 @@ export class Tenant {
   }
 
   /**
-   * Load a program: `source` is an ES module, evaluated once per instance
-   * (its setup, which can't do I/O and has `limits.startupCpuMs`), whose
-   * exports `program.call(name, args)` invokes. Instances are kept warm
+   * Load a program: `source` is an ES module's code, or `{ main, files }`
+   * for a program of several files (modules that import each other,
+   * TypeScript, JSX, JSON, packages under node_modules), resolved and
+   * compiled in the worker. The main module is evaluated once per instance
+   * (its setup, which can't do I/O and has `limits.startupCpuMs`), and
+   * `program.call(name, args)` invokes its exports. Instances are kept warm
    * and reused (`instances`). Resolves once the first instance has loaded,
-   * so a syntax error or a throw in its top-level code rejects here.
+   * so a syntax error, an import that doesn't resolve, or a throw in
+   * top-level code rejects here.
    */
-  load(source: string, options?: LoadOptions): Promise<Program> {
+  load(source: string | ProgramSource, options?: LoadOptions): Promise<Program> {
     return this.#runtime[LOAD_PROGRAM](this.name, source, options ?? {});
   }
 
@@ -687,10 +690,10 @@ export class Isolate {
   }
 
   /** @internal Load a program into this isolate (a program's instance). */
-  async [LOAD](main: string, files: Readonly<Record<string, string>>): Promise<unknown> {
+  async [LOAD](main: string, files: Readonly<ProgramFiles>, options: ModuleOptionsWire): Promise<unknown> {
     this.#checkOpen();
     await this.#ready();
-    return this.#worker.load(this.#state, this.#nextReq(), main, files);
+    return this.#worker.load(this.#state, this.#nextReq(), main, files, options);
   }
 
   /** @internal Whether a program can route another call here. */

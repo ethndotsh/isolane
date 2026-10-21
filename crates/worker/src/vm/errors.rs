@@ -131,7 +131,8 @@ fn node<'s>(
     let message = string_prop(scope, obj, "message", max)
         .or_else(|| js::text(scope, value, max))
         .unwrap_or_default();
-    let stack = string_prop(scope, obj, "stack", max);
+    let stack =
+        string_prop(scope, obj, "stack", max).map(|stack| super::module::map_stack(scope, stack));
     let mut cause = None;
     if depth + 1 < MAX_DEPTH && *nodes > 0 && has_own(scope, obj, "cause") {
         if let Some(c) = get(scope, obj, "cause") {
@@ -240,7 +241,8 @@ fn properties<'s>(
 }
 
 /// Where code failed to compile, from V8's message for it, and the caret
-/// line that goes under its source line.
+/// line that goes under its source line. A program's transformed module
+/// is mapped back to its original file.
 pub(super) fn compile_location(
     scope: &mut v8::PinScope,
     message: v8::Local<v8::Message>,
@@ -252,31 +254,47 @@ pub(super) fn compile_location(
     let line = message.get_line_number(scope)? as u32;
     let start = message.get_start_column();
     let end = message.get_end_column().max(start + 1);
-    let mut caret = String::new();
+    if let Some(found) = super::module::original_location(scope, &file, line, start, end) {
+        return Some(found);
+    }
     let source_line = message
         .get_source_line(scope)
-        .map(|s| s.to_rust_string_lossy(scope))
-        .map(|src| {
-            // A window around the column (minified code has very long lines).
-            let chars: Vec<char> = src.chars().collect();
-            let from = start.saturating_sub(SOURCE_WINDOW / 2).min(chars.len());
-            let to = (from + SOURCE_WINDOW).min(chars.len());
-            let mut shown: String = chars[from..to].iter().collect();
-            caret = chars[from..start.min(to)]
-                .iter()
-                .map(|&c| if c == '\t' { '\t' } else { ' ' })
-                .collect();
-            if from > 0 {
-                shown.insert(0, '…');
-                caret.insert(0, ' ');
-            }
-            if to < chars.len() {
-                shown.push('…');
-            }
-            caret.push_str(&"^".repeat((end.min(to).saturating_sub(start.min(to))).max(1)));
-            shown
-        });
-    Some((
+        .map(|s| s.to_rust_string_lossy(scope));
+    Some(location(file, line, start, end, source_line.as_deref()))
+}
+
+/// A location, and its caret line: `start` and `end` are 0-based columns
+/// (UTF-16 units) of `source_line`, the code at `line` of `file`.
+pub(super) fn location(
+    file: String,
+    line: u32,
+    start: usize,
+    end: usize,
+    source_line: Option<&str>,
+) -> (Location, String) {
+    let end = end.max(start + 1);
+    let mut caret = String::new();
+    let source_line = source_line.map(|src| {
+        // A window around the column (minified code has very long lines).
+        let chars: Vec<char> = src.chars().collect();
+        let from = start.saturating_sub(SOURCE_WINDOW / 2).min(chars.len());
+        let to = (from + SOURCE_WINDOW).min(chars.len());
+        let mut shown: String = chars[from..to].iter().collect();
+        caret = chars[from..start.min(to)]
+            .iter()
+            .map(|&c| if c == '\t' { '\t' } else { ' ' })
+            .collect();
+        if from > 0 {
+            shown.insert(0, '…');
+            caret.insert(0, ' ');
+        }
+        if to < chars.len() {
+            shown.push('…');
+        }
+        caret.push_str(&"^".repeat((end.min(to).saturating_sub(start.min(to))).max(1)));
+        shown
+    });
+    (
         Location {
             file,
             line,
@@ -284,7 +302,7 @@ pub(super) fn compile_location(
             source_line,
         },
         caret,
-    ))
+    )
 }
 
 /// A compile error's stack, Node's way: where, the line and a caret, then

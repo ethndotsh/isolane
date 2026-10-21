@@ -10,6 +10,7 @@ import { workerLimits, type ResolvedConfig, type ResolvedLimits, type ResolvedSh
 import { IsolaneError, abortedError, invalidConfig, isIsolaneErrorCode, limitError, type IsolaneErrorCode } from './errors.js';
 import { MAX_FRAME, fits } from './frame.js';
 import type { HookChain } from './hooks.js';
+import type { ProgramFiles } from './program.js';
 import type { HostContext, HostEntry } from './host.js';
 import {
   OOM_EXIT_CODE,
@@ -20,6 +21,7 @@ import {
   type WorkerHandlers,
   type WorkerMessage,
   type WorkerUsage,
+  type ModuleOptionsWire,
 } from './worker.js';
 
 /**
@@ -241,6 +243,8 @@ export interface IsolateState {
 export interface ProgramSpec {
   readonly id: number;
   readonly env: Readonly<Record<string, unknown>>;
+  /** Host modules (`modules: { 'isolane:kv': { get } }`): each one's functions. */
+  readonly hostModules?: readonly { readonly specifier: string; readonly entries: readonly HostEntry[] }[];
 }
 
 /** `program` in an event, for an isolate that is a program's instance. */
@@ -414,7 +418,9 @@ export class TenantWorker {
     } catch (err) {
       throw err instanceof TypeError ? invalidConfig('', (err as Error).message.replace(/^isolane: /, '')) : err;
     }
-    const functions = [...config.host, ...caps.entries];
+    const moduleOf = new Map<HostEntry, string>();
+    for (const { specifier, entries } of program?.hostModules ?? []) for (const entry of entries) moduleOf.set(entry, specifier);
+    const functions = [...config.host, ...caps.entries, ...moduleOf.keys()];
     const inEnv = new Set<HostEntry>(program ? config.host : []);
     const state: IsolateState = {
       id,
@@ -443,7 +449,11 @@ export class TenantWorker {
       wasm: config.wasm,
       web: config.web !== false,
       baseUrl: config.web ? config.web.baseUrl : undefined,
-      functions: functions.map((f) => (inEnv.has(f) ? { path: f.path, sync: f.sync, env: true } : { path: f.path, sync: f.sync })),
+      functions: functions.map((f) => {
+        const module = moduleOf.get(f);
+        if (module !== undefined) return { path: f.path, sync: f.sync, module };
+        return inEnv.has(f) ? { path: f.path, sync: f.sync, env: true } : { path: f.path, sync: f.sync };
+      }),
       prelude: caps.prelude,
       shims: config.shims,
       env: program ? JSON.stringify(program.env) : undefined,
@@ -456,15 +466,40 @@ export class TenantWorker {
    * them, under the setup rules. `files` maps paths to module sources;
    * `main` is the entry. Resolves once setup is done.
    */
-  load(state: IsolateState, req: number, main: string, files: Readonly<Record<string, string>>, signal?: AbortSignal): Promise<unknown> {
-    // A frame carries at most 64 MiB, as for an eval's code.
-    const codeBytes = Math.min(state.limits.codeBytes, MAX_FRAME - 64 * 1024);
-    let bytes = 0;
-    for (const [path, source] of Object.entries(files)) bytes += Buffer.byteLength(path, 'utf8') + Buffer.byteLength(source, 'utf8');
-    if (bytes > codeBytes) {
-      return Promise.reject(this.#limit('codeBytes', `the program is larger than ${codeBytes} bytes`, state.id));
+  load(state: IsolateState, req: number, main: string, files: Readonly<ProgramFiles>, options: ModuleOptionsWire, signal?: AbortSignal): Promise<unknown> {
+    const paths = Object.keys(files);
+    if (paths.length > state.limits.modules) {
+      return Promise.reject(this.#limit('modules', `the program has ${paths.length} files, more than ${state.limits.modules}`, state.id));
     }
-    return this.#submit(state, req, { t: 'load', vm: state.id, req, main, files: { ...files } }, [], signal);
+    // A frame carries at most 64 MiB (moduleBytes can't be set past it).
+    const moduleBytes = state.limits.moduleBytes;
+    const text: Record<string, string> = {};
+    const bin: [string, number][] = [];
+    const attached: Uint8Array[] = [];
+    let bytes = 0;
+    for (const path of paths) {
+      const source = files[path] as string | Uint8Array;
+      bytes += Buffer.byteLength(path, 'utf8');
+      if (typeof source === 'string') {
+        text[path] = source;
+        bytes += Buffer.byteLength(source, 'utf8');
+      } else {
+        bin.push([path, source.byteLength]);
+        attached.push(source);
+        bytes += source.byteLength;
+      }
+    }
+    if (bytes > moduleBytes) {
+      return Promise.reject(this.#limit('moduleBytes', `the program's files are larger than ${moduleBytes} bytes`, state.id));
+    }
+    // Text crosses as JSON, which escaping can make larger than the text.
+    const attachedBytes = attached.reduce((n, b) => n + b.byteLength, 0);
+    if (!fits(Buffer.byteLength(JSON.stringify(text), 'utf8') + 64 * 1024, attachedBytes)) {
+      return Promise.reject(this.#limit('moduleBytes', 'the program\'s files, as JSON, are larger than a frame carries (64 MiB)', state.id));
+    }
+    const frame: WorkerCommand = { t: 'load', vm: state.id, req, main, files: text, options };
+    if (bin.length) frame.bin = bin;
+    return this.#submit(state, req, frame, attached, signal);
   }
 
   /** `last`: the isolate closes after this eval (a one-shot run), so the

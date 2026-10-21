@@ -93,12 +93,12 @@ test('a program that fails to load rejects load with what went wrong, and where'
   assert.equal(rejected.code, 'ERR_GUEST_EXCEPTION');
   assert.equal(rejected.guest.message, 'later');
 
-  // Imports between files come with multi-file programs; only isolane:env resolves.
+  // A single-module program has no other files to import (multi-file programs: modules.test.mjs).
   const imported = await load('import x from "./other.js"; export default x;').catch((err) => err);
   assert.equal(imported.code, 'ERR_GUEST_EXCEPTION');
-  assert.match(imported.message, /Cannot import "\.\/other\.js"/);
+  assert.match(imported.message, /Cannot find module "\.\/other\.js"/);
 
-  await assert.rejects(load({ main: 'a.js', files: {} }), (err) => code('ERR_INVALID_CONFIG')(err) && /multi-file/.test(err.message));
+  await assert.rejects(load({ main: 'a.js', files: {} }), (err) => code('ERR_INVALID_CONFIG')(err) && /source\.main/.test(err.message));
   await assert.rejects(load('export {}', { filename: 'isolane:env' }), code('ERR_INVALID_CONFIG'));
   await assert.rejects(load('export {}', { nope: 1 }), code('ERR_INVALID_CONFIG'));
 });
@@ -109,10 +109,11 @@ test('import.meta.url is the module\'s path as a file: URL', async (t) => {
   assert.equal(await program.call('where'), 'file:///src/my%20app.js');
 });
 
-test('dynamic import() is refused', async (t) => {
-  const program = await load('export async function f(name) { try { await import(name); } catch (e) { return e.name + ": " + e.message; } }');
+test('dynamic import() loads built-in modules too', async (t) => {
+  const program = await load('export async function f(name) { try { return Object.keys(await import(name)); } catch (e) { return e.name + ": " + e.message; } }');
   t.after(() => program.close());
-  assert.equal(await program.call('f', ['isolane:env']), 'TypeError: Cannot import "isolane:env": dynamic import() isn\'t supported');
+  assert.deepEqual(await program.call('f', ['isolane:env']), ['env']);
+  assert.match(await program.call('f', ['./other.js']), /^TypeError: Cannot find module/);
 });
 
 test('setup can\'t do I/O: fetch, connect, fs, and host functions fail with ERR_SETUP_IO', async (t) => {

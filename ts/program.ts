@@ -9,7 +9,7 @@
 import { IsolaneError, abortedError, invalidConfig, limitError } from './errors.js';
 import type { HookChain } from './hooks.js';
 import type { StandardSchemaV1 } from './schema.js';
-import type { WorkerUsage } from './worker.js';
+import type { ModuleOptionsWire, WorkerUsage } from './worker.js';
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type AnySchema = StandardSchemaV1<any, any>;
@@ -22,13 +22,16 @@ export const USABLE = Symbol('usable');
 /** Be told what an isolate's work costs (internal to Isolate). */
 export const OBSERVE = Symbol('observe');
 
+/** A program's files: module sources (or other files: JSON, text, bytes) by path. */
+export type ProgramFiles = Record<string, string | Uint8Array>;
+
 /** What a program needs of an isolate. */
 export interface Instance {
   readonly id: number;
   readonly tenant: string;
   call<S extends AnySchema | undefined = undefined>(name: string, args?: readonly unknown[], options?: { returns?: S; signal?: AbortSignal }): Promise<ResultOf<S>>;
   close(): void;
-  [LOAD](main: string, files: Readonly<Record<string, string>>): Promise<unknown>;
+  [LOAD](main: string, files: Readonly<ProgramFiles>, options: ModuleOptionsWire): Promise<unknown>;
   readonly [USABLE]: boolean;
   [OBSERVE](onUsage: (usage: WorkerUsage) => void): void;
 }
@@ -123,7 +126,9 @@ export interface ProgramInit {
   id: number;
   tenant: string;
   main: string;
-  files: Readonly<Record<string, string>>;
+  files: Readonly<ProgramFiles>;
+  /** How its modules are resolved and transformed. */
+  options: ModuleOptionsWire;
   instances: ResolvedInstances;
   /** A new isolate for an instance (it may throw: limits, quarantine, a closed runtime). */
   create: () => Instance;
@@ -139,7 +144,8 @@ export class Program {
   readonly tenant: string;
   readonly id: number;
   #main: string;
-  #files: Readonly<Record<string, string>>;
+  #files: Readonly<ProgramFiles>;
+  #modules: ModuleOptionsWire;
   #options: ResolvedInstances;
   #create: () => Instance;
   #chain: HookChain;
@@ -159,6 +165,7 @@ export class Program {
     this.id = init.id;
     this.#main = init.main;
     this.#files = init.files;
+    this.#modules = init.options;
     this.#options = init.instances;
     this.#create = init.create;
     this.#chain = init.chain;
@@ -324,7 +331,7 @@ export class Program {
       instance[OBSERVE]((u) => {
         if (u.cpuUs !== undefined) this.#usage.cpuMs += u.cpuUs / 1000;
       });
-      await instance[LOAD](this.#main, this.#files);
+      await instance[LOAD](this.#main, this.#files, this.#modules);
       this.#usage.loads++;
       this.#chain.emit('programLoad', { tenant: this.tenant, program: this.id, isolate: instance.id, filename: this.#main, durationMs: performance.now() - started });
     } catch (err) {

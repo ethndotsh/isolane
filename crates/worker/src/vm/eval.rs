@@ -81,6 +81,20 @@ fn compile_failure(tc: &mut v8::PinnedRef<v8::TryCatch<v8::HandleScope>>) -> Fai
     f
 }
 
+/// `ERR_GUEST_EXCEPTION` for a program that didn't load: with where, for a
+/// module that didn't compile.
+fn load_failure(tc: &mut v8::PinnedRef<v8::TryCatch<v8::HandleScope>>) -> Failure {
+    let Some(exception) = tc.exception() else {
+        return fail(ErrorCode::GuestException, "unknown error");
+    };
+    let mut f = guest_failure(tc, exception);
+    if let (Some(guest), Some((location, caret))) = (f.guest.as_mut(), module::take_failed_at(tc)) {
+        errors::with_location(guest, location, &caret);
+        f.message = clip(guest.stack.clone().unwrap_or_default());
+    }
+    f
+}
+
 /// `ERR_SHIM`: the embedder's shim failed, not the guest's code.
 pub(super) fn shim_failure(shim: &ShimRef, what: String) -> Failure {
     let mut f = fail(
@@ -261,10 +275,13 @@ fn run(
             };
             value
         }
-        Job::Module { main, files } => match module::load(tc, main, files) {
+        Job::Module {
+            main,
+            files,
+            options,
+        } => match module::load(tc, main, files, options) {
             Ok(value) => value,
-            Err(LoadError::Compile) => return EvalEnd::Done(Err(compile_failure(tc))),
-            Err(LoadError::Threw) => return EvalEnd::Done(Err(guest_error(tc))),
+            Err(LoadError::Threw) => return EvalEnd::Done(Err(load_failure(tc))),
             Err(LoadError::Failed(f)) => return EvalEnd::Done(Err(f)),
         },
         Job::Call { name, args, bytes } => {

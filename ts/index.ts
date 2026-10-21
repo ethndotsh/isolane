@@ -14,7 +14,8 @@
 export { Runtime, Tenant, Isolate } from './runtime.js';
 export type { CallOptions, EvalOptions, IsolationReport, LoadOptions, RunConfig, RuntimeOptions } from './runtime.js';
 export { Program } from './program.js';
-export type { InstancesOptions, ProgramUsage } from './program.js';
+export type { InstancesOptions, ProgramFiles, ProgramUsage } from './program.js';
+export type { JsxOptions, ModuleLoadOptions, ProgramSource, TsOptions } from './modules.js';
 export { DEFAULT_LIMITS, DEFAULT_POLICY_LIMITS } from './config.js';
 export type { IsolateConfig, IsolateLimits, Limits, RuntimeLimits, TenantLimits, Shim, ShimsConfig, TimeConfig, WebConfig } from './config.js';
 export { hostFunction } from './host.js';

@@ -26,8 +26,8 @@ export type WorkerCommand =
       wasm: boolean;
       web: boolean;
       baseUrl?: string;
-      /** `env`: under the program's env object, not the global. */
-      functions: { path: readonly string[]; sync: boolean; env?: true }[];
+      /** `env`: under the program's env object, not the global; `module`: an export of that host module. */
+      functions: { path: readonly string[]; sync: boolean; env?: true; module?: string }[];
       prelude?: string;
       shims: ResolvedShims;
       /** A program's env, as JSON text (an object). */
@@ -40,8 +40,12 @@ export type WorkerCommand =
       req: number;
       /** The main module's path in `files`. */
       main: string;
-      /** Module sources by path. */
+      /** Module sources by path (text files; bytes go in `bin`). */
       files: Record<string, string>;
+      /** Files sent as bytes: `[path, length]`, their bytes attached in order. */
+      bin?: [string, number][];
+      /** How the modules are resolved and transformed. */
+      options?: ModuleOptionsWire;
     }
   | {
       t: 'call';
@@ -69,8 +73,17 @@ export type WorkerCommand =
   | { t: 'abort'; vm: number; req: number }
   | { t: 'dispose'; vm: number };
 
+/** How a program's modules are resolved and transformed, as the worker takes it. */
+export interface ModuleOptionsWire {
+  ts?: { mode?: 'strip' | 'transform'; decorators?: boolean; emitDecoratorMetadata?: boolean };
+  jsx?: { runtime?: 'automatic' | 'classic'; importSource?: string; factory?: string; fragment?: string; development?: boolean };
+  define?: [string, string][];
+  /** What a specifier resolves to instead: a file of the program, another specifier, or the program's host module of that name. */
+  aliases?: Record<string, { file: string } | { specifier: string } | 'host'>;
+}
+
 /** The protocol version this library speaks; a worker reporting another is refused. */
-export const PROTOCOL_VERSION = 7;
+export const PROTOCOL_VERSION = 8;
 
 /**
  * Input queued for a worker that it hasn't read. A worker reads its input

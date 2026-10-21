@@ -7,7 +7,7 @@ use serde_json::value::RawValue;
 
 /// The protocol version. The worker reports it in `ready`; a supervisor
 /// that speaks another version refuses the worker.
-pub const PROTOCOL_VERSION: u32 = 7;
+pub const PROTOCOL_VERSION: u32 = 8;
 
 /// Supervisor → worker.
 #[derive(Deserialize)]
@@ -40,8 +40,16 @@ pub enum In {
         req: u64,
         /// The main module's path in `files`.
         main: String,
-        /// Module sources by path (their names in stack traces).
+        /// Module sources by path (their names in stack traces). Files sent
+        /// as bytes are in `bin` instead.
         files: std::collections::BTreeMap<String, String>,
+        /// Files sent as bytes, in the order their bytes follow the frame's
+        /// JSON: `[path, length]`.
+        #[serde(default)]
+        bin: Vec<(String, usize)>,
+        /// How the program's modules are resolved and transformed.
+        #[serde(default)]
+        options: ModuleOptions,
     },
     /// Call the function the isolate's code defined as `name` (a program's
     /// export), with arguments as data: nothing is compiled. Runs and is
@@ -104,6 +112,94 @@ pub struct FunctionSpec {
     /// Under the program's `env` object (`isolane:env`), not the global.
     #[serde(default)]
     pub env: bool,
+    /// An export of the program's host module with this specifier
+    /// (`modules: { 'isolane:kv': { get } }`), not on the global.
+    #[serde(default)]
+    pub module: Option<String>,
+}
+
+/// How a program's modules are resolved and transformed (`tenant.load`'s
+/// `ts`, `jsx`, `define`, and `modules` options).
+#[derive(Deserialize, Serialize, Default, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct ModuleOptions {
+    #[serde(default)]
+    pub ts: TsOptions,
+    #[serde(default)]
+    pub jsx: JsxOptions,
+    /// Compile-time constants, as esbuild's `define`: an identifier or
+    /// member expression, and the expression that replaces it.
+    #[serde(default)]
+    pub define: Vec<(String, String)>,
+    /// Specifiers resolved to something other than what they name.
+    #[serde(default)]
+    pub aliases: std::collections::BTreeMap<String, Alias>,
+}
+
+#[derive(Deserialize, Serialize, Default, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum TsMode {
+    /// Remove types only, refusing syntax that has runtime meaning (enums,
+    /// namespaces with values, parameter properties), as Node does.
+    #[default]
+    Strip,
+    /// Compile that syntax too.
+    Transform,
+}
+
+#[derive(Deserialize, Serialize, Default, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct TsOptions {
+    #[serde(default)]
+    pub mode: TsMode,
+    /// Legacy (`experimentalDecorators`) decorators, in transform mode.
+    #[serde(default)]
+    pub decorators: bool,
+    /// With `decorators`: `emitDecoratorMetadata`.
+    #[serde(default)]
+    pub emit_decorator_metadata: bool,
+}
+
+#[derive(Deserialize, Serialize, Default, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum JsxRuntime {
+    /// `jsx()` calls imported from `<importSource>/jsx-runtime`.
+    #[default]
+    Automatic,
+    /// Calls to a factory (`React.createElement`) in scope.
+    Classic,
+}
+
+#[derive(Deserialize, Serialize, Default, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct JsxOptions {
+    #[serde(default)]
+    pub runtime: JsxRuntime,
+    /// Automatic runtime: the package `jsx-runtime` comes from. Default `react`.
+    #[serde(default)]
+    pub import_source: Option<String>,
+    /// Classic runtime: the element and fragment factories. Default
+    /// `React.createElement` and `React.Fragment`.
+    #[serde(default)]
+    pub factory: Option<String>,
+    #[serde(default)]
+    pub fragment: Option<String>,
+    /// The development runtime (`jsx-dev-runtime`, with source locations).
+    #[serde(default)]
+    pub development: bool,
+}
+
+/// What an aliased specifier resolves to.
+#[derive(Deserialize, Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub enum Alias {
+    /// A file of the program, by its path.
+    File(String),
+    /// Another specifier, resolved as if the import had named it.
+    Specifier(String),
+    /// The program's host module of that name (its functions are the
+    /// `FunctionSpec`s with this `module`).
+    Host,
 }
 
 /// Trusted embedder code run around guest code. `setup` runs once, after

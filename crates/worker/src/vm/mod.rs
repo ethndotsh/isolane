@@ -22,6 +22,7 @@ mod eval;
 mod host_call;
 mod mailbox;
 mod module;
+pub(crate) use module::{Source, Tree};
 mod watchdog;
 
 use std::cell::{Cell, RefCell};
@@ -181,7 +182,9 @@ pub enum Job {
     /// (`main`, a path in `files`) under the setup rules.
     Module {
         main: String,
-        files: std::collections::BTreeMap<String, String>,
+        /// Its files (or why they can't be a program's).
+        files: Result<std::sync::Arc<module::Tree>, String>,
+        options: crate::proto::ModuleOptions,
     },
     /// Call the function the isolate's code defined as `name` (see
     /// `eval::handler`), with `args` (a JSON array) and the byte arguments

@@ -84,6 +84,18 @@ pub(super) fn new_context(
         run_internal(scope, "isolane:prelude.js", prelude)
             .map_err(|e| fail(ErrorCode::IsolateRetired, e))?;
     }
+    if config.env.is_some() {
+        // A program's `cloudflare:sockets` exports the Sockets API's
+        // `connect`, as the prelude left it, whatever guest code later does
+        // to the global.
+        let key = js::short_string(scope, "connect");
+        let connect = global
+            .get(scope, key.into())
+            .and_then(|c| v8::Local::<v8::Function>::try_from(c).ok());
+        if let Some(connect) = connect {
+            super::module::set_connect(scope, connect);
+        }
+    }
     if config.web {
         // The web platform's hooks for the prelude to hand over the
         // brokers: gone before guest code runs, whether or not they were used.
@@ -221,28 +233,36 @@ fn install_functions(
     // Namespaces this VM made, by root and path: a host namespace replaces
     // whatever value had its name (the configuration chose it), and is
     // never merged into an existing object.
-    let mut namespaces: Vec<(bool, Vec<String>, v8::Local<v8::Object>)> = Vec::new();
+    let mut namespaces: Vec<(Root, Vec<String>, v8::Local<v8::Object>)> = Vec::new();
     for (index, spec) in config.functions.iter().enumerate() {
         let Some((name, parents)) = spec.path.split_last() else {
             return Err("vm setup failed: a host function with an empty path".into());
         };
-        let mut holder = match (spec.env, env) {
-            (false, _) => global,
-            (true, Some(env)) => env,
-            (true, None) => return Err("vm setup failed: an env function without an env".into()),
+        // Where its path starts: the global, the program's env, or a host
+        // module's exports (`root` tells their namespaces apart).
+        let (root, mut holder) = match (&spec.module, spec.env, env) {
+            (Some(specifier), _, _) => (
+                Root::Module(specifier),
+                super::module::host_module_exports(scope, specifier),
+            ),
+            (None, false, _) => (Root::Global, global),
+            (None, true, Some(env)) => (Root::Env, env),
+            (None, true, None) => {
+                return Err("vm setup failed: an env function without an env".into())
+            }
         };
         for depth in 1..=parents.len() {
             let prefix = &parents[..depth];
             let found = namespaces
                 .iter()
-                .find(|(in_env, p, _)| *in_env == spec.env && p.as_slice() == prefix);
+                .find(|(at, p, _)| *at == root && p.as_slice() == prefix);
             holder = match found {
                 Some((_, _, obj)) => *obj,
                 None => {
                     let obj = v8::Object::new(scope);
                     let key = js::short_string(scope, &prefix[depth - 1]);
                     holder.set(scope, key.into(), obj.into());
-                    namespaces.push((spec.env, prefix.to_vec(), obj));
+                    namespaces.push((root, prefix.to_vec(), obj));
                     obj
                 }
             };
@@ -264,4 +284,13 @@ fn install_functions(
         ns.set_integrity_level(scope, v8::IntegrityLevel::Frozen);
     }
     Ok(())
+}
+
+/// Where a host function's path is rooted.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Root<'a> {
+    Global,
+    Env,
+    /// A host module, by specifier.
+    Module(&'a str),
 }

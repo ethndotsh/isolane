@@ -349,7 +349,12 @@ impl Worker {
                     continue;
                 }
             };
-            if !attached.is_empty() && !matches!(msg, In::HostReply { .. } | In::Call { .. }) {
+            if !attached.is_empty()
+                && !matches!(
+                    msg,
+                    In::HostReply { .. } | In::Call { .. } | In::Load { .. }
+                )
+            {
                 return Err(bad_message("bytes attached to a message that takes none"));
             }
             self.handle(msg, attached)?;
@@ -382,13 +387,29 @@ impl Worker {
                 req,
                 main,
                 files,
+                bin,
+                options,
             } => {
+                let bytes = split_attached(attached, bin)
+                    .ok_or_else(|| bad_message("load bytes don't match the frame"))?;
+                let mut tree: std::collections::BTreeMap<String, vm::Source> = files
+                    .into_iter()
+                    .map(|(path, text)| (path, vm::Source::Text(text)))
+                    .collect();
+                for (path, data) in bytes {
+                    tree.insert(path, vm::Source::Bytes(data));
+                }
+                let files = vm::Tree::new(tree).map(std::sync::Arc::new);
                 self.eval(
                     vm,
                     req,
                     VmMsg::Eval {
                         req,
-                        job: Job::Module { main, files },
+                        job: Job::Module {
+                            main,
+                            files,
+                            options,
+                        },
                         last: false,
                     },
                 );
