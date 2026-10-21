@@ -44,6 +44,7 @@ Agreed October 2026:
    - code and wasm caches;
    - shims.
    The API shape is open: `tenant.deploy()` reads oddly, so find a better surface first.
+   Researched (October 2026): `docs/deployments.md` surveys other platforms and recommends `tenant.load()` returning a `Program` (`call`, `fetch`, `close`), with `isolate.call` and `isolate.fetch` beneath it, plus a six-phase build plan. Awaiting a decision before building.
 5. **Soon after, in no fixed order**:
    - the security gates (Fuzzilli, Temporal audit, external review);
    - more limits and worker recycling;
