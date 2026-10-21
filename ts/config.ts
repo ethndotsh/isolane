@@ -48,6 +48,12 @@ export interface IsolateLimits {
   moduleBytes?: number;
   /** Completion value per eval, as JSON. Default 16 MiB. */
   resultBytes?: number;
+  /**
+   * A `program.fetch` request's body, and its response's: each is
+   * buffered whole, and one larger fails the call with ERR_LIMIT. Default
+   * 16 MiB.
+   */
+  bodyBytes?: number;
   /** Output of one decompression call (DecompressionStream). Default 128 MiB. */
   decompressedBytes?: number;
   /**
@@ -129,6 +135,7 @@ export const DEFAULT_LIMITS = Object.freeze({
   modules: 1_000,
   moduleBytes: 32 * 1024 ** 2,
   resultBytes: 16 * 1024 ** 2,
+  bodyBytes: 16 * 1024 ** 2,
   decompressedBytes: 128 * 1024 ** 2,
   pendingHostCalls: 1_000,
   hostCalls: 10_000,
@@ -172,7 +179,7 @@ export const MAX_DURATION_MS = 2 ** 31 - 1;
 /** Every limit, with defaults filled in (`null` where a limit is off). */
 export type ResolvedLimits = { [K in keyof (Limits & RuntimeLimits)]-?: Exclude<(Limits & RuntimeLimits)[K], undefined> };
 
-const ISOLATE_LIMITS = new Set(['timeoutMs', 'cpuMs', 'startupCpuMs', 'heapBytes', 'timers', 'backgroundMs', 'logBytes', 'logLineBytes', 'codeBytes', 'modules', 'moduleBytes', 'resultBytes', 'decompressedBytes', 'pendingHostCalls', 'hostCalls', 'pendingHostCallBytes']);
+const ISOLATE_LIMITS = new Set(['timeoutMs', 'cpuMs', 'startupCpuMs', 'heapBytes', 'timers', 'backgroundMs', 'logBytes', 'logLineBytes', 'codeBytes', 'modules', 'moduleBytes', 'resultBytes', 'bodyBytes', 'decompressedBytes', 'pendingHostCalls', 'hostCalls', 'pendingHostCallBytes']);
 const TENANT_LIMITS = new Set(['isolates', 'pendingEvals', 'workerMemoryBytes', 'idleMs', 'workerBackgroundMs', 'workerLifetimeMs', 'workerEvals']);
 const NULLABLE = new Set(['timeoutMs', 'cpuMs', 'startupCpuMs', 'heapBytes', 'backgroundMs', 'workerMemoryBytes', 'workerBackgroundMs', 'workerLifetimeMs', 'workerEvals']);
 const MINIMUM: Record<string, number> = { workerMemoryBytes: 64 * 1024 ** 2, heapBytes: 1024 ** 2 };
@@ -191,6 +198,8 @@ const MAXIMUM: Record<string, number> = {
   workerBackgroundMs: MAX_DURATION_MS,
   workerLifetimeMs: MAX_DURATION_MS,
   heapBytes: 4 * 1024 ** 3,
+  // A body crosses in one frame (64 MiB), with the response's head.
+  bodyBytes: 63 * 1024 ** 2,
   pendingHostCalls: 2 ** 32 - 1,
   hostCalls: 2 ** 32 - 1,
   // A program's files cross in one frame (64 MiB), with room for the rest.

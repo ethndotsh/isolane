@@ -46,8 +46,11 @@ pub(super) struct Bridge {
     /// background budget charges it (it's wall time the VM thread is held,
     /// with little CPU to show for it).
     pub(super) blocked: Cell<Duration>,
-    /// Host calls the running eval has made (`limits.hostCalls`).
+    /// Host calls the running eval has made, and the most it may make:
+    /// `limits.hostCalls`, or for concurrent calls, that many for each call
+    /// started.
     pub(super) host_calls: Cell<u64>,
+    pub(super) host_call_budget: Cell<u64>,
     /// A count limit the running eval hit: it fails with this even if the
     /// guest caught the RangeError.
     pub(super) limit_hit: RefCell<Option<Failure>>,
@@ -116,10 +119,10 @@ fn send_host_call(
         let message = format!("{pending} host calls are already waiting for replies, the most this isolate may have (limits.pendingHostCalls)");
         return refuse(scope, bridge, "pendingHostCalls", message);
     }
-    if counted && bridge.host_calls.get() >= limits.host_calls {
+    if counted && bridge.host_calls.get() >= bridge.host_call_budget.get() {
         let message = format!(
             "this eval made {} host calls, the most it may make (limits.hostCalls)",
-            limits.host_calls
+            bridge.host_call_budget.get()
         );
         return refuse(scope, bridge, "hostCalls", message);
     }
@@ -335,6 +338,12 @@ pub(super) fn sync_host_function(
                 bridge.mailbox.replies.borrow_mut().push_back(reply)
             }
             Ok(eval @ VmMsg::Eval { .. }) => bridge.mailbox.later.borrow_mut().push_back(eval),
+            // An abort: stop here, as at the deadline.
+            Ok(VmMsg::Wake) if super::out_of_time() => {
+                scope.terminate_execution();
+                return;
+            }
+            Ok(VmMsg::Wake) => {}
             Ok(VmMsg::Dispose) | Err(RecvTimeoutError::Disconnected) => {
                 bridge
                     .mailbox

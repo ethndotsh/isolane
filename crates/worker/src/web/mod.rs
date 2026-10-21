@@ -155,6 +155,8 @@ const EXT: &[(&str, &str)] = &[
     ("ext:isolane/sockets.js", runtime_js!("sockets.js")),
     // The `fs` object over the file broker.
     ("ext:isolane/fs.js", runtime_js!("fs.js")),
+    // A program's fetch handler, called for program.fetch.
+    ("ext:isolane/serve.js", runtime_js!("serve.js")),
 ];
 
 // ---- helpers shared by the ops ----
@@ -550,24 +552,24 @@ fn bootstrap<'s>(
     Ok(handle)
 }
 
-/// Call `handle[method](...args)`.
+/// Call `handle[method](...args)`; what it returned.
 fn call_method<'s>(
     scope: &mut v8::PinScope<'s, '_>,
     handle: v8::Local<'s, v8::Object>,
     method: &str,
     args: &[v8::Local<'s, v8::Value>],
-) -> Result<(), String> {
+) -> Result<v8::Local<'s, v8::Value>, String> {
     v8::tc_scope!(let tc, scope);
     let key = js::short_string(tc, method);
     let ran = handle.get(tc, key.into()).and_then(|f| call(tc, f, args));
-    if ran.is_none() {
+    let Some(value) = ran else {
         let msg = tc
             .exception()
             .map(|e| e.to_rust_string_lossy(tc))
             .unwrap_or_else(|| "unknown error".into());
         return Err(format!("web platform setup failed ({method}): {msg}"));
-    }
-    Ok(())
+    };
+    Ok(value)
 }
 
 /// The VM's own web settings: its base URL (and `location`), its timers,
@@ -582,30 +584,44 @@ fn configure_with<'s>(
         Some(url) => js::short_string(scope, url).into(),
         None => v8::undefined(scope).into(),
     };
-    call_method(scope, handle, "configure", &[url])
+    call_method(scope, handle, "configure", &[url]).map(|_| ())
+}
+
+/// What a program's `fetch` handler is called through: runtime/serve.js's
+/// `{ serve, drain }`, from the handle `install` or `configure` returned.
+pub fn serving<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    handle: v8::Local<'s, v8::Object>,
+) -> Result<v8::Local<'s, v8::Object>, String> {
+    let serving = call_method(scope, handle, "serving", &[])?;
+    v8::Local::<v8::Object>::try_from(serving)
+        .map_err(|_| "web platform setup failed: serving() gave no object".to_string())
 }
 
 /// Install the web platform in a fresh context (no snapshot), lazily: each
-/// global loads its script on first use.
+/// global loads its script on first use. Returns globals.js's handle (for
+/// `serving`).
 pub fn install<'s>(
     scope: &mut v8::PinScope<'s, '_>,
     global: v8::Local<'s, v8::Object>,
     base_url: Option<&str>,
-) -> Result<(), String> {
+) -> Result<v8::Local<'s, v8::Object>, String> {
     let handle = bootstrap(scope, global)?;
-    configure_with(scope, handle, base_url)
+    configure_with(scope, handle, base_url)?;
+    Ok(handle)
 }
 
 /// Where the snapshot keeps globals.js's handle for each VM to configure
 /// itself with; deleted before guest code runs.
 const SNAPSHOT_HANDLE: &str = "__isolane_web_setup";
 
-/// Configure a context created from the snapshot.
+/// Configure a context created from the snapshot. Returns globals.js's
+/// handle (for `serving`).
 pub fn configure<'s>(
     scope: &mut v8::PinScope<'s, '_>,
     global: v8::Local<'s, v8::Object>,
     base_url: Option<&str>,
-) -> Result<(), String> {
+) -> Result<v8::Local<'s, v8::Object>, String> {
     let key = js::short_string(scope, SNAPSHOT_HANDLE);
     let handle = global
         .get(scope, key.into())
@@ -614,5 +630,6 @@ pub fn configure<'s>(
     let Some(handle) = handle else {
         return Err("web platform setup failed: the snapshot has no setup handle".into());
     };
-    configure_with(scope, handle, base_url)
+    configure_with(scope, handle, base_url)?;
+    Ok(handle)
 }

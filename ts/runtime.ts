@@ -8,7 +8,8 @@ import { resolve, validateConfig, validateLimits, type IsolateConfig, type Resol
 import { IsolaneError, abortedError, invalidConfig, limitError } from './errors.js';
 import { Emitter, HookChain, validateHooks, type Hooks, type RuntimeEvents } from './hooks.js';
 import { resolveModules, type ModuleLoadOptions, type ProgramSource } from './modules.js';
-import { LOAD, OBSERVE, Program, USABLE, resolveInstances, type InstancesOptions, type ProgramFiles } from './program.js';
+import { DRAIN, FETCH, LOAD, OBSERVE, Program, USABLE, resolveInstances, type InstancesOptions, type ProgramFiles } from './program.js';
+import { requestParts, responseFrom } from './program-fetch.js';
 import { checkReturn, isStandardSchema, type StandardSchemaV1 } from './schema.js';
 import { resolveWorkerBinary } from './worker-binary.js';
 import { SpareWorker, TenantWorker, emptyUsage, exitCode, isOutOfMemory, type IsolateState, type ProgramSpec, type TenantUsage } from './worker-pool.js';
@@ -365,8 +366,8 @@ export class Runtime {
     if (options === null || typeof options !== 'object') throw invalidConfig('', 'load() options must be an object');
     const { filename, env, instances, modules, ts, jsx, define, ...config } = options;
     const program = resolveModules(source, checkFilename(filename), { modules, ts, jsx, define });
-    const spec: ProgramSpec = { id: this.#nextProgram++, env: checkEnv(env), hostModules: program.hostModules };
     const pool = resolveInstances(instances);
+    const spec: ProgramSpec = { id: this.#nextProgram++, env: checkEnv(env), hostModules: program.hostModules, concurrency: pool.concurrency };
     validateConfig(config, '', 'call');
     if (this.#closed) throw new IsolaneError('ERR_RUNTIME_CLOSED', 'isolane: the runtime is closed');
     const levels = resolve([this.#runtimeLayer(), this.#defaults, this.#tenantLayer(tenant), config], this.#limits);
@@ -377,6 +378,7 @@ export class Runtime {
       files: program.files,
       options: program.options,
       instances: pool,
+      web: levels.web !== false,
       create: () => this[CREATE](tenant, config, spec),
       chain: new HookChain(levels.hooks, this.#emitter, spec.id),
     });
@@ -687,6 +689,54 @@ export class Isolate {
     }
     value = await chain.afterCall({ ...event, args: before.args, durationMs: performance.now() - started, result: value });
     return (returns ? await checkReturn(returns, value, this.tenant) : value) as ResultOf<S>;
+  }
+
+  /**
+   * @internal Call the program's fetch handler (a program's instance):
+   * `fetch(request, env, ctx)` in the guest. Through the call hooks, as
+   * `fetch` with `[request]`; their result is the Response.
+   */
+  async [FETCH](request: Request, signal: AbortSignal | undefined): Promise<{ response: Response; waiting: number }> {
+    this.#checkOpen();
+    if (signal?.aborted) throw abortedError(signal, this.tenant);
+    await this.#ready();
+    let waiting = 0;
+    const send = async (request: unknown): Promise<Response> => {
+      if (!(request instanceof Request)) throw invalidConfig('request', 'must be a Request (a beforeCall hook replaced it with something else)');
+      const { head, body } = await requestParts(request, this.#state.limits.bodyBytes, this.tenant);
+      const maxBody = this.#state.limits.bodyBytes;
+      const args = body === null ? [head] : [head, body];
+      const raw = await this.#worker.call(this.#state, this.#nextReq(), 'fetch', args, signal, { kind: 'fetch', maxBody });
+      const answer = responseFrom(raw, this.tenant);
+      waiting = answer.waiting;
+      return answer.response;
+    };
+    const chain = this.#chain;
+    if (!chain.observesCalls) return { response: await send(request), waiting };
+    const program = this.#chain.program;
+    const event = { tenant: this.tenant, isolate: this.id, ...(program === undefined ? {} : { program }), name: 'fetch', args: [request] };
+    const before = await chain.beforeCall(event);
+    if ('denied' in before) {
+      throw new IsolaneError('ERR_DENIED', `isolane: the call was denied: ${before.denied}`, { tenant: this.tenant, reason: before.denied });
+    }
+    const started = performance.now();
+    let response: Response;
+    try {
+      response = await send(before.args[0]);
+    } catch (err) {
+      await chain.afterCall({ ...event, args: before.args, durationMs: performance.now() - started, error: err as IsolaneError });
+      throw err;
+    }
+    const result = await chain.afterCall({ ...event, args: before.args, durationMs: performance.now() - started, result: response });
+    if (!(result instanceof Response)) throw invalidConfig('result', 'must be a Response (an afterCall hook replaced it with something else)');
+    return { response: result, waiting };
+  }
+
+  /** @internal Wait for the instance's `ctx.waitUntil` work (before closing it). */
+  async [DRAIN](): Promise<void> {
+    this.#checkOpen();
+    await this.#ready();
+    await this.#worker.call(this.#state, this.#nextReq(), 'drain', [], undefined, { kind: 'drain' });
   }
 
   /** @internal Load a program into this isolate (a program's instance). */

@@ -7,7 +7,7 @@ use serde_json::value::RawValue;
 
 /// The protocol version. The worker reports it in `ready`; a supervisor
 /// that speaks another version refuses the worker.
-pub const PROTOCOL_VERSION: u32 = 8;
+pub const PROTOCOL_VERSION: u32 = 9;
 
 /// Supervisor → worker.
 #[derive(Deserialize)]
@@ -54,6 +54,7 @@ pub enum In {
     /// Call the function the isolate's code defined as `name` (a program's
     /// export), with arguments as data: nothing is compiled. Runs and is
     /// budgeted as an eval (`req` names it in `result` and `abort`).
+    #[serde(rename_all = "camelCase")]
     Call {
         vm: u64,
         req: u64,
@@ -64,6 +65,12 @@ pub enum In {
         /// frame's JSON: `[argument index, length]`. `args` has null there.
         #[serde(default)]
         bin: Vec<(u32, usize)>,
+        #[serde(default)]
+        kind: CallKind,
+        /// For a `fetch` call: the most bytes the response's body may have
+        /// (`limits.bodyBytes`).
+        #[serde(default)]
+        max_body: Option<u64>,
     },
     #[serde(rename_all = "camelCase")]
     HostReply {
@@ -93,6 +100,21 @@ pub enum In {
     Dispose {
         vm: u64,
     },
+}
+
+/// What a `call` invokes.
+#[derive(Deserialize, Default, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum CallKind {
+    /// The function `name` (a program's export, or a global function).
+    #[default]
+    Export,
+    /// A program's `fetch` handler, for `program.fetch`: `args` is
+    /// `[{ url, method, headers }, body]` (body: bytes, or null), and the
+    /// result is the Response's head as JSON with its body attached.
+    Fetch,
+    /// Wait for the instance's `ctx.waitUntil` work (before it's closed).
+    Drain,
 }
 
 #[derive(Deserialize, Default)]
@@ -373,7 +395,8 @@ pub enum Out<'a> {
         #[serde(skip_serializing_if = "Option::is_none")]
         value: Option<&'a RawValue>,
         /// A call's result is bytes, attached after the frame's JSON: their
-        /// length (`value` is absent).
+        /// length (`value` is absent; for a fetch call, `value` is the
+        /// Response's head and these bytes are its body).
         #[serde(skip_serializing_if = "Option::is_none")]
         bin: Option<usize>,
         /// This eval retired its isolate (it was stopped part-way, or ran out

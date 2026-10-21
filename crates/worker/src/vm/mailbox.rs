@@ -42,6 +42,35 @@ impl Mailbox {
         }
     }
 
+    /// The next message during concurrent calls (see `calls`): held
+    /// replies first; with `room`, a call to join them, in turn behind any
+    /// eval set aside. Other evals are set aside.
+    pub(super) fn during_calls(
+        &self,
+        timeout: Option<Duration>,
+        room: bool,
+    ) -> Result<VmMsg, RecvTimeoutError> {
+        loop {
+            if let Some(m) = self.replies.borrow_mut().pop_front() {
+                return Ok(m);
+            }
+            if room && self.later.borrow().front().is_some_and(is_call) {
+                return Ok(self.later.borrow_mut().pop_front().expect("a call"));
+            }
+            let m = match timeout {
+                Some(t) => self.rx.recv_timeout(t)?,
+                None => self.rx.recv().map_err(|_| RecvTimeoutError::Disconnected)?,
+            };
+            match m {
+                call if room && is_call(&call) && self.later.borrow().is_empty() => {
+                    return Ok(call)
+                }
+                eval @ VmMsg::Eval { .. } => self.later.borrow_mut().push_back(eval),
+                other => return Ok(other),
+            }
+        }
+    }
+
     /// The next message between evals, waiting at most `timeout` (until the
     /// next timer is due).
     pub(super) fn idle(&self, timeout: Option<Duration>) -> Result<VmMsg, RecvTimeoutError> {
@@ -56,4 +85,16 @@ impl Mailbox {
             None => self.rx.recv().map_err(|_| RecvTimeoutError::Disconnected),
         }
     }
+}
+
+/// A call (`isolate.call`, `program.call`, `program.fetch`): one of the
+/// evals that may run at once in a program's instance.
+fn is_call(msg: &VmMsg) -> bool {
+    matches!(
+        msg,
+        VmMsg::Eval {
+            job: super::Job::Call { .. },
+            ..
+        }
+    )
 }

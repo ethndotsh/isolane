@@ -19,9 +19,10 @@
  *
  * limit (a budget ran out):
  * - `ERR_LIMIT`: a limit was hit; `limit` names it:
- *   - isolate limits: `timeoutMs`, `cpuMs`, `heapBytes`, `backgroundMs`,
- *     `codeBytes`, `resultBytes`, `pendingHostCalls`, `hostCalls`,
- *     `pendingHostCallBytes`;
+ *   - isolate limits: `timeoutMs`, `cpuMs`, `startupCpuMs`, `heapBytes`,
+ *     `backgroundMs`, `codeBytes`, `resultBytes`, `bodyBytes`,
+ *     `pendingHostCalls`, `hostCalls`, `pendingHostCallBytes`;
+ *   - a program's: `instances.queue`, `instances.queueMs`;
  *   - tenant limits: `isolates`, `pendingEvals`, `workerMemoryBytes`;
  *   - the runtime's: `tenants`.
  *   After `timeoutMs`, `cpuMs`, `heapBytes`, and `backgroundMs` the
@@ -35,6 +36,9 @@
  * - `ERR_ISOLATE_RETIRED`: an earlier failure retired this isolate (an
  *   eval that was stopped part-way, by a limit or its signal, or one that
  *   ran out of memory), or a recycle did. Retryable: create a new one.
+ *   Not retryable for a call that was running in a program's instance
+ *   when another call there was stopped (`instances.concurrency`): it may
+ *   have done part of its work.
  *
  * usage (the calling code's doing):
  * - `ERR_INVALID_CONFIG`: the configuration is malformed (the message names

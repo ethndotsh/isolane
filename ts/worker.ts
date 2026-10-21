@@ -32,6 +32,8 @@ export type WorkerCommand =
       shims: ResolvedShims;
       /** A program's env, as JSON text (an object). */
       env?: string;
+      /** Calls a program's instance runs at once (`instances.concurrency`), when above 1. */
+      concurrency?: number;
     }
   | { t: 'eval'; vm: number; req: number; code: string; filename: string; last?: true }
   | {
@@ -56,6 +58,13 @@ export type WorkerCommand =
       args: string;
       /** Byte arguments: `[argument index, length]`, their bytes attached in order. */
       bin?: [number, number][];
+      /**
+       * `fetch`: the program's fetch handler, with `args` `[head, body]`
+       * and the response's body at most `maxBody` bytes; `drain`: wait for
+       * its `ctx.waitUntil` work. Default: the function `name`.
+       */
+      kind?: 'fetch' | 'drain';
+      maxBody?: number;
     }
   | {
       t: 'hostReply';
@@ -83,7 +92,7 @@ export interface ModuleOptionsWire {
 }
 
 /** The protocol version this library speaks; a worker reporting another is refused. */
-export const PROTOCOL_VERSION = 8;
+export const PROTOCOL_VERSION = 9;
 
 /**
  * Input queued for a worker that it hasn't read. A worker reads its input
@@ -112,7 +121,16 @@ export interface IsolationInfo {
 
 export type WorkerMessage =
   | ({ t: 'ready'; protocol: number } & IsolationInfo)
-  | ({ t: 'result'; vm: number; req: number; retired?: string; ok: true; value: unknown } & WorkerUsage)
+  | ({
+      t: 'result';
+      vm: number;
+      req: number;
+      retired?: string;
+      ok: true;
+      value: unknown;
+      /** A fetch call's response body (`value` is its head). */
+      body?: Uint8Array;
+    } & WorkerUsage)
   | ({
       t: 'result';
       vm: number;
@@ -223,9 +241,11 @@ export function parseWorkerMessage(raw: unknown, bytes?: Buffer): WorkerMessage 
       if (m.retired !== undefined && typeof m.retired !== 'string') return null;
       const retired = m.retired as string | undefined;
       if (m.ok) {
-        // A call's bytes result: the frame's bytes, all of them.
+        // A call's bytes result: the frame's bytes, all of them. With a
+        // value too, a fetch call's response: its head, and its body.
         if (bytes !== undefined) {
-          if (m.bin !== bytes.length || m.value !== undefined) return null;
+          if (m.bin !== bytes.length) return null;
+          if (m.value !== undefined) return { t: 'result', vm: m.vm, req: m.req, retired, ok: true, value: m.value, body: new Uint8Array(bytes), ...parseUsage(m) };
           return { t: 'result', vm: m.vm, req: m.req, retired, ok: true, value: new Uint8Array(bytes), ...parseUsage(m) };
         }
         return { t: 'result', vm: m.vm, req: m.req, retired, ok: true, value: m.value ?? null, ...parseUsage(m) };

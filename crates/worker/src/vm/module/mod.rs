@@ -1,8 +1,9 @@
 //! A program's ES modules: the file tree a `load` sends, resolved,
 //! transformed, compiled, instantiated, and evaluated in the VM's context;
 //! the built-in modules (`isolane:env`, `cloudflare:sockets`, host modules,
-//! the transform's helpers); `import()` and `import.meta`; and the
-//! handlers calls find among the program's exports.
+//! the transform's helpers); `import()` and `import.meta`; the handlers
+//! calls find among the program's exports; and its fetch handler, called
+//! through runtime/serve.js for `program.fetch`.
 //!
 //! Everything a program's code becomes is decided here, in the locked-down
 //! worker: the supervisor only sends the files.
@@ -87,6 +88,9 @@ struct Program {
     main: RefCell<Option<v8::Global<v8::Module>>>,
     /// Its namespace, once it evaluated: where calls find handlers.
     namespace: RefCell<Option<v8::Global<v8::Object>>>,
+    /// runtime/serve.js's `{ serve, finish, drain }`, for `program.fetch`
+    /// (absent without the web platform).
+    serving: RefCell<Option<v8::Global<v8::Object>>>,
 }
 
 fn program(isolate: &v8::Isolate) -> Rc<Program> {
@@ -112,6 +116,69 @@ pub(super) fn set_env(scope: &mut v8::PinScope, env: v8::Local<v8::Object>) {
 /// The Sockets API's `connect` (what `cloudflare:sockets` exports).
 pub(super) fn set_connect(scope: &mut v8::PinScope, connect: v8::Local<v8::Function>) {
     *program(scope).connect.borrow_mut() = Some(v8::Global::new(scope, connect));
+}
+
+/// What `program.fetch` calls the program's handler through (see
+/// runtime/serve.js).
+pub(super) fn set_serving(scope: &mut v8::PinScope, serving: v8::Local<v8::Object>) {
+    *program(scope).serving.borrow_mut() = Some(v8::Global::new(scope, serving));
+}
+
+/// Call runtime/serve.js's `method` with `args`. None if the VM has no web
+/// platform (`Ok(None)`), or if the call threw (`Err`, with the exception
+/// caught by the caller's TryCatch).
+fn call_serving<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    method: &str,
+    args: &[v8::Local<'s, v8::Value>],
+) -> Result<Option<v8::Local<'s, v8::Value>>, ()> {
+    let serving = program(scope).serving.borrow().clone();
+    let Some(serving) = serving else {
+        return Ok(None);
+    };
+    let serving = v8::Local::new(scope, serving);
+    let key = js::short_string(scope, method);
+    let function = serving
+        .get(scope, key.into())
+        .and_then(|f| v8::Local::<v8::Function>::try_from(f).ok())
+        .ok_or(())?;
+    let this: v8::Local<v8::Value> = v8::undefined(scope).into();
+    function.call(scope, this, args).map(Some).ok_or(())
+}
+
+/// Call the fetch handler `handler` (with `this`) for a request: `head`
+/// (`{ url, method, headers }`) and `body` (bytes, or null). Returns what
+/// the handler returned, as `call_serving` does.
+pub(super) fn serve<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    (handler, this): (v8::Local<'s, v8::Function>, v8::Local<'s, v8::Value>),
+    head: v8::Local<'s, v8::Value>,
+    body: v8::Local<'s, v8::Value>,
+) -> Result<Option<v8::Local<'s, v8::Value>>, ()> {
+    let env: v8::Local<v8::Value> = match program(scope).env.borrow().as_ref() {
+        Some(env) => v8::Local::new(scope, env).into(),
+        None => v8::Object::new(scope).into(),
+    };
+    call_serving(scope, "serve", &[handler.into(), this, head, body, env])
+}
+
+/// Read the handler's Response (after the `after` shims) for the host:
+/// a promise for `{ status, statusText, headers, body, waiting }`, or for
+/// `{ tooLarge }` past `max_body` bytes.
+pub(super) fn finish<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    response: v8::Local<'s, v8::Value>,
+    max_body: f64,
+) -> Result<Option<v8::Local<'s, v8::Value>>, ()> {
+    let max = v8::Number::new(scope, max_body);
+    call_serving(scope, "finish", &[response, max.into()])
+}
+
+/// A promise that settles once the instance's `ctx.waitUntil` work has.
+pub(super) fn drain<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+) -> Result<Option<v8::Local<'s, v8::Value>>, ()> {
+    call_serving(scope, "drain", &[])
 }
 
 /// The exports object of host module `specifier`, made the first time it's

@@ -15,6 +15,7 @@
 //! - `background`: the budget for work between evals
 
 mod background;
+mod calls;
 mod console;
 mod context;
 mod errors;
@@ -111,6 +112,8 @@ pub struct VmConfig {
     /// A program's `env` (JSON text, an object): what `isolane:env`
     /// exports, with the host functions marked `env` mounted in it.
     pub env: Option<String>,
+    /// Calls a program's instance runs at once (`instances.concurrency`).
+    pub concurrency: Option<usize>,
 }
 
 // ---- seeded entropy ----
@@ -168,6 +171,8 @@ pub enum VmMsg {
         call: u64,
         reply: Reply,
     },
+    /// Look at the watchdog: an eval was aborted while the VM waited.
+    Wake,
     Dispose,
 }
 
@@ -188,11 +193,15 @@ pub enum Job {
     },
     /// Call the function the isolate's code defined as `name` (see
     /// `eval::handler`), with `args` (a JSON array) and the byte arguments
-    /// at their indices.
+    /// at their indices; or, by `kind`, the program's fetch handler (its
+    /// response's body at most `max_body` bytes), or its `ctx.waitUntil`
+    /// work.
     Call {
         name: String,
         args: String,
         bytes: Vec<(u32, Vec<u8>)>,
+        kind: crate::proto::CallKind,
+        max_body: u64,
     },
 }
 
@@ -441,6 +450,7 @@ fn vm_main(
     SEED.with(|seed| seed.set(config.random.seed));
     let timeout = config.limits.timeout();
     let cpu = config.limits.cpu();
+    let concurrency = config.concurrency.unwrap_or(1).max(1);
     let mut params = v8::CreateParams::default();
     if let Some(max) = config.limits.heap_bytes {
         // At most V8's pointer-compression cage (the supervisor's maximum).
@@ -505,6 +515,7 @@ fn vm_main(
         setup_io: Cell::new(false),
         blocked: Cell::new(std::time::Duration::ZERO),
         host_calls: Cell::new(0),
+        host_call_budget: Cell::new(config.limits.host_calls),
         limit_hit: RefCell::new(None),
         // The supervisor names its brokers __isolane_* and refuses those
         // names for the embedder's functions.
@@ -638,6 +649,7 @@ fn vm_main(
         };
         match msg {
             VmMsg::Dispose => break,
+            VmMsg::Wake => {}
             VmMsg::Eval { req, job, last } => {
                 // Usage from before this eval goes out first.
                 background.report(&out, id, /* force */ true, None);
@@ -647,6 +659,28 @@ fn vm_main(
                 }
                 if let Some(cause) = &retired {
                     send_result(&out, (id, req), Err(cause.clone()), Usage::default(), None);
+                    continue;
+                }
+                // A program's instance with room for more than one call runs
+                // its calls together (see calls.rs).
+                if concurrency > 1 && matches!(job, Job::Call { .. }) {
+                    let calls = calls::Calls {
+                        id,
+                        out: &out,
+                        context: &context,
+                        shims: &shims,
+                        guard: &guard,
+                        cpu_clock,
+                        concurrency,
+                        timeout,
+                        cpu,
+                        heap_limit,
+                    };
+                    match calls.run(&mut isolate, req, job) {
+                        calls::CallsEnd::Settled => {}
+                        calls::CallsEnd::Retired(cause) => retired = Some(cause),
+                        calls::CallsEnd::Disposed => break,
+                    }
                     continue;
                 }
                 if !watchdog.begin_eval(req) {
@@ -672,6 +706,7 @@ fn vm_main(
                 bridge.in_setup.set(setup);
                 bridge.setup_io.set(false);
                 bridge.host_calls.set(0);
+                bridge.host_call_budget.set(config.limits.host_calls);
                 bridge.limit_hit.replace(None);
                 let (end, fired) = guard.run(&mut isolate, timeout, budget, |isolate, deadline| {
                     let end = eval(isolate, &context, &shims, &job, &bridge.mailbox, deadline);

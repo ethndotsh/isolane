@@ -27,24 +27,30 @@ await acme.run('db.getUser(42).then((u) => u.plan)', {
   host: { db: { getUser: async (id) => users.find(id) } },
 });
 
-// A program is an ES module loaded once into a pool of warm instances;
-// each call invokes one of its exports with data.
+// A program is an ES module loaded once into a pool of warm instances.
+// program.fetch calls its Workers-style fetch handler with a Request;
+// program.call invokes any of its exports with data.
 await using app = await acme.load(`
-  import { env } from 'isolane:env';
-  export default { async fetch(request) { return env.db.getUser(request.id); } };
+  export default {
+    async fetch(request, env) {
+      const id = Number(new URL(request.url).searchParams.get('id'));
+      return Response.json(await env.db.getUser(id));
+    },
+  };
 `, { host: { db: { getUser: async (id) => users.find(id) } } });
-await app.call('fetch', [{ id: 42 }]);
+const response = await app.fetch('https://acme.example/users?id=42');
 ```
 
 A program's top-level code is its setup: it runs once per instance, under
 its own CPU budget, and can't do I/O, which belongs in its handlers.
-Instances serve one call at a time and keep module state between calls;
-the pool starts more as calls need them, queues calls when all are busy,
-and replaces an instance that a limit stopped. A program can be many
-files, `{ main, files }`, with packages under `node_modules`, TypeScript,
-JSX, and JSON; the worker resolves its imports over those files and
-compiles them, and errors point at the original sources. See
-[Programs](docs/guide.md#programs).
+Instances keep module state between calls and serve one call at a time,
+or several with `instances.concurrency`; the pool starts more as calls
+need them, queues calls when all are full, and replaces an instance that a
+limit stopped. A fetch handler's `ctx.waitUntil` keeps work running after
+its response. A program can be many files, `{ main, files }`, with
+packages under `node_modules`, TypeScript, JSX, and JSON; the worker
+resolves its imports over those files and compiles them, and errors point
+at the original sources. See [Programs](docs/guide.md#programs).
 
 ## Security model
 

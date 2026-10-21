@@ -420,6 +420,8 @@ impl Worker {
                 name,
                 args,
                 bin,
+                kind,
+                max_body,
             } => {
                 let bytes = split_attached(attached, bin)
                     .ok_or_else(|| bad_message("call bytes don't match the frame"))?;
@@ -428,7 +430,13 @@ impl Worker {
                     req,
                     VmMsg::Eval {
                         req,
-                        job: Job::Call { name, args, bytes },
+                        job: Job::Call {
+                            name,
+                            args,
+                            bytes,
+                            kind,
+                            max_body: max_body.unwrap_or(0),
+                        },
                         last: false,
                     },
                 );
@@ -458,8 +466,10 @@ impl Worker {
                 }
             }
             In::Abort { vm, req } => {
-                if let Some((_, stopper)) = self.vms.get(&vm) {
+                if let Some((tx, stopper)) = self.vms.get(&vm) {
                     stopper.abort(req);
+                    // A VM waiting for a timer or a reply notices now.
+                    let _ = tx.send(VmMsg::Wake);
                 }
             }
             In::Dispose { vm } => {

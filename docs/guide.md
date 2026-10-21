@@ -108,19 +108,23 @@ a syntax error or an exception in the module's top-level code rejects
 ```js
 const program = await runtime.tenant('acme').load(
   `
-  import { env } from 'isolane:env';
   let served = 0;
   export default {
-    async fetch(request) {
+    async fetch(request, env, ctx) {
       served++;
-      return { user: await env.db.getUser(request.id), served };
+      const id = Number(new URL(request.url).searchParams.get('id'));
+      ctx.waitUntil(env.audit.record(id)); // runs on after the response
+      return Response.json({ user: await env.db.getUser(id), served, region: env.region });
     },
   };
+  export function stats() {
+    return { served };
+  }
 `,
-  { env: { region: 'eu' }, host: { db: { getUser } }, filename: 'src/index.js' },
+  { env: { region: 'eu' }, host: { db: { getUser }, audit: { record } }, filename: 'src/index.js' },
 );
-await program.call('fetch', [{ id: 1 }]); // { user: ..., served: 1 }
-await program.call('fetch', [{ id: 2 }]); // { user: ..., served: 2 }: warm
+const response = await program.fetch('https://acme.example/users?id=1'); // a Response
+await program.call('stats'); // { served: 1 }: warm
 await program.close();
 ```
 
@@ -135,13 +139,16 @@ The options are an isolate's configuration for the instances (`limits`,
   `import { env } from 'isolane:env'`. The `host` functions are mounted in
   it (`env.db.getUser`) instead of on the global.
 - `instances`: how instances are kept. `reuse` (default `true`) keeps them
-  warm: each serves call after call, one at a time, and module state
-  persists between them. `reuse: false` gives every call a fresh instance,
-  for end users who must not share state. `min` (default 0) instances are
-  kept ready, `max` (default 4) caps them, `idleMs` (default 30 s) closes
-  idle ones down to `min`, and a call that finds every instance busy at
-  `max` waits up to `queueMs` (default 10 s), then fails with `ERR_LIMIT`
-  (`err.limit` is `instances.queueMs`).
+  warm: each serves call after call, and module state persists between
+  them. `reuse: false` gives every call a fresh instance, for end users who
+  must not share state. `concurrency` (default 1, only with `reuse`) is how
+  many calls one instance runs at once; see "Concurrent calls" below. `min`
+  (default 0) instances are kept ready, `max` (default 4) caps them,
+  `idleMs` (default 30 s) closes idle ones down to `min`, and a call that
+  finds every instance full at `max` waits up to `queueMs` (default 10 s),
+  then fails with `ERR_LIMIT` (`err.limit` is `instances.queueMs`). At most
+  `queue` (default 1,000) calls wait at once; another fails at once with
+  `ERR_LIMIT` (`instances.queue`).
 
 `program.call(name, args?, options?)` calls the named export, or else a
 method of the default export, with the default export as `this`
@@ -158,6 +165,27 @@ It runs under `limits.startupCpuMs` (default 1 s, Linux) in place of
 `load` rejects with `ERR_SETUP_IO` (kind `guest`). Timers work, and clients
 that connect lazily, on their first query, keep their connection from call
 to call. The clock advances when setup starts and when each call starts.
+
+`program.fetch(input, init?)` sends a request to the program's fetch
+handler, the way Cloudflare Workers calls one: `fetch(request, env, ctx)`,
+a named export or a method of the default export. It takes what the
+global `fetch` takes (a `Request`, or a URL with a `RequestInit`), and
+resolves to the `Response` the handler returned. The handler gets a spec
+`Request`, the program's `env` (the object `isolane:env` exports), and a
+`ctx` whose `waitUntil(promise)` keeps work running after the response:
+that work runs between calls under `backgroundMs`, a rejection is reported
+like an unhandled one (`onGuestError`), and closing the instance, whether
+by `program.close()`, `idleMs`, or `reuse: false`, waits for it, under
+`timeoutMs`. Both bodies are buffered whole, at most `limits.bodyBytes`
+each (default 16 MiB); a larger one fails the call with `ERR_LIMIT`
+(`bodyBytes`) and leaves the instance in service. The request's `signal`
+stops the call as an eval's signal does. A handler that throws, or returns
+anything but a `Response`, rejects with `ERR_GUEST_EXCEPTION`. The call
+hooks see it as a call named `fetch` whose one argument is the `Request`
+and whose result is the `Response`; either may be replaced with another
+of its kind. `program.fetch` needs the web platform, and isolates have no
+`fetch` of this kind, since a classic script's global `fetch` is the web
+platform's own.
 
 Each call is an eval, as for `isolate.call`. A handler that throws rejects
 with `ERR_GUEST_EXCEPTION`, and its instance stays in service. A call
@@ -276,6 +304,25 @@ locked-down worker, on the instance's thread, so they count against
 `startupCpuMs` (or a call's `cpuMs`, for `import()` later), and the worker
 keeps what it transformed by content hash, so a program's later
 instances don't transform its files again.
+
+#### Concurrent calls
+
+With `instances.concurrency` above 1, an instance runs up to that many
+calls at once on its event loop, which suits handlers that mostly wait on
+I/O. A call goes to an idle instance first, then to the least busy one
+with room, and a new instance is loaded only when every instance is full.
+Each call keeps its own wall clock (`timeoutMs` from when it starts), and
+the clock advances when each call starts, so one call can see time move
+when another begins. The other per-eval budgets belong to the instance
+while its calls run, since its CPU can't be told apart by call: `cpuMs`,
+`hostCalls`, and `logBytes` each grow by their amount for every call that
+starts while others run, and once a count limit is hit, every call that
+finishes before the instance goes idle fails with it. A call stopped
+part-way, by its timeout, the shared CPU budget, its signal, or the heap
+limit, stops every call in the instance and retires it: the calls that hit
+the limit fail with it, and the others with `ERR_ISOLATE_RETIRED`, not
+`retryable`, since they may have done part of their work. (A call an
+instance refused before it started is retried on another instance once.)
 
 Runtime-only options: `workerPath` (default: the installed
 `@isolane/worker-*` package, or `$ISOLANE_WORKER`), `strict` (default
@@ -667,6 +714,7 @@ await acme.run(app.code, {
 | `logBytes` / `logLineBytes` | 1 MiB / 16 KiB | isolate, per eval / per line (cut before it leaves V8) |
 | `codeBytes` / `resultBytes` | 16 MiB each | isolate, per eval (at most a frame, 64 MiB) |
 | `modules` / `moduleBytes` | 1,000 / 32 MiB | a program's files, and their size together (at most a frame) |
+| `bodyBytes` | 16 MiB | isolate: a `program.fetch` request's body, and its response's (at most 63 MiB) |
 | `pendingHostCalls` | 1,000 | isolate: async host calls waiting for replies at once |
 | `hostCalls` | 10,000 | isolate, per eval (isolane's own `fetch`, `connect`, and `fs` calls aside) |
 | `pendingHostCallBytes` | 16 MiB | isolate: bytes of host calls waiting for replies at once (held in your process) |
@@ -753,7 +801,7 @@ three effects:
 
 | Effect | Limits |
 |---|---|
-| The eval fails with `ERR_LIMIT` (`err.limit` names it) | `timeoutMs`, `cpuMs`, `startupCpuMs`, `heapBytes`, `backgroundMs`, `codeBytes`, `modules`, `moduleBytes`, `resultBytes`, `pendingHostCalls`, `hostCalls`, `pendingHostCallBytes`, `isolates`, `pendingEvals`, `workerMemoryBytes`, `tenants`, and a program's `instances.queueMs` |
+| The eval fails with `ERR_LIMIT` (`err.limit` names it) | `timeoutMs`, `cpuMs`, `startupCpuMs`, `heapBytes`, `backgroundMs`, `codeBytes`, `modules`, `moduleBytes`, `resultBytes`, `pendingHostCalls`, `hostCalls`, `pendingHostCallBytes`, `bodyBytes`, `isolates`, `pendingEvals`, `workerMemoryBytes`, `tenants`, and a program's `instances.queue` and `instances.queueMs` |
 | The guest's operation fails, and the eval continues | `timers` (a `RangeError`), `decompressedBytes` (the stream errors), and the policies' limits, named by their path (`fetch.limits.requests`, `connect.limits.connections`, `fs.limits.writtenBytes`, ...) |
 | Output is cut | `logBytes`, `logLineBytes` |
 
@@ -807,7 +855,9 @@ Every failure is an `IsolaneError` with `code`, `kind`, `retryable`, and
 
 `ERR_DENIED` is a hook's `deny()`. `ERR_WORKER_CRASHED`,
 `ERR_WORKER_UNRESPONSIVE`, and `ERR_ISOLATE_RETIRED` are `retryable` (the
-last on a new isolate), as is `ERR_LIMIT` for `workerMemoryBytes`.
+last on a new isolate, except for a call that was running alongside one
+that was stopped; see "Concurrent calls"), as is `ERR_LIMIT` for
+`workerMemoryBytes`.
 
 ### What guest code sees
 

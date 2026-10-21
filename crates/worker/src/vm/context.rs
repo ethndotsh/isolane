@@ -57,7 +57,13 @@ pub(super) fn new_context(
         } else {
             crate::web::install(scope, global, base_url)
         };
-        set_up.map_err(|e| fail(ErrorCode::IsolateRetired, e))?;
+        let handle = set_up.map_err(|e| fail(ErrorCode::IsolateRetired, e))?;
+        // A program's instance serves program.fetch through runtime/serve.js.
+        if config.env.is_some() {
+            let serving = crate::web::serving(scope, handle)
+                .map_err(|e| fail(ErrorCode::IsolateRetired, e))?;
+            super::module::set_serving(scope, serving);
+        }
     }
     let wasm: &[&str] = if config.wasm { &[] } else { &["WebAssembly"] };
     for name in REMOVED_GLOBALS.iter().chain(wasm) {

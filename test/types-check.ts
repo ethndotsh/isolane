@@ -50,6 +50,10 @@ async function typed() {
   await using program = await rt.tenant('t').load('export const f = () => 1;', { env: { a: 1 }, instances: { max: 2 }, host: { db: { getUser } } });
   const fromProgram: { id: number; name: string } = await program.call('f', [1], { returns: User });
   const loads: number = program.usage().loads;
+  const response: Response = await program.fetch('https://example.com/', { method: 'POST', body: 'x' });
+  void program.fetch(new Request('https://example.com/'));
+  void rt.tenant('t').load('', { instances: { concurrency: 4, queue: 10 }, limits: { bodyBytes: 1024 } });
+  void response;
   // @ts-expect-error instances fields are named
   void rt.tenant('t').load('', { instances: { size: 2 } });
   rt.on('programLoad', (e) => void (e.durationMs satisfies number));

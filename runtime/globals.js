@@ -1,7 +1,7 @@
 // The web platform globals (WinterTC Minimum Common API, phases 1–4), defined
 // non-enumerable like Deno's 98_global_scope_shared.js. Called once per
 // context by the worker:
-//   (bootstrap) => { configure(baseUrl), materialize() }
+//   (bootstrap) => { configure(baseUrl), materialize(), serving() }
 // Most globals are lazy: the first access loads the vendored script behind
 // them. For the startup snapshot, materialize() loads them all up front, so
 // a snapshotted isolate starts with every API ready; configure() then sets
@@ -337,12 +337,18 @@
     eventModule();
     load(SOCKETS_JS);
     load(FS_JS);
+    load(SERVE_JS);
     void g.URL.createObjectURL;
   }
+
+  // What a program's fetch handler is called through (runtime/serve.js),
+  // for the worker: never on the global.
+  const SERVE_JS = "ext:isolane/serve.js";
 
   return ObjectFreeze({
     __proto__: null,
     materialize,
+    serving: () => load(SERVE_JS),
     configure(baseUrl) {
       bootstrap.configure({ baseUrl });
       if (baseUrl !== undefined) defineLocation(baseUrl);

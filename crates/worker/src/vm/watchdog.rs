@@ -75,8 +75,11 @@ struct WatchState {
     armed: bool,
     /// The VM is being disposed: stop what it runs, now and from now on.
     stopping: bool,
-    /// The eval being run, if one is (for `abort`).
-    eval: Option<u64>,
+    /// The evals being run (for `abort`): one, or a program instance's
+    /// concurrent calls.
+    evals: Vec<u64>,
+    /// The eval whose abort fired, if one did.
+    aborted_eval: Option<u64>,
     /// Evals aborted before they started.
     aborted: std::collections::VecDeque<u64>,
     closed: bool,
@@ -99,7 +102,8 @@ impl Watchdog {
                 fired: Fired::No,
                 armed: false,
                 stopping: false,
-                eval: None,
+                evals: Vec::new(),
+                aborted_eval: None,
                 aborted: Default::default(),
                 closed: false,
             }),
@@ -156,6 +160,7 @@ impl Watchdog {
         s.deadline = deadline;
         s.cpu_deadline = cpu_deadline;
         s.fired = Fired::No;
+        s.aborted_eval = None;
         s.armed = true;
         if s.stopping {
             s.fired = Fired::Wall;
@@ -181,27 +186,61 @@ impl Watchdog {
         }
     }
 
-    /// Eval `req` is about to run (call before `arm`). False if it was
-    /// aborted already: don't run it.
+    /// Eval `req` is about to run (call before `arm`, or, for a call
+    /// joining others, while armed). False if it was aborted already:
+    /// don't run it.
     pub(super) fn begin_eval(&self, req: u64) -> bool {
         let mut s = self.state.lock().expect(POISONED);
         if let Some(i) = s.aborted.iter().position(|&r| r == req) {
             s.aborted.remove(i);
             return false;
         }
-        s.eval = Some(req);
+        s.evals.push(req);
         true
+    }
+
+    /// Eval `req` finished while others run on (concurrent calls): an
+    /// abort for it no longer stops them.
+    pub(super) fn end_eval(&self, req: u64) {
+        self.state
+            .lock()
+            .expect(POISONED)
+            .evals
+            .retain(|&r| r != req);
+    }
+
+    /// Move the wall-clock deadline to `deadline`, and give the CPU budget
+    /// `cpu` more, unless a budget already ran out (concurrent calls: as
+    /// they come and go). Call on the VM thread, while armed.
+    pub(super) fn extend(&self, deadline: Option<Instant>, cpu: Option<Duration>) {
+        let mut s = self.state.lock().expect(POISONED);
+        if !s.armed || s.fired != Fired::No {
+            return;
+        }
+        s.deadline = deadline;
+        if let (Some(at), Some(more)) = (s.cpu_deadline, cpu) {
+            s.cpu_deadline = Some(at + more);
+        }
+        self.cv.notify_one();
+    }
+
+    /// Which budget ran out since the last `arm`, if one did, and for an
+    /// abort, whose (without disarming).
+    pub(super) fn peek(&self) -> (Fired, Option<u64>) {
+        let s = self.state.lock().expect(POISONED);
+        (s.fired, s.aborted_eval)
     }
 
     /// Stop eval `req`: terminate it if it's running (it ends with
     /// `Fired::Aborted`), or skip it when it starts. Callable from any thread.
     pub(super) fn abort(&self, req: u64) {
         let mut s = self.state.lock().expect(POISONED);
-        if s.eval == Some(req) {
+        if s.evals.contains(&req) {
             if s.armed && s.fired == Fired::No {
                 s.deadline = None;
                 s.cpu_deadline = None;
                 s.fired = Fired::Aborted;
+                s.aborted_eval = Some(req);
                 self.handle.terminate_execution();
             }
         } else {
@@ -223,7 +262,8 @@ impl Watchdog {
         s.deadline = None;
         s.cpu_deadline = None;
         s.armed = false;
-        s.eval = None;
+        s.evals.clear();
+        s.aborted_eval = None;
         std::mem::replace(&mut s.fired, Fired::No)
     }
 

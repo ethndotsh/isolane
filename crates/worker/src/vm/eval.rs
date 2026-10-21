@@ -17,7 +17,7 @@ use super::module::{self, Handler, LoadError};
 use super::watchdog::CpuClock;
 use super::{pump_tasks, Job, Output, VmMsg};
 use crate::js;
-use crate::proto::{fail, limit, ErrorCode, Failure, Out, ShimRef, Usage};
+use crate::proto::{fail, limit, CallKind, ErrorCode, Failure, Out, ShimRef, Usage};
 use crate::web::timers::NextTimer;
 
 /// How often to look for V8's foreground tasks while it has background work
@@ -39,6 +39,8 @@ pub(super) enum Outcome {
     Json(String),
     /// A call's result that is bytes (an ArrayBuffer or a view of one).
     Bytes(Vec<u8>),
+    /// A fetch call's result: the Response's head (JSON) and its body.
+    Response { head: String, body: Vec<u8> },
 }
 
 /// "Message\nstack" for thrown errors, or the value's string form, at most
@@ -216,43 +218,80 @@ fn run(
     mailbox: &Mailbox,
     deadline: Option<Instant>,
 ) -> EvalEnd {
-    let guest_error = |tc: &mut v8::PinnedRef<v8::TryCatch<v8::HandleScope>>| match tc.exception() {
+    let mut flight = match start(tc, shims, job) {
+        Ok(flight) => flight,
+        Err(f) => return EvalEnd::Done(Err(f)),
+    };
+    loop {
+        if let Some(result) = flight.advance(tc, shims) {
+            return EvalEnd::Done(result);
+        }
+        let Some(promise) = flight.promise(tc) else {
+            return EvalEnd::Done(Err(fail(ErrorCode::Internal, "nothing to settle")));
+        };
+        match settle(tc, promise, mailbox, deadline) {
+            Settled::Fulfilled | Settled::Rejected => {}
+            Settled::Failed(f) => return EvalEnd::Done(Err(flight.failed(f, shims))),
+            Settled::Disposed => return EvalEnd::Disposed,
+        }
+    }
+}
+
+/// `ERR_GUEST_EXCEPTION` for the exception `tc` caught.
+fn caught(tc: &mut v8::PinnedRef<v8::TryCatch<v8::HandleScope>>) -> Failure {
+    match tc.exception() {
         Some(e) => guest_failure(tc, e),
         None => fail(ErrorCode::GuestException, "unknown error"),
-    };
+    }
+}
 
+/// `ERR_SHIM` for the exception `tc` caught in shim `at`.
+fn shim_threw(tc: &mut v8::PinnedRef<v8::TryCatch<v8::HandleScope>>, at: &ShimRef) -> Failure {
+    let what = match tc.exception() {
+        Some(e) => format!("threw: {}", describe(tc, e)),
+        None => "failed".into(),
+    };
+    shim_failure(at, what)
+}
+
+/// Start one eval: advance the clock, run the `before` shims, then compile
+/// and run the code (or load the program, or call the function). Returns
+/// what it started, to settle (`Flight::advance`).
+pub(super) fn start(
+    tc: &mut v8::PinnedRef<v8::TryCatch<v8::HandleScope>>,
+    shims: &Shims,
+    job: &Job,
+) -> Result<Flight, Failure> {
     crate::clock::advance();
     if let Some(bridge) = tc.get_slot::<Rc<Bridge>>() {
         bridge.log_budget.set(crate::limits::get().log_bytes);
     }
-    let shim_threw = |tc: &mut v8::PinnedRef<v8::TryCatch<v8::HandleScope>>, at: &ShimRef| {
-        let what = match tc.exception() {
-            Some(e) => format!("threw: {}", describe(tc, e)),
-            None => "failed".into(),
-        };
-        shim_failure(at, what)
-    };
     // A program's setup runs without the eval shims (they run around its
-    // calls).
+    // calls), and so does waiting for its ctx.waitUntil work.
     let setup = matches!(job, Job::Module { .. });
-    let (before, after): (&[_], &[_]) = if setup {
-        (&[], &[])
-    } else {
-        (&shims.before, &shims.after)
-    };
-    for (script, at) in before {
-        let script = v8::Local::new(tc, script);
-        if script.run(tc).is_none() {
-            return EvalEnd::Done(Err(shim_threw(tc, at)));
+    let drain = matches!(
+        job,
+        Job::Call {
+            kind: CallKind::Drain,
+            ..
+        }
+    );
+    let shimless = setup || drain;
+    if !shimless {
+        for (script, at) in &shims.before {
+            let script = v8::Local::new(tc, script);
+            if script.run(tc).is_none() {
+                return Err(shim_threw(tc, at));
+            }
         }
     }
-    let mut value: v8::Local<v8::Value> = match job {
+    let value: v8::Local<v8::Value> = match job {
         Job::Code { code, filename } => {
             let Some(source) = v8::String::new(tc, code) else {
-                return EvalEnd::Done(Err(fail(ErrorCode::Internal, "source too large")));
+                return Err(fail(ErrorCode::Internal, "source too large"));
             };
             let Some(name) = v8::String::new(tc, filename.as_deref().unwrap_or("eval.js")) else {
-                return EvalEnd::Done(Err(fail(ErrorCode::Internal, "filename too large")));
+                return Err(fail(ErrorCode::Internal, "filename too large"));
             };
             let origin = v8::ScriptOrigin::new(
                 tc,
@@ -268,10 +307,10 @@ fn run(
                 None,
             );
             let Some(script) = v8::Script::compile(tc, source, Some(&origin)) else {
-                return EvalEnd::Done(Err(compile_failure(tc)));
+                return Err(compile_failure(tc));
             };
             let Some(value) = script.run(tc) else {
-                return EvalEnd::Done(Err(guest_error(tc)));
+                return Err(caught(tc));
             };
             value
         }
@@ -281,110 +320,294 @@ fn run(
             options,
         } => match module::load(tc, main, files, options) {
             Ok(value) => value,
-            Err(LoadError::Threw) => return EvalEnd::Done(Err(load_failure(tc))),
-            Err(LoadError::Failed(f)) => return EvalEnd::Done(Err(f)),
+            Err(LoadError::Threw) => return Err(load_failure(tc)),
+            Err(LoadError::Failed(f)) => return Err(f),
         },
-        Job::Call { name, args, bytes } => {
-            let found = match module::handler(tc, name) {
-                Ok(Handler::NoProgram) => handler(tc, name)
-                    .map(|global| global.map(|function| (function, v8::undefined(tc).into()))),
-                Ok(Handler::Found(function, this)) => Ok(Some((function, this))),
-                Ok(Handler::Missing) => {
-                    let message = format!("the program has no export named {name}, and its default export no method named {name}");
-                    return EvalEnd::Done(Err(fail(ErrorCode::HandlerNotFound, clip(message))));
-                }
-                Err(()) => Err(()),
+        Job::Call {
+            name,
+            args,
+            bytes,
+            kind,
+            ..
+        } => {
+            let argv = call_args(tc, args, bytes)?;
+            let started = match kind {
+                CallKind::Export => match find_handler(tc, name) {
+                    Ok((handler, this)) => handler.call(tc, this, &argv).map(Some).ok_or(()),
+                    Err(Some(f)) => return Err(f),
+                    Err(None) => Err(()),
+                },
+                CallKind::Fetch => match module::handler(tc, "fetch") {
+                    Ok(Handler::Found(handler, this)) => {
+                        let undefined: v8::Local<v8::Value> = v8::undefined(tc).into();
+                        let head = argv.first().copied().unwrap_or(undefined);
+                        let body = argv.get(1).copied().unwrap_or(undefined);
+                        module::serve(tc, (handler, this), head, body)
+                    }
+                    Ok(Handler::Missing) => {
+                        let message = "the program has no fetch handler: export a function named fetch, or a default export with a fetch method";
+                        return Err(fail(ErrorCode::HandlerNotFound, message));
+                    }
+                    Ok(Handler::NoProgram) => {
+                        return Err(fail(ErrorCode::Internal, "a fetch call needs a program"));
+                    }
+                    Err(()) => Err(()),
+                },
+                CallKind::Drain => module::drain(tc),
             };
-            let (handler, this): (v8::Local<v8::Function>, v8::Local<v8::Value>) = match found {
-                Ok(Some(found)) => found,
-                Ok(None) => {
-                    let message = format!("the isolate has no function named {name}: define it with a function declaration or on globalThis");
-                    return EvalEnd::Done(Err(fail(ErrorCode::HandlerNotFound, clip(message))));
-                }
-                Err(()) => return EvalEnd::Done(Err(guest_error(tc))),
-            };
-            let parsed = v8::String::new(tc, args).and_then(|s| v8::json::parse(tc, s));
-            let Some(array) = parsed.and_then(|v| v8::Local::<v8::Array>::try_from(v).ok()) else {
-                return EvalEnd::Done(Err(fail(
-                    ErrorCode::Internal,
-                    "call arguments are not a JSON array",
-                )));
-            };
-            let mut argv: Vec<v8::Local<v8::Value>> = Vec::with_capacity(array.length() as usize);
-            for i in 0..array.length() {
-                let arg = array
-                    .get_index(tc, i)
-                    .unwrap_or_else(|| v8::undefined(tc).into());
-                argv.push(arg);
+            match started {
+                Ok(Some(value)) => value,
+                Ok(None) => return Err(no_web()),
+                Err(()) => return Err(caught(tc)),
             }
-            for (index, data) in bytes {
-                if let Some(slot) = argv.get_mut(*index as usize) {
-                    *slot = crate::bytes::new_u8array(tc, data).into();
-                }
-            }
-            let Some(value) = handler.call(tc, this, &argv) else {
-                return EvalEnd::Done(Err(guest_error(tc)));
-            };
-            value
         }
     };
-    let call = matches!(job, Job::Call { .. });
+    let (call, max_body) = match job {
+        Job::Call { kind, max_body, .. } => (Some(*kind), *max_body),
+        _ => (None, 0),
+    };
+    Ok(Flight {
+        value: v8::Global::new(tc, value),
+        result: v8::Global::new(tc, value),
+        stage: Stage::Guest,
+        call,
+        max_body,
+        setup,
+        shimless,
+    })
+}
 
-    // What's settling: the guest's value (None), or `after` shim i's promise.
-    let mut stage: Option<usize> = None;
-    let mut result = value;
-    loop {
-        let settled = match v8::Local::<v8::Promise>::try_from(value) {
-            Err(_) => {
-                tc.perform_microtask_checkpoint();
-                Ok(value)
-            }
-            Ok(promise) => match settle(tc, promise, mailbox, deadline) {
-                Settled::Fulfilled => Ok(promise.result(tc)),
-                Settled::Rejected => Err(promise.result(tc)),
-                Settled::Failed(f) => {
-                    let f = match stage {
-                        Some(i) if f.code == ErrorCode::Unsettled => {
-                            shim_failure(&after[i].1, "never settled".into())
-                        }
-                        _ => f,
-                    };
-                    return EvalEnd::Done(Err(f));
-                }
-                Settled::Disposed => return EvalEnd::Disposed,
-            },
-        };
-        match (settled, stage) {
-            (Err(e), None) => return EvalEnd::Done(Err(guest_failure(tc, e))),
-            (Err(e), Some(i)) => {
-                let what = format!("threw: {}", describe(tc, e));
-                return EvalEnd::Done(Err(shim_failure(&after[i].1, what)));
-            }
-            (Ok(v), None) => result = v,
-            // An `after` shim's value replaces the result unless it's undefined.
-            (Ok(v), Some(_)) if !v.is_undefined() => result = v,
-            (Ok(_), Some(_)) => {}
+fn no_web() -> Failure {
+    fail(ErrorCode::Internal, "a fetch call needs the web platform")
+}
+
+/// An eval in flight: the value (or promise) it waits on, and the stage it
+/// is in. Handles are global, so a flight outlives the scope it started in
+/// (concurrent calls keep theirs between turns).
+pub(super) struct Flight {
+    /// What's settling now.
+    value: v8::Global<v8::Value>,
+    /// The result so far: the guest's value, as the `after` shims leave it.
+    result: v8::Global<v8::Value>,
+    stage: Stage,
+    /// For a call, what kind; and a fetch call's body limit.
+    call: Option<CallKind>,
+    max_body: u64,
+    /// A program's setup.
+    setup: bool,
+    /// Runs without the eval shims (a setup, or a drain).
+    shimless: bool,
+}
+
+impl Flight {
+    fn after<'a>(&self, shims: &'a Shims) -> &'a [(v8::Global<v8::Function>, ShimRef)] {
+        if self.shimless {
+            &[]
+        } else {
+            &shims.after
         }
-        let next = stage.map_or(0, |i| i + 1);
-        let Some((func, at)) = after.get(next) else {
-            if setup {
-                module::loaded(tc);
-                return EvalEnd::Done(Ok(Outcome::Json("null".into())));
-            }
-            return EvalEnd::Done(if call {
-                to_outcome(tc, result)
-            } else {
-                to_json(tc, result).map(Outcome::Json)
-            });
-        };
-        let func = v8::Local::new(tc, func);
-        let this: v8::Local<v8::Value> = v8::undefined(tc).into();
-        let Some(promise) = func.call(tc, this, &[result]) else {
-            return EvalEnd::Done(Err(shim_threw(tc, at)));
-        };
-        value = promise;
-        stage = Some(next);
     }
+
+    /// The promise the flight waits on, if it does.
+    pub(super) fn promise<'s>(
+        &self,
+        scope: &mut v8::PinScope<'s, '_>,
+    ) -> Option<v8::Local<'s, v8::Promise>> {
+        let value = v8::Local::new(scope, &self.value);
+        v8::Local::<v8::Promise>::try_from(value).ok()
+    }
+
+    /// `f`, a failure while waiting, as this flight's (an `after` shim that
+    /// never settled is the shim's failure).
+    pub(super) fn failed(&self, f: Failure, shims: &Shims) -> Failure {
+        match self.stage {
+            Stage::After(i) if f.code == ErrorCode::Unsettled => {
+                shim_failure(&self.after(shims)[i].1, "never settled".into())
+            }
+            _ => f,
+        }
+    }
+
+    /// Go through every stage whose value has settled: the guest's value,
+    /// then each `after` shim, then (for a fetch call) reading the
+    /// Response. Some(result) once done; None while its promise is pending.
+    pub(super) fn advance(
+        &mut self,
+        tc: &mut v8::PinnedRef<v8::TryCatch<v8::HandleScope>>,
+        shims: &Shims,
+    ) -> Option<Result<Outcome, Failure>> {
+        let after = self.after(shims);
+        loop {
+            let value = v8::Local::new(tc, &self.value);
+            let settled = match v8::Local::<v8::Promise>::try_from(value) {
+                Err(_) => {
+                    tc.perform_microtask_checkpoint();
+                    Ok(value)
+                }
+                Ok(promise) => match promise.state() {
+                    v8::PromiseState::Pending => return None,
+                    v8::PromiseState::Fulfilled => Ok(promise.result(tc)),
+                    v8::PromiseState::Rejected => {
+                        // Its rejection is the eval's (or shim's) result, not unhandled.
+                        errors::forget(tc, promise);
+                        Err(promise.result(tc))
+                    }
+                },
+            };
+            let mut result = v8::Local::new(tc, &self.result);
+            match (settled, self.stage) {
+                (Err(e), Stage::Guest | Stage::Finish) => return Some(Err(guest_failure(tc, e))),
+                (Err(e), Stage::After(i)) => {
+                    let what = format!("threw: {}", describe(tc, e));
+                    return Some(Err(shim_failure(&after[i].1, what)));
+                }
+                (Ok(v), Stage::Guest | Stage::Finish) => result = v,
+                // An `after` shim's value replaces the result unless it's undefined.
+                (Ok(v), Stage::After(_)) if !v.is_undefined() => result = v,
+                (Ok(_), Stage::After(_)) => {}
+            }
+            self.result = v8::Global::new(tc, result);
+            let next = match self.stage {
+                Stage::Guest => Some(0),
+                Stage::After(i) => Some(i + 1),
+                Stage::Finish => None,
+            };
+            if let Some((i, (func, at))) = next.and_then(|i| after.get(i).map(|shim| (i, shim))) {
+                self.stage = Stage::After(i);
+                let func = v8::Local::new(tc, func);
+                let this: v8::Local<v8::Value> = v8::undefined(tc).into();
+                let Some(promise) = func.call(tc, this, &[result]) else {
+                    return Some(Err(shim_threw(tc, at)));
+                };
+                self.value = v8::Global::new(tc, promise);
+                continue;
+            }
+            // A fetch call reads the Response (as the shims left it) last.
+            if self.call == Some(CallKind::Fetch) && self.stage != Stage::Finish {
+                let promise = match module::finish(tc, result, self.max_body as f64) {
+                    Ok(Some(promise)) => promise,
+                    Ok(None) => return Some(Err(no_web())),
+                    Err(()) => return Some(Err(caught(tc))),
+                };
+                self.stage = Stage::Finish;
+                self.value = v8::Global::new(tc, promise);
+                continue;
+            }
+            if self.setup {
+                module::loaded(tc);
+                return Some(Ok(Outcome::Json("null".into())));
+            }
+            return Some(match self.call {
+                Some(CallKind::Fetch) => to_response(tc, result, self.max_body),
+                Some(CallKind::Drain) => Ok(Outcome::Json("null".into())),
+                Some(CallKind::Export) => to_outcome(tc, result),
+                None => to_json(tc, result).map(Outcome::Json),
+            });
+        }
+    }
+}
+
+/// Where a flight is.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Stage {
+    /// The guest's own value: the code's, or the handler's.
+    Guest,
+    /// `after` shim i's promise.
+    After(usize),
+    /// A fetch call's Response, being read for the host.
+    Finish,
+}
+
+/// A call's arguments: `args` (a JSON array) parsed in the context, with
+/// the byte arguments as Uint8Arrays at their indices.
+fn call_args<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    args: &str,
+    bytes: &[(u32, Vec<u8>)],
+) -> Result<Vec<v8::Local<'s, v8::Value>>, Failure> {
+    let parsed = v8::String::new(scope, args).and_then(|s| v8::json::parse(scope, s));
+    let Some(array) = parsed.and_then(|v| v8::Local::<v8::Array>::try_from(v).ok()) else {
+        return Err(fail(
+            ErrorCode::Internal,
+            "call arguments are not a JSON array",
+        ));
+    };
+    let mut argv: Vec<v8::Local<v8::Value>> = Vec::with_capacity(array.length() as usize);
+    for i in 0..array.length() {
+        let arg = array
+            .get_index(scope, i)
+            .unwrap_or_else(|| v8::undefined(scope).into());
+        argv.push(arg);
+    }
+    for (index, data) in bytes {
+        if let Some(slot) = argv.get_mut(*index as usize) {
+            *slot = crate::bytes::new_u8array(scope, data).into();
+        }
+    }
+    Ok(argv)
+}
+
+/// The function a call names, and its `this`: among a program's exports
+/// (`module::handler`), or on the global object (`handler`). Err(Some) if
+/// there is none; Err(None) if looking it up threw (the exception caught).
+fn find_handler<'s>(
+    tc: &mut v8::PinScope<'s, '_>,
+    name: &str,
+) -> Result<(v8::Local<'s, v8::Function>, v8::Local<'s, v8::Value>), Option<Failure>> {
+    let found = match module::handler(tc, name) {
+        Ok(Handler::NoProgram) => handler(tc, name)
+            .map(|global| global.map(|function| (function, v8::undefined(tc).into()))),
+        Ok(Handler::Found(function, this)) => Ok(Some((function, this))),
+        Ok(Handler::Missing) => {
+            let message = format!("the program has no export named {name}, and its default export no method named {name}");
+            return Err(Some(fail(ErrorCode::HandlerNotFound, clip(message))));
+        }
+        Err(()) => Err(()),
+    };
+    match found {
+        Ok(Some(found)) => Ok(found),
+        Ok(None) => {
+            let message = format!("the isolate has no function named {name}: define it with a function declaration or on globalThis");
+            Err(Some(fail(ErrorCode::HandlerNotFound, clip(message))))
+        }
+        Err(()) => Err(None),
+    }
+}
+
+/// A fetch call's result: the Response's head as JSON, and its body. Past
+/// `max_body` bytes, `limits.bodyBytes`.
+fn to_response(
+    scope: &mut v8::PinScope,
+    value: v8::Local<v8::Value>,
+    max_body: u64,
+) -> Result<Outcome, Failure> {
+    let Ok(object) = v8::Local::<v8::Object>::try_from(value) else {
+        return Err(fail(ErrorCode::Internal, "the response is not an object"));
+    };
+    let too_large = js::short_string(scope, "tooLarge");
+    if let Some(length) = object
+        .get(scope, too_large.into())
+        .filter(|v| v.is_number())
+    {
+        let length = length.number_value(scope).unwrap_or(0.0);
+        return Err(limit(
+            "bodyBytes",
+            format!("the response's body is more than {max_body} bytes ({length} so far; limits.bodyBytes)"),
+        ));
+    }
+    let key = js::short_string(scope, "body");
+    let body = object.get(scope, key.into());
+    let Some(Some(Ok(bytes))) =
+        body.map(|b| crate::bytes::copy_bytes_max(scope, b, max_body as usize))
+    else {
+        return Err(fail(
+            ErrorCode::Internal,
+            "the response's body is not bytes",
+        ));
+    };
+    object.delete(scope, key.into());
+    let head = to_json(scope, object.into())?;
+    Ok(Outcome::Response { head, body: bytes })
 }
 
 enum Settled {
@@ -403,7 +626,9 @@ fn settle(
 ) -> Settled {
     loop {
         tc.perform_microtask_checkpoint();
-        if tc.has_terminated() {
+        // The watchdog may have fired while no JavaScript ran (an abort
+        // while waiting), so the termination hasn't landed yet.
+        if tc.has_terminated() || super::out_of_time() {
             return Settled::Failed(limit("timeoutMs", "terminated"));
         }
         match promise.state() {
@@ -463,6 +688,7 @@ fn settle(
         };
         match msg {
             VmMsg::HostReply { call, reply } => apply_host_reply(tc, call, reply),
+            VmMsg::Wake => {}
             VmMsg::Dispose => return Settled::Disposed,
             VmMsg::Eval { .. } => unreachable!("deferred by the mailbox"),
         }
@@ -506,7 +732,7 @@ pub(super) fn refuse_all(id: u64, rx: &Receiver<VmMsg>, out: &Output, cause: Str
                 Usage::default(),
                 None,
             ),
-            VmMsg::HostReply { .. } => {}
+            VmMsg::HostReply { .. } | VmMsg::Wake => {}
             VmMsg::Dispose => return,
         }
     }
@@ -532,6 +758,14 @@ pub(super) fn send_result(
             ErrorCode::NotSerializable,
             "the result is larger than 64 MiB",
         )),
+        Ok(Outcome::Response { head, body })
+            if !crate::frame::fits(head.len() + 1024, body.len()) =>
+        {
+            Err(fail(
+                ErrorCode::NotSerializable,
+                "the response is larger than 64 MiB",
+            ))
+        }
         r => r,
     };
     let retired = retired.map(|f| f.message.as_str());
@@ -569,6 +803,24 @@ pub(super) fn send_result(
                 usage,
             };
             out.send_with_bytes(&msg, &[&bytes]);
+        }
+        Ok(Outcome::Response { head, body }) => {
+            let value = RawValue::from_string(head).expect("V8 produced JSON");
+            let msg = Out::Result {
+                vm,
+                req,
+                ok: true,
+                value: Some(&value),
+                bin: Some(body.len()),
+                retired,
+                code: None,
+                message: None,
+                guest: None,
+                limit: None,
+                shim: None,
+                usage,
+            };
+            out.send_with_bytes(&msg, &[&body]);
         }
         Err(f) => out.send(&Out::Result {
             vm,

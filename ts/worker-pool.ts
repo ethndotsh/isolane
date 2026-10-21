@@ -239,12 +239,14 @@ export interface IsolateState {
   readonly dispose: () => void;
 }
 
-/** What a program adds to its instances: its id, and its env (JSON-serializable) with its host functions in it. */
+/** What a program adds to its instances: its id, its env (JSON-serializable) with its host functions in it, its host modules, and the calls each runs at once. */
 export interface ProgramSpec {
   readonly id: number;
   readonly env: Readonly<Record<string, unknown>>;
   /** Host modules (`modules: { 'isolane:kv': { get } }`): each one's functions. */
   readonly hostModules?: readonly { readonly specifier: string; readonly entries: readonly HostEntry[] }[];
+  /** Calls each instance runs at once (`instances.concurrency`). */
+  readonly concurrency: number;
 }
 
 /** `program` in an event, for an isolate that is a program's instance. */
@@ -457,6 +459,7 @@ export class TenantWorker {
       prelude: caps.prelude,
       shims: config.shims,
       env: program ? JSON.stringify(program.env) : undefined,
+      concurrency: program && program.concurrency > 1 ? program.concurrency : undefined,
     });
     return state;
   }
@@ -519,9 +522,17 @@ export class TenantWorker {
   /**
    * Call the function the isolate's code defined as `name`. Arguments that
    * are bytes cross as bytes; the rest as JSON (`undefined` becomes null,
-   * as in an array).
+   * as in an array). `kind`: call a program's fetch handler instead (it
+   * resolves to `{ head, body }`), or wait for its `ctx.waitUntil` work.
    */
-  call(state: IsolateState, req: number, name: string, args: readonly unknown[], signal?: AbortSignal): Promise<unknown> {
+  call(
+    state: IsolateState,
+    req: number,
+    name: string,
+    args: readonly unknown[],
+    signal?: AbortSignal,
+    kind?: { kind: 'fetch'; maxBody: number } | { kind: 'drain' },
+  ): Promise<unknown> {
     let json: string | undefined;
     const parts: BinaryPart[] = [];
     try {
@@ -537,7 +548,7 @@ export class TenantWorker {
     if (json === undefined || !fits(Buffer.byteLength(json, 'utf8') + Buffer.byteLength(name, 'utf8') + 1024, bytes)) {
       return Promise.reject(invalidConfig('args', 'are larger than a frame carries (64 MiB)'));
     }
-    const frame: WorkerCommand = { t: 'call', vm: state.id, req, name, args: json };
+    const frame: WorkerCommand = { t: 'call', vm: state.id, req, name, args: json, ...kind };
     if (parts.length) frame.bin = parts.map((p) => [p.path[0] as number, p.bytes.length]);
     return this.#submit(
       state,
@@ -748,7 +759,7 @@ export class TenantWorker {
       if (!pending) return;
       this.#requests.delete(msg.req);
       clearTimeout(pending.timer);
-      if (msg.ok) pending.resolve(msg.value);
+      if (msg.ok) pending.resolve(msg.body === undefined ? msg.value : { head: msg.value, body: msg.body });
       else {
         const code = isIsolaneErrorCode(msg.code) ? msg.code : 'ERR_INTERNAL';
         const shim = code === 'ERR_SHIM' && msg.shim ? pending.isolate.shims[msg.shim.phase][msg.shim.index] : undefined;
@@ -756,6 +767,10 @@ export class TenantWorker {
           tenant: this.tenant,
           guest: msg.guest,
           limit: msg.limit,
+          // Retired while it ran (another call in the instance was stopped
+          // part-way): it may have done some of its work, so it isn't safe
+          // to run again as if it never ran.
+          retryable: code === 'ERR_ISOLATE_RETIRED' && msg.retired !== undefined ? false : undefined,
           // The filename from our own config, not the worker's word for it.
           shim: shim && msg.shim ? { phase: msg.shim.phase, index: msg.shim.index, filename: shim.filename } : undefined,
         });
