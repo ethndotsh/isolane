@@ -124,6 +124,12 @@ runs:
       shell: bash
       run: |
         scripts/sync-mtimes.sh
+        if [ "${CARGO_BUILD_TARGET:-}" = aarch64-unknown-linux-gnu ]; then
+          # Install the arm64 sysroot before cargo starts: rusty_v8's build
+          # script would install it too, but crates that also build a cdylib
+          # (oxc_sourcemap) link against it before that script has run.
+          python3 build/rusty_v8/build/linux/sysroot_scripts/install-sysroot.py --arch=arm64
+        fi
         scripts/build-v8.sh || {
           # rustc's errors, not the last lines of -vv build-script noise.
           grep -nE -A20 '^error|^thread .* panicked|FAILED:' build/logs/linux-*.log | head -300
