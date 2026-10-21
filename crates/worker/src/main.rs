@@ -193,7 +193,12 @@ fn make_web_snapshot(path: &str) -> ExitCode {
     }
 }
 
-fn serve(lock_down: bool, memory_limit: Option<u64>, web_background: bool) -> ExitCode {
+fn serve(
+    lock_down: bool,
+    memory_limit: Option<u64>,
+    web_background: bool,
+    spare_isolates: usize,
+) -> ExitCode {
     let lockdown = match start(lock_down, memory_limit, web_background) {
         Ok(report) => report,
         Err(exit) => return exit.into(),
@@ -209,6 +214,9 @@ fn serve(lock_down: bool, memory_limit: Option<u64>, web_background: bool) -> Ex
         out,
         vms: HashMap::new(),
         failed: HashMap::new(),
+        trees: HashMap::new(),
+        spares: Vec::new(),
+        spare_isolates,
     };
     let mut stdin = BufReader::new(std::io::stdin().lock());
     match worker.run(&mut stdin) {
@@ -322,6 +330,13 @@ struct Worker {
     vms: HashMap<u64, (Sender<VmMsg>, vm::Stopper)>,
     /// Isolates whose evals fail with this, from their create on.
     failed: HashMap<u64, Failure>,
+    /// Programs' files as loads sent them, by tree id, until `forget`.
+    trees: HashMap<String, Arc<vm::Tree>>,
+    /// Isolates made ahead of their VMs (see `vm::Spare`), at most
+    /// `spare_isolates` of them: made once a web VM has been created, for
+    /// VMs like it.
+    spares: Vec<vm::Spare>,
+    spare_isolates: usize,
 }
 
 impl Worker {
@@ -386,20 +401,34 @@ impl Worker {
                 vm,
                 req,
                 main,
+                tree: id,
                 files,
                 bin,
                 options,
             } => {
                 let bytes = split_attached(attached, bin)
                     .ok_or_else(|| bad_message("load bytes don't match the frame"))?;
-                let mut tree: std::collections::BTreeMap<String, vm::Source> = files
-                    .into_iter()
-                    .map(|(path, text)| (path, vm::Source::Text(text)))
-                    .collect();
-                for (path, data) in bytes {
-                    tree.insert(path, vm::Source::Bytes(data));
-                }
-                let files = vm::Tree::new(tree).map(std::sync::Arc::new);
+                let files = match files {
+                    Some(files) => {
+                        let mut tree: std::collections::BTreeMap<String, vm::Source> = files
+                            .into_iter()
+                            .map(|(path, text)| (path, vm::Source::Text(text)))
+                            .collect();
+                        for (path, data) in bytes {
+                            tree.insert(path, vm::Source::Bytes(data));
+                        }
+                        let tree = vm::Tree::new(tree).map(Arc::new);
+                        if let Ok(tree) = &tree {
+                            self.trees.insert(id, Arc::clone(tree));
+                        }
+                        tree
+                    }
+                    // The supervisor sends a tree's files before any load
+                    // that names it alone, and forgets it only after.
+                    None => Ok(self.trees.get(&id).cloned().ok_or_else(|| {
+                        bad_message("a load names files the worker doesn't have")
+                    })?),
+                };
                 self.eval(
                     vm,
                     req,
@@ -472,6 +501,9 @@ impl Worker {
                     let _ = tx.send(VmMsg::Wake);
                 }
             }
+            In::Forget { tree } => {
+                self.trees.remove(&tree);
+            }
             In::Dispose { vm } => {
                 self.failed.remove(&vm);
                 if let Some((tx, stopper)) = self.vms.remove(&vm) {
@@ -486,7 +518,37 @@ impl Worker {
     fn create(&mut self, vm: u64, config: VmConfig) {
         vm::init_shared_background(config.limits.worker_background_ms);
         let (tx, rx) = mpsc::channel();
-        match vm::spawn(vm, config, rx, self.out.clone()) {
+        let fits = vm::Spare::fits(&config);
+        // Spares made for another heap limit won't fit the VMs to come
+        // either, most likely: make them again for this one.
+        if fits && self.spares.iter().any(|s| !s.matches(&config)) {
+            self.spares.clear();
+        }
+        let refill = fits.then_some(config.limits.heap_bytes);
+        let started = match self.spares.pop() {
+            Some(spare) if spare.matches(&config) => {
+                match spare.take(vm, config, rx, self.out.clone()) {
+                    Ok(stopper) => Ok(stopper),
+                    Err(parts) => {
+                        let (config, rx, out) = *parts;
+                        vm::spawn(vm, config, rx, out)
+                    }
+                }
+            }
+            other => {
+                self.spares.extend(other);
+                vm::spawn(vm, config, rx, self.out.clone())
+            }
+        };
+        if let Some(heap_bytes) = refill {
+            while self.spares.len() < self.spare_isolates {
+                match vm::Spare::start(heap_bytes) {
+                    Ok(spare) => self.spares.push(spare),
+                    Err(_) => break,
+                }
+            }
+        }
+        match started {
             Ok(stopper) => {
                 self.vms.insert(vm, (tx, stopper));
             }
@@ -683,6 +745,9 @@ fn escape_test(probe: &str) -> ExitCode {
     ExitCode::FAILURE
 }
 
+/// Most `--spare-isolates` (each holds an isolate's memory while idle).
+const MAX_SPARE_ISOLATES: usize = 8;
+
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
     #[cfg(all(feature = "escape-tests", target_os = "linux"))]
@@ -698,9 +763,20 @@ fn main() -> ExitCode {
     let mut mode = None;
     let mut memory_limit = None;
     let mut web_background = false;
+    let mut spare_isolates = 0;
     for arg in &args {
         if arg == "--prepare-web" {
             web_background = true;
+        } else if let Some(n) = arg.strip_prefix("--spare-isolates=") {
+            match n.parse::<usize>() {
+                Ok(n) if n <= MAX_SPARE_ISOLATES => spare_isolates = n,
+                _ => {
+                    eprintln!(
+                        "isolane-worker: bad --spare-isolates {n} (0 to {MAX_SPARE_ISOLATES})"
+                    );
+                    return Exit::Usage.into();
+                }
+            }
         } else if let Some(n) = arg.strip_prefix("--memory-bytes=") {
             match n.parse::<u64>() {
                 Ok(n) => memory_limit = Some(n),
@@ -717,11 +793,21 @@ fn main() -> ExitCode {
     }
     match mode {
         Some("--self-check") => self_check(),
-        None | Some("--serve") => serve(/* lock_down */ true, memory_limit, web_background),
-        Some("--no-lockdown") => serve(/* lock_down */ false, memory_limit, web_background),
+        None | Some("--serve") => serve(
+            /* lock_down */ true,
+            memory_limit,
+            web_background,
+            spare_isolates,
+        ),
+        Some("--no-lockdown") => serve(
+            /* lock_down */ false,
+            memory_limit,
+            web_background,
+            spare_isolates,
+        ),
         Some(other) => {
             eprintln!(
-                "usage: isolane-worker [--serve | --self-check | --no-lockdown] [--memory-bytes=BYTES] [--prepare-web] | --make-web-snapshot=FILE (got {other})"
+                "usage: isolane-worker [--serve | --self-check | --no-lockdown] [--memory-bytes=BYTES] [--prepare-web] [--spare-isolates=N] | --make-web-snapshot=FILE (got {other})"
             );
             Exit::Usage.into()
         }

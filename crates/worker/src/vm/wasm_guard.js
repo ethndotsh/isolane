@@ -5,10 +5,13 @@
 // instance's exports, so those refuse shared memories; compiling a module
 // that declares one is fine, as nothing can reach the memory.
 //
+// It also hands each module the guest compiles to `keep` (the worker's
+// wasm cache, vm/wasm_cache.rs), so later isolates reuse its compiled code.
+//
 // Everything this uses is captured now, and the checks don't call anything
 // guest code could have replaced since (no iterators, no prototype lookups
 // on objects the guest can reach).
-(() => {
+((keep) => {
   "use strict";
   const W = globalThis.WebAssembly;
   const { apply, construct, defineProperty, getOwnPropertyDescriptor, ownKeys } = Reflect;
@@ -61,6 +64,14 @@
     defineProperty(Guard, "name", { value: Original.name });
     defineProperty(Guard, "length", { value: Original.length });
     defineProperty(Guard, "prototype", { value: Original.prototype });
+    // Static methods too (Module.exports, imports, customSections).
+    const statics = ownKeys(Original);
+    for (let i = 0; i < statics.length; i++) {
+      const key = statics[i];
+      if (key !== "name" && key !== "length" && key !== "prototype") {
+        defineProperty(Guard, key, getOwnPropertyDescriptor(Original, key));
+      }
+    }
     defineProperty(Original.prototype, "constructor", {
       value: Guard,
       writable: true,
@@ -109,10 +120,29 @@
     return guard;
   };
 
+  // compile and compileStreaming, keeping what they make.
+  const guardCompile = (name, original) => {
+    const guard = {
+      [name](source) {
+        return after(apply(original, W, [source]), (module) => {
+          keep(module);
+          return module;
+        });
+      },
+    }[name];
+    defineProperty(guard, "length", { value: 1 });
+    return guard;
+  };
+  const keptCompile = guardCompile("compile", compile);
+
   replace("Memory", guardConstructor(Memory, checkMemory));
   replace("Instance", guardConstructor(Instance, checkInstance));
-  replace("instantiate", guardInstantiate("instantiate", (source) => apply(compile, W, [source])));
+  replace("Module", guardConstructor(Module, keep));
+  replace("compile", keptCompile);
+  replace("instantiate", guardInstantiate("instantiate", (source) => apply(keptCompile, W, [source])));
   if (compileStreaming !== undefined) {
-    replace("instantiateStreaming", guardInstantiate("instantiateStreaming", (source) => apply(compileStreaming, W, [source])));
+    const keptStreaming = guardCompile("compileStreaming", compileStreaming);
+    replace("compileStreaming", keptStreaming);
+    replace("instantiateStreaming", guardInstantiate("instantiateStreaming", (source) => apply(keptStreaming, W, [source])));
   }
-})();
+})

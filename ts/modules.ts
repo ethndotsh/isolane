@@ -103,7 +103,8 @@ export function resolveModules(source: unknown, filename: string | undefined, op
         throw invalidConfig(`source.files[${JSON.stringify(path)}]`, 'must be a string or a Uint8Array');
       }
       if (clean in files) throw invalidConfig(`source.files[${JSON.stringify(path)}]`, `names the same file as another path (${clean})`);
-      files[clean] = content;
+      // Bytes are copied: a loaded program's files don't change.
+      files[clean] = typeof content === 'string' ? content : new Uint8Array(content);
     }
     main = programPath(s.main, 'source.main');
     if (!(main in files)) throw invalidConfig('source.main', `must be one of source.files (${JSON.stringify(main)} isn't)`);

@@ -9,7 +9,7 @@
 // is done.
 
 import { IsolaneError, abortedError, invalidConfig } from './errors.js';
-import type { HookChain } from './hooks.js';
+import type { HookChain, ModulesCompiled } from './hooks.js';
 import type { StandardSchemaV1 } from './schema.js';
 import type { ModuleOptionsWire, WorkerUsage } from './worker.js';
 
@@ -129,6 +129,14 @@ export interface ProgramUsage {
   queued: number;
   /** CPU time of its instances (setup, calls, and work between them); Linux only (0 elsewhere). */
   cpuMs: number;
+}
+
+/** The worker's account of a load's compiling, if it's well formed. */
+function modulesCompiled(value: unknown): ModulesCompiled | undefined {
+  if (value === null || typeof value !== 'object') return undefined;
+  const { compiled, cached, rejected } = value as Record<string, unknown>;
+  const count = (n: unknown): n is number => Number.isSafeInteger(n) && (n as number) >= 0;
+  return count(compiled) && count(cached) && count(rejected) ? { compiled, cached, rejected } : undefined;
 }
 
 /** One instance and what the pool knows of it. */
@@ -422,9 +430,16 @@ export class Program {
       instance[OBSERVE]((u) => {
         if (u.cpuUs !== undefined) this.#usage.cpuMs += u.cpuUs / 1000;
       });
-      await instance[LOAD](this.#main, this.#files, this.#modules);
+      const loaded = await instance[LOAD](this.#main, this.#files, this.#modules);
       this.#usage.loads++;
-      this.#chain.emit('programLoad', { tenant: this.tenant, program: this.id, isolate: instance.id, filename: this.#main, durationMs: performance.now() - started });
+      this.#chain.emit('programLoad', {
+        tenant: this.tenant,
+        program: this.id,
+        isolate: instance.id,
+        filename: this.#main,
+        durationMs: performance.now() - started,
+        modules: modulesCompiled(loaded),
+      });
     } catch (err) {
       this.#usage.loads++;
       this.#usage.loadFailures++;

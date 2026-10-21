@@ -333,7 +333,7 @@ test('events name the program: programLoad, call, guestError, log', async (t) =>
   assert.equal(await program.call('f', []), 1);
   await sleep(20);
   assert.equal(seen.programLoad.length, 1);
-  assert.deepEqual({ ...seen.programLoad[0], durationMs: 0, isolate: 0 }, { tenant: 'programs-events', program: program.id, isolate: 0, filename: 'events.js', durationMs: 0 });
+  assert.deepEqual({ ...seen.programLoad[0], durationMs: 0, isolate: 0 }, { tenant: 'programs-events', program: program.id, isolate: 0, filename: 'events.js', durationMs: 0, modules: { compiled: 1, cached: 0, rejected: 0 } });
   assert.equal(seen.call[0]?.program, program.id);
   assert.equal(seen.call[0]?.name, 'f');
   assert.equal(seen.guestError[0]?.program, program.id);

@@ -135,8 +135,22 @@ export interface ProgramLoadEvent {
   /** The main module's path. */
   filename: string;
   durationMs: number;
+  /**
+   * How the program's code modules were compiled, for a load that
+   * succeeded: how many, how many of them from the worker's code cache
+   * (made by an earlier instance), and how many caches V8 rejected and
+   * compiled from source instead.
+   */
+  modules?: ModulesCompiled;
   /** Why the load failed, if it did. */
   error?: IsolaneError;
+}
+
+/** How a program instance's code modules were compiled (see `ProgramLoadEvent`). */
+export interface ModulesCompiled {
+  compiled: number;
+  cached: number;
+  rejected: number;
 }
 
 /** A tenant's worker process started or exited. */

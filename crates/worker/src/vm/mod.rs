@@ -11,6 +11,7 @@
 //! - `errors`: guest errors described, host-call attribution, and errors
 //!   nothing handled
 //! - `mailbox`: messages held while a sync host call waits
+//! - `wasm_cache`: compiled WebAssembly kept for the worker's next isolates
 //! - `watchdog`: wall-clock and CPU budgets
 //! - `background`: the budget for work between evals
 
@@ -24,6 +25,7 @@ mod host_call;
 mod mailbox;
 mod module;
 pub(crate) use module::{Source, Tree};
+mod wasm_cache;
 mod watchdog;
 
 use std::cell::{Cell, RefCell};
@@ -230,8 +232,115 @@ pub fn spawn(
     std::thread::Builder::new()
         .name(format!("vm-{id}"))
         .stack_size(VM_THREAD_STACK)
-        .spawn(move || vm_main(id, config, rx, out, watchdog))
+        .spawn(move || vm_main(id, config, rx, out, watchdog, None))
         .map(|_| stopper)
+}
+
+// ---- spares ----
+
+/// A VM thread that has made its isolate and context ahead of its VM: from
+/// the web platform's snapshot, with a heap limit, which is all a VM's
+/// isolate and fresh context take from its config. Deserializing them is
+/// most of a fresh web VM's start (about 1 ms of it); a spare has done it
+/// before the `create` comes.
+///
+/// Only VMs whose isolate a spare could have made take one: web VMs
+/// without a seeded `random` (V8 draws an isolate's entropy as it makes
+/// it) and with the spare's heap limit.
+pub struct Spare {
+    heap_bytes: Option<u64>,
+    tx: std::sync::mpsc::Sender<Takeover>,
+}
+
+/// What a spare is handed to become VM `id`.
+struct Takeover {
+    id: u64,
+    config: VmConfig,
+    rx: Receiver<VmMsg>,
+    out: Output,
+    stopper: Arc<StopperState>,
+}
+
+/// An isolate and its context, made before their VM.
+struct Made {
+    isolate: v8::OwnedIsolate,
+    context: v8::Global<v8::Context>,
+}
+
+impl Spare {
+    /// Whether a VM of `config` can take a spare (one made for `config`).
+    pub fn fits(config: &VmConfig) -> bool {
+        config.web && config.random.seed.is_none() && crate::web::snapshot().is_some()
+    }
+
+    /// Start a spare for web VMs with the heap limit `heap_bytes`.
+    pub fn start(heap_bytes: Option<u64>) -> std::io::Result<Spare> {
+        let (tx, rx) = std::sync::mpsc::channel::<Takeover>();
+        std::thread::Builder::new()
+            .name("vm-spare".into())
+            .stack_size(VM_THREAD_STACK)
+            .spawn(move || {
+                let isolate = new_isolate(heap_bytes, crate::web::snapshot());
+                let made = {
+                    let mut isolate = isolate;
+                    let context = {
+                        v8::scope!(let scope, &mut isolate);
+                        let context = v8::Context::new(scope, Default::default());
+                        v8::Global::new(scope, context)
+                    };
+                    Made { isolate, context }
+                };
+                // Dropped unused (the worker is exiting, or a VM unlike
+                // this one came): the isolate goes with the thread.
+                if let Ok(t) = rx.recv() {
+                    vm_main(t.id, t.config, t.rx, t.out, t.stopper, Some(made));
+                }
+            })?;
+        Ok(Spare { heap_bytes, tx })
+    }
+
+    /// Whether this spare can become a VM of `config`.
+    pub fn matches(&self, config: &VmConfig) -> bool {
+        Self::fits(config) && config.limits.heap_bytes == self.heap_bytes
+    }
+
+    /// Become VM `id` (a VM this spare `matches`). Gives the VM's parts back
+    /// if the spare's thread is gone, to `spawn` instead.
+    pub fn take(
+        self,
+        id: u64,
+        config: VmConfig,
+        rx: Receiver<VmMsg>,
+        out: Output,
+    ) -> Result<Stopper, Box<(VmConfig, Receiver<VmMsg>, Output)>> {
+        let stopper = Stopper(Arc::new(StopperState::default()));
+        let takeover = Takeover {
+            id,
+            config,
+            rx,
+            out,
+            stopper: stopper.0.clone(),
+        };
+        match self.tx.send(takeover) {
+            Ok(()) => Ok(stopper),
+            Err(std::sync::mpsc::SendError(t)) => Err(Box::new((t.config, t.rx, t.out))),
+        }
+    }
+}
+
+/// An isolate with the heap limit `heap_bytes`, from `snapshot` if given.
+fn new_isolate(heap_bytes: Option<u64>, snapshot: Option<&'static [u8]>) -> v8::OwnedIsolate {
+    let mut params = v8::CreateParams::default();
+    if let Some(max) = heap_bytes {
+        // At most V8's pointer-compression cage (the supervisor's maximum).
+        params = params.heap_limits(0, max.min(4 << 30) as usize);
+    }
+    if let Some(blob) = snapshot {
+        params = params
+            .snapshot_blob(v8::StartupData::from(blob))
+            .external_references(std::borrow::Cow::Borrowed(crate::web::external_references()));
+    }
+    v8::Isolate::new(params)
 }
 
 /// Stops whatever a VM is running, from another thread: after `Dispose`,
@@ -438,12 +547,15 @@ fn stopped_part_way(result: &Result<Outcome, Failure>) -> Option<&'static str> {
     }
 }
 
+/// A VM's thread: its isolate (or a spare's, `made`), its context, and its
+/// messages until it's disposed.
 fn vm_main(
     id: u64,
     config: VmConfig,
     rx: Receiver<VmMsg>,
     out: Output,
     stopper: Arc<StopperState>,
+    made: Option<Made>,
 ) {
     crate::limits::set(config.limits);
     crate::clock::set_mode(config.time);
@@ -451,25 +563,25 @@ fn vm_main(
     let timeout = config.limits.timeout();
     let cpu = config.limits.cpu();
     let concurrency = config.concurrency.unwrap_or(1).max(1);
-    let mut params = v8::CreateParams::default();
-    if let Some(max) = config.limits.heap_bytes {
-        // At most V8's pointer-compression cage (the supervisor's maximum).
-        params = params.heap_limits(0, max.min(4 << 30) as usize);
-    }
     // A web VM starts from the web platform's snapshot (built on first
-    // use), if there is one; other VMs never touch it.
-    let snapshot = if config.web {
-        crate::web::snapshot()
-    } else {
-        None
+    // use), if there is one; other VMs never touch it. A spare made its
+    // isolate and context from it.
+    let (mut isolate, made_context, from_snapshot) = match made {
+        Some(Made { isolate, context }) => (isolate, Some(context), true),
+        None => {
+            let snapshot = if config.web {
+                crate::web::snapshot()
+            } else {
+                None
+            };
+            let from_snapshot = snapshot.is_some();
+            (
+                new_isolate(config.limits.heap_bytes, snapshot),
+                None,
+                from_snapshot,
+            )
+        }
     };
-    let from_snapshot = snapshot.is_some();
-    if let Some(blob) = snapshot {
-        params = params
-            .snapshot_blob(v8::StartupData::from(blob))
-            .external_references(std::borrow::Cow::Borrowed(crate::web::external_references()));
-    }
-    let mut isolate = v8::Isolate::new(params);
     isolate.set_microtasks_policy(v8::MicrotasksPolicy::Explicit);
     isolate.set_allow_wasm_code_generation_callback(if config.wasm {
         allow_wasm
@@ -539,7 +651,7 @@ fn vm_main(
     };
     // Setup runs the embedder's `setup` shims: under the eval budget.
     let (created, fired) = guard.run(&mut isolate, timeout, cpu, |isolate, _| {
-        new_context(isolate, &config, from_snapshot)
+        new_context(isolate, &config, from_snapshot, made_context)
     });
     let fired = fired != Fired::No;
     let (context, shims) = match created {
@@ -787,8 +899,13 @@ fn vm_main(
                     bridge.pending_bytes.set(0);
                 }
                 let spent = usage(&mut isolate, cpu_clock, cpu_start);
+                let loaded = setup && result.is_ok();
                 // Only an eval that ran gets here, so a retirement is this one's.
                 send_result(&out, (id, req), result, spent, retired.as_ref());
+                if loaded {
+                    v8::scope_with_context!(scope, &mut isolate, &context);
+                    module::make_code_caches(scope);
+                }
                 if last {
                     break;
                 }

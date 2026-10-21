@@ -115,13 +115,24 @@ impl Transforms {
         self.defines.is_some() || source_type(path).is_some_and(|t| t.is_typescript() || t.is_jsx())
     }
 
-    /// `source` transformed, from the cache if this worker did it before.
-    pub(crate) fn run(&self, path: &str, source: &str) -> Result<Arc<Output>, Problem> {
+    /// The options, as the caches key on them.
+    pub(crate) fn fingerprint(&self) -> &str {
+        &self.fingerprint
+    }
+
+    /// `source` (whose SHA-256 is `source_hash`) transformed, from the
+    /// cache if this worker did it before.
+    pub(crate) fn run(
+        &self,
+        path: &str,
+        source: &str,
+        source_hash: &[u8; 32],
+    ) -> Result<Arc<Output>, Problem> {
         let mut hash = Sha256::new();
         for part in [
             self.fingerprint.as_bytes(),
             path.as_bytes(),
-            source.as_bytes(),
+            source_hash.as_slice(),
         ] {
             hash.update((part.len() as u64).to_le_bytes());
             hash.update(part);

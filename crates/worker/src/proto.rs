@@ -7,7 +7,7 @@ use serde_json::value::RawValue;
 
 /// The protocol version. The worker reports it in `ready`; a supervisor
 /// that speaks another version refuses the worker.
-pub const PROTOCOL_VERSION: u32 = 9;
+pub const PROTOCOL_VERSION: u32 = 10;
 
 /// Supervisor → worker.
 #[derive(Deserialize)]
@@ -40,9 +40,14 @@ pub enum In {
         req: u64,
         /// The main module's path in `files`.
         main: String,
-        /// Module sources by path (their names in stack traces). Files sent
-        /// as bytes are in `bin` instead.
-        files: std::collections::BTreeMap<String, String>,
+        /// The program's files, by a hash of their contents: sent with
+        /// `files` the first time, the worker keeps them under it (until
+        /// `forget`), and later loads name it alone.
+        tree: String,
+        /// Module sources by path (their names in stack traces), when the
+        /// worker doesn't have `tree` yet. Files sent as bytes are in `bin`
+        /// instead.
+        files: Option<std::collections::BTreeMap<String, String>>,
         /// Files sent as bytes, in the order their bytes follow the frame's
         /// JSON: `[path, length]`.
         #[serde(default)]
@@ -99,6 +104,10 @@ pub enum In {
     },
     Dispose {
         vm: u64,
+    },
+    /// Drop the files kept as `tree` (isolates that loaded them keep theirs).
+    Forget {
+        tree: String,
     },
 }
 

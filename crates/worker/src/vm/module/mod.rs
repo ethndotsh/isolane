@@ -11,12 +11,14 @@
 //! - `tree`: the files, and `oxc_resolver` over them
 //! - `transform`: TypeScript, JSX, and `define`, with oxc
 //! - `source_map`: maps back to the original files, for reported stacks
+//! - `code_cache`: V8 code caches of the compiled modules, per worker
 
+pub(crate) mod code_cache;
 mod source_map;
 mod transform;
 mod tree;
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, HashMap};
 use std::rc::Rc;
 use std::sync::Arc;
@@ -88,6 +90,11 @@ struct Program {
     main: RefCell<Option<v8::Global<v8::Module>>>,
     /// Its namespace, once it evaluated: where calls find handlers.
     namespace: RefCell<Option<v8::Global<v8::Object>>>,
+    /// Modules compiled without a code cache, to make one for once the
+    /// program has evaluated.
+    uncached: RefCell<Vec<(code_cache::Key, v8::Global<v8::Module>)>>,
+    /// What compiling the program's code took from the code cache.
+    compiled: Cell<Compiled>,
     /// runtime/serve.js's `{ serve, finish, drain }`, for `program.fetch`
     /// (absent without the web platform).
     serving: RefCell<Option<v8::Global<v8::Object>>>,
@@ -252,17 +259,42 @@ pub(super) fn load<'s>(
     module.evaluate(scope).ok_or(LoadError::Threw)
 }
 
-/// The program evaluated: calls look up handlers in its namespace from now on.
-pub(super) fn loaded(scope: &mut v8::PinScope) {
+/// The program evaluated: calls look up handlers in its namespace from now
+/// on. Returns how the program's code was compiled.
+pub(super) fn loaded(scope: &mut v8::PinScope) -> Compiled {
     let program = program(scope);
+    let compiled = program.compiled.get();
     let main = program.main.borrow();
     let Some(main) = main.as_ref() else {
-        return;
+        return compiled;
     };
     let main = v8::Local::new(scope, main);
     if let Ok(namespace) = v8::Local::<v8::Object>::try_from(main.get_module_namespace()) {
         *program.namespace.borrow_mut() = Some(v8::Global::new(scope, namespace));
     }
+    compiled
+}
+
+/// Make code caches for the modules compiled without one. Run once the
+/// program has evaluated, after its load's result is sent (it's off the
+/// load's path), so the caches hold the functions setup ran too.
+pub(super) fn make_code_caches(scope: &mut v8::PinScope) {
+    for (key, module) in program(scope).uncached.take() {
+        let module = v8::Local::new(scope, module);
+        let script = module.get_unbound_module_script(scope);
+        if let Some(data) = script.create_code_cache() {
+            code_cache::put(key, Arc::new(data.to_vec()));
+        }
+    }
+}
+
+/// How a program's code modules were compiled: how many, how many from a
+/// code cache, and how many caches V8 rejected (and compiled from source).
+#[derive(Clone, Copy, Default, serde::Serialize)]
+pub(crate) struct Compiled {
+    pub compiled: u32,
+    pub cached: u32,
+    pub rejected: u32,
 }
 
 /// Where the load's module that didn't compile failed, if one didn't.
@@ -495,8 +527,16 @@ fn compile_code<'s>(
 ) -> Result<v8::Local<'s, v8::Module>, Miss> {
     let mut maps = Maps::default();
     let transformed;
-    let code = if files.transforms.applies(path) {
-        match files.transforms.run(path, text) {
+    let hash = files.tree.hash(path).expect("the file is in the tree");
+    let applies = files.transforms.applies(path);
+    let fingerprint = if applies {
+        files.transforms.fingerprint()
+    } else {
+        ""
+    };
+    let key = code_cache::key(&[path.as_bytes(), &hash, fingerprint.as_bytes()]);
+    let code = if applies {
+        match files.transforms.run(path, text, &hash) {
             Ok(output) => {
                 transformed = output;
                 maps.push(Arc::clone(&transformed.map));
@@ -526,19 +566,19 @@ fn compile_code<'s>(
             .borrow_mut()
             .insert(path.to_string(), maps);
     }
-    compile(scope, path, code)
+    compile(scope, path, code, key)
 }
 
-/// Compile module source `code`, named `name` in stack traces. A failure
-/// notes where it was (mapped to the original file), and throws.
-///
-/// A code cache (phase 4) goes here: consume one keyed by the code's hash,
-/// and make one after the first compile.
+/// Compile module source `code`, named `name` in stack traces, from the
+/// worker's code cache for `key` when it has one (see `code_cache`). A
+/// failure notes where it was (mapped to the original file), and throws.
 fn compile<'s>(
     scope: &mut v8::PinScope<'s, '_>,
     name: &str,
     code: &str,
+    key: code_cache::Key,
 ) -> Result<v8::Local<'s, v8::Module>, Miss> {
+    let cached = code_cache::get(&key);
     let source = js::guest_string(scope, code).ok_or(Miss::Thrown)?;
     let name = js::guest_string(scope, name).ok_or(Miss::Thrown)?;
     let origin = v8::ScriptOrigin::new(
@@ -554,9 +594,45 @@ fn compile<'s>(
         /* is_module */ true,
         None,
     );
-    let mut source = v8::script_compiler::Source::new(source, Some(&origin));
+    let (mut source, options) = match &cached {
+        Some(bytes) => (
+            v8::script_compiler::Source::new_with_cached_data(
+                source,
+                Some(&origin),
+                v8::CachedData::new(bytes),
+            ),
+            v8::script_compiler::CompileOptions::ConsumeCodeCache,
+        ),
+        None => (
+            v8::script_compiler::Source::new(source, Some(&origin)),
+            v8::script_compiler::CompileOptions::NoCompileOptions,
+        ),
+    };
     v8::tc_scope!(let tc, scope);
-    if let Some(module) = v8::script_compiler::compile_module(tc, &mut source) {
+    let compiled = v8::script_compiler::compile_module2(
+        tc,
+        &mut source,
+        options,
+        v8::script_compiler::NoCacheReason::NoReason,
+    );
+    if let Some(module) = compiled {
+        let rejected = source.get_cached_data().is_some_and(|data| data.rejected());
+        let program = program(tc);
+        let mut counts = program.compiled.get();
+        counts.compiled += 1;
+        if cached.is_some() && !rejected {
+            counts.cached += 1;
+        } else {
+            if rejected {
+                counts.rejected += 1;
+                code_cache::remove(&key);
+            }
+            program
+                .uncached
+                .borrow_mut()
+                .push((key, v8::Global::new(tc, module)));
+        }
+        program.compiled.set(counts);
         return Ok(module);
     }
     if let Some(message) = tc.message() {
@@ -786,7 +862,8 @@ fn helper_module<'s>(
     if let Some(module) = program(scope).modules.borrow().get(&key) {
         return Ok(Some(v8::Local::new(scope, module)));
     }
-    let module = compile(scope, &specifier, code)?;
+    let cache_key = code_cache::key(&[specifier.as_bytes(), code.as_bytes()]);
+    let module = compile(scope, &specifier, code, cache_key)?;
     let global = v8::Global::new(scope, module);
     program(scope).modules.borrow_mut().insert(key, global);
     Ok(Some(module))

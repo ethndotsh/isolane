@@ -8,9 +8,10 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::io;
 use std::path::{Component, Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use oxc_resolver::{FileMetadata, FileSystem, ResolveError, ResolveOptions, ResolverGeneric};
+use sha2::Digest;
 
 /// A file's contents.
 pub(crate) enum Source {
@@ -39,6 +40,10 @@ impl Source {
 pub(crate) struct Tree {
     files: BTreeMap<String, Source>,
     dirs: BTreeSet<String>,
+    /// Each file's SHA-256, made the first time it's asked for: the
+    /// transform and code caches key on it, so a file is hashed once per
+    /// tree, not once per instance.
+    hashes: BTreeMap<String, OnceLock<[u8; 32]>>,
 }
 
 impl Tree {
@@ -62,7 +67,22 @@ impl Tree {
                 "the program's file path {clash:?} is also a directory"
             ));
         }
-        Ok(Self { files, dirs })
+        let hashes = files
+            .keys()
+            .map(|path| (path.clone(), OnceLock::new()))
+            .collect();
+        Ok(Self {
+            files,
+            dirs,
+            hashes,
+        })
+    }
+
+    /// The SHA-256 of file `path`'s contents.
+    pub(crate) fn hash(&self, path: &str) -> Option<[u8; 32]> {
+        let source = self.files.get(path)?;
+        let hash = self.hashes.get(path)?;
+        Some(*hash.get_or_init(|| sha2::Sha256::digest(source.bytes()).into()))
     }
 
     pub(crate) fn get(&self, path: &str) -> Option<&Source> {
@@ -123,6 +143,7 @@ impl FileSystem for TreeFs {
         let empty = Tree {
             files: BTreeMap::new(),
             dirs: BTreeSet::from([String::new()]),
+            hashes: BTreeMap::new(),
         };
         Self(Arc::new(empty))
     }

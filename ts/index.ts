@@ -35,6 +35,7 @@ export type {
   LogEvent,
   PolicyDenialEvent,
   ProgramLoadEvent,
+  ModulesCompiled,
   RuntimeEvents,
   SecurityEvent,
   WorkerEvent,

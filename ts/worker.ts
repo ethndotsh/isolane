@@ -42,8 +42,13 @@ export type WorkerCommand =
       req: number;
       /** The main module's path in `files`. */
       main: string;
-      /** Module sources by path (text files; bytes go in `bin`). */
-      files: Record<string, string>;
+      /**
+       * The program's files, by a hash of their contents: the worker keeps
+       * them under it, so only the first load on a worker sends them.
+       */
+      tree: string;
+      /** Module sources by path (text files; bytes go in `bin`), when the worker doesn't have `tree` yet. */
+      files?: Record<string, string>;
       /** Files sent as bytes: `[path, length]`, their bytes attached in order. */
       bin?: [string, number][];
       /** How the modules are resolved and transformed. */
@@ -80,7 +85,9 @@ export type WorkerCommand =
       bin?: [PathSegment[], number][];
     }
   | { t: 'abort'; vm: number; req: number }
-  | { t: 'dispose'; vm: number };
+  | { t: 'dispose'; vm: number }
+  /** Drop the files kept as `tree` (isolates that loaded them keep theirs). */
+  | { t: 'forget'; tree: string };
 
 /** How a program's modules are resolved and transformed, as the worker takes it. */
 export interface ModuleOptionsWire {
@@ -92,7 +99,7 @@ export interface ModuleOptionsWire {
 }
 
 /** The protocol version this library speaks; a worker reporting another is refused. */
-export const PROTOCOL_VERSION = 9;
+export const PROTOCOL_VERSION = 10;
 
 /**
  * Input queued for a worker that it hasn't read. A worker reads its input
@@ -323,6 +330,22 @@ function wellFormed(_key: string, value: unknown): unknown {
 const LONE_SURROGATE = /[\ud800-\udbff](?![\udc00-\udfff])|(?<![\ud800-\udbff])[\udc00-\udfff]/g;
 const toWellFormed = (s: string): string => s.replace(LONE_SURROGATE, '\ufffd');
 
+/** How a worker process is started. */
+export interface WorkerProcessOptions {
+  /** Its memory limit (`limits.workerMemoryBytes`). */
+  memoryLimitBytes?: number;
+  /**
+   * It will run web VMs, so if its binary has no embedded web snapshot, it
+   * builds one in the background as it starts (otherwise, when the first
+   * web VM asks).
+   */
+  prepareWeb?: boolean;
+  /** Isolates it keeps made ahead of their VMs (the runtime's `spareIsolates`). */
+  spareIsolates?: number;
+  /** It only reports the isolation it has (`isolationReport`). */
+  probe?: boolean;
+}
+
 export class WorkerProcess {
   readonly ready: Promise<IsolationInfo>;
   #child: ChildProcessByStdio<Writable, Readable, Readable>;
@@ -330,15 +353,12 @@ export class WorkerProcess {
   #stderrTail = '';
   #stall: NodeJS.Timeout | undefined;
 
-  /**
-   * `prepareWeb`: the worker will run web VMs, so if its binary has no
-   * embedded web snapshot, it builds one in the background as it starts
-   * (otherwise, when the first web VM asks).
-   */
-  constructor(workerPath: string, handlers: WorkerHandlers, strict: boolean, memoryLimitBytes?: number, prepareWeb = false, probe = false) {
+  constructor(workerPath: string, handlers: WorkerHandlers, strict: boolean, options: WorkerProcessOptions = {}) {
+    const { memoryLimitBytes, prepareWeb = false, spareIsolates = 0, probe = false } = options;
     const args = ['--serve'];
     if (memoryLimitBytes !== undefined) args.push(`--memory-bytes=${memoryLimitBytes}`);
     if (prepareWeb) args.push('--prepare-web');
+    if (spareIsolates > 0) args.push(`--spare-isolates=${spareIsolates}`);
     // Empty environment and no inherited fds beyond the three pipes: nothing
     // from the application process (secrets in env vars, open sockets) is
     // reachable from the worker.

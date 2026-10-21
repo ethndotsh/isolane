@@ -494,8 +494,11 @@ impl Flight {
                 continue;
             }
             if self.setup {
-                module::loaded(tc);
-                return Some(Ok(Outcome::Json("null".into())));
+                // The load's value says how its code compiled (the
+                // programLoad event's `modules`).
+                let compiled = module::loaded(tc);
+                let json = serde_json::to_string(&compiled).expect("counts serialize");
+                return Some(Ok(Outcome::Json(json)));
             }
             return Some(match self.call {
                 Some(CallKind::Fetch) => to_response(tc, result, self.max_body),

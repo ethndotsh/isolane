@@ -3,6 +3,7 @@
 // and host calls. Everything a worker sends is checked (worker.ts); this
 // module dispatches it.
 
+import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { asUint8Array, isBytes, splitBytes, type BinaryPart } from './binary.js';
 import { capabilities } from './capabilities.js';
@@ -20,6 +21,7 @@ import {
   type WorkerCommand,
   type WorkerHandlers,
   type WorkerMessage,
+  type WorkerProcessOptions,
   type WorkerUsage,
   type ModuleOptionsWire,
 } from './worker.js';
@@ -136,14 +138,8 @@ export class SpareWorker {
   readonly memoryBytes: number | undefined;
   handlers: WorkerHandlers | undefined;
 
-  constructor(
-    workerPath: string,
-    strict: boolean,
-    memoryBytes: number | undefined,
-    prepareWeb: boolean,
-    onExit: (s: SpareWorker) => void,
-  ) {
-    this.memoryBytes = memoryBytes;
+  constructor(workerPath: string, strict: boolean, options: WorkerProcessOptions, onExit: (s: SpareWorker) => void) {
+    this.memoryBytes = options.memoryLimitBytes;
     this.proc = new WorkerProcess(
       workerPath,
       {
@@ -154,8 +150,7 @@ export class SpareWorker {
         },
       },
       strict,
-      memoryBytes,
-      prepareWeb,
+      options,
     );
   }
 }
@@ -266,6 +261,8 @@ export interface TenantWorkerOptions {
   onRecycle: (worker: TenantWorker) => void;
   /** Its first isolate uses the web platform: build its snapshot right away. */
   prepareWeb: boolean;
+  /** Isolates the worker keeps made ahead of their VMs. */
+  spareIsolates: number;
   spare?: SpareWorker;
 }
 
@@ -291,6 +288,69 @@ function processCpuMs(pid: number | undefined): number | undefined {
 /** How long a recycled worker's stateful isolates have to close (or its
  * workerLifetimeMs, if shorter) before they're retired. */
 const RECYCLE_DRAIN_MS = 60_000;
+
+/**
+ * Most bytes of programs' files a worker keeps (see `TenantWorker.load`):
+ * a program's later instances on the worker load from its copy instead of
+ * being sent the files again.
+ */
+const TREE_BYTES = 64 << 20;
+
+/** A program's files, ready for `load` frames, and what they weigh. */
+interface PreparedFiles {
+  /** A hash of the paths and contents: the worker keeps the files under it. */
+  readonly id: string;
+  readonly count: number;
+  /** Paths and contents, in UTF-8 bytes (what `moduleBytes` bounds). */
+  readonly bytes: number;
+  readonly text: Record<string, string>;
+  readonly jsonBytes: number;
+  readonly bin: [string, number][];
+  readonly attached: Uint8Array[];
+  readonly attachedBytes: number;
+}
+
+/** Each program's files, prepared once (a loaded program's files are frozen, and its bytes copied). */
+const prepared = new WeakMap<Readonly<ProgramFiles>, PreparedFiles>();
+
+function prepareFiles(files: Readonly<ProgramFiles>): PreparedFiles {
+  const known = prepared.get(files);
+  if (known) return known;
+  const hash = createHash('sha256');
+  const text: Record<string, string> = {};
+  const bin: [string, number][] = [];
+  const attached: Uint8Array[] = [];
+  let bytes = 0;
+  let attachedBytes = 0;
+  const paths = Object.keys(files);
+  for (const path of paths) {
+    const source = files[path] as string | Uint8Array;
+    const pathBytes = Buffer.byteLength(path, 'utf8');
+    const content = typeof source === 'string' ? Buffer.from(source, 'utf8') : source;
+    // Lengths first, so no two trees hash alike by moving bytes between fields.
+    hash.update(`${pathBytes}:${typeof source === 'string' ? 't' : 'b'}${content.byteLength}:`).update(path).update(content);
+    bytes += pathBytes + content.byteLength;
+    if (typeof source === 'string') {
+      text[path] = source;
+    } else {
+      bin.push([path, source.byteLength]);
+      attached.push(source);
+      attachedBytes += source.byteLength;
+    }
+  }
+  const result: PreparedFiles = {
+    id: hash.digest('hex'),
+    count: paths.length,
+    bytes,
+    text,
+    jsonBytes: Buffer.byteLength(JSON.stringify(text), 'utf8'),
+    bin,
+    attached,
+    attachedBytes,
+  };
+  prepared.set(files, result);
+  return result;
+}
 
 /** Longest host-function error message sent to the guest. */
 const ERROR_TEXT_MAX = 64 * 1024;
@@ -327,6 +387,8 @@ export class TenantWorker {
   recycling = false;
   #onRecycle: () => void;
   #evals = 0;
+  /** Programs' files the worker keeps, by tree id, least recently loaded first: their sizes. */
+  #trees = new Map<string, number>();
   #lifetimeTimer: NodeJS.Timeout | undefined;
   #drainTimer: NodeJS.Timeout | undefined;
   #cpuTimer: NodeJS.Timeout | undefined;
@@ -353,7 +415,11 @@ export class TenantWorker {
       this.#proc = o.spare.proc;
       o.spare.handlers = handlers;
     } else {
-      this.#proc = new WorkerProcess(o.workerPath, handlers, o.strict, o.limits.workerMemoryBytes ?? undefined, o.prepareWeb);
+      this.#proc = new WorkerProcess(o.workerPath, handlers, o.strict, {
+        memoryLimitBytes: o.limits.workerMemoryBytes ?? undefined,
+        prepareWeb: o.prepareWeb,
+        spareIsolates: o.spareIsolates,
+      });
     }
     this.#proc.ready.then(
       () => {
@@ -470,39 +536,50 @@ export class TenantWorker {
    * `main` is the entry. Resolves once setup is done.
    */
   load(state: IsolateState, req: number, main: string, files: Readonly<ProgramFiles>, options: ModuleOptionsWire, signal?: AbortSignal): Promise<unknown> {
-    const paths = Object.keys(files);
-    if (paths.length > state.limits.modules) {
-      return Promise.reject(this.#limit('modules', `the program has ${paths.length} files, more than ${state.limits.modules}`, state.id));
+    const tree = prepareFiles(files);
+    if (tree.count > state.limits.modules) {
+      return Promise.reject(this.#limit('modules', `the program has ${tree.count} files, more than ${state.limits.modules}`, state.id));
     }
     // A frame carries at most 64 MiB (moduleBytes can't be set past it).
     const moduleBytes = state.limits.moduleBytes;
-    const text: Record<string, string> = {};
-    const bin: [string, number][] = [];
-    const attached: Uint8Array[] = [];
-    let bytes = 0;
-    for (const path of paths) {
-      const source = files[path] as string | Uint8Array;
-      bytes += Buffer.byteLength(path, 'utf8');
-      if (typeof source === 'string') {
-        text[path] = source;
-        bytes += Buffer.byteLength(source, 'utf8');
-      } else {
-        bin.push([path, source.byteLength]);
-        attached.push(source);
-        bytes += source.byteLength;
-      }
-    }
-    if (bytes > moduleBytes) {
+    if (tree.bytes > moduleBytes) {
       return Promise.reject(this.#limit('moduleBytes', `the program's files are larger than ${moduleBytes} bytes`, state.id));
     }
     // Text crosses as JSON, which escaping can make larger than the text.
-    const attachedBytes = attached.reduce((n, b) => n + b.byteLength, 0);
-    if (!fits(Buffer.byteLength(JSON.stringify(text), 'utf8') + 64 * 1024, attachedBytes)) {
+    if (!fits(tree.jsonBytes + 64 * 1024, tree.attachedBytes)) {
       return Promise.reject(this.#limit('moduleBytes', 'the program\'s files, as JSON, are larger than a frame carries (64 MiB)', state.id));
     }
-    const frame: WorkerCommand = { t: 'load', vm: state.id, req, main, files: text, options };
-    if (bin.length) frame.bin = bin;
-    return this.#submit(state, req, frame, attached, signal);
+    const frame: WorkerCommand = { t: 'load', vm: state.id, req, main, tree: tree.id, options };
+    if (this.#trees.has(tree.id)) {
+      // Sent before: the worker has them. Most recently used goes last.
+      this.#trees.delete(tree.id);
+      this.#trees.set(tree.id, tree.bytes);
+      return this.#submit(state, req, frame, [], signal);
+    }
+    frame.files = tree.text;
+    if (tree.bin.length) frame.bin = tree.bin;
+    return this.#submit(state, req, frame, tree.attached, signal, () => this.#keepTree(tree));
+  }
+
+  /**
+   * The worker now has `tree`'s files: note it, and have it forget the
+   * least recently loaded trees past TREE_BYTES (or this one, if it alone
+   * is larger).
+   */
+  #keepTree(tree: PreparedFiles): void {
+    if (tree.bytes > TREE_BYTES) {
+      this.#proc.send({ t: 'forget', tree: tree.id }, []);
+      return;
+    }
+    let kept = tree.bytes;
+    for (const bytes of this.#trees.values()) kept += bytes;
+    for (const [id, bytes] of this.#trees) {
+      if (kept <= TREE_BYTES) break;
+      this.#trees.delete(id);
+      this.#proc.send({ t: 'forget', tree: id }, []);
+      kept -= bytes;
+    }
+    this.#trees.set(tree.id, tree.bytes);
   }
 
   /** `last`: the isolate closes after this eval (a one-shot run), so the
@@ -560,7 +637,8 @@ export class TenantWorker {
   }
 
   /** Send an eval or call, and wait for its result. */
-  #submit(state: IsolateState, req: number, frame: WorkerCommand, attached: Uint8Array[], signal?: AbortSignal): Promise<unknown> {
+  /** Send `frame` as eval `req` of `state`; `onSent` runs once it's sent (not if it's refused first). */
+  #submit(state: IsolateState, req: number, frame: WorkerCommand, attached: Uint8Array[], signal?: AbortSignal, onSent?: () => void): Promise<unknown> {
     return new Promise((resolve, reject) => {
       if (!this.#proc.alive) {
         reject(
@@ -604,6 +682,7 @@ export class TenantWorker {
       this.#requests.set(req, pending);
       this.#touch();
       this.#proc.send(frame, attached);
+      onSent?.();
       if (signal) this.#abortOn(signal, req, pending);
       const most = this.limits.workerEvals;
       if (most !== null && ++this.#evals >= most) this.#recycle(`it ran limits.workerEvals (${most}) evals`);

@@ -39,14 +39,18 @@ const REMOVED_GLOBALS: &[&str] = &["SharedArrayBuffer", "Atomics"];
 /// gets instead: `ERR_ISOLATE_RETIRED`, or `ERR_SHIM` when a shim failed.
 /// `from_snapshot`: the isolate was created from the web platform's
 /// snapshot, so its context already has the platform, and only needs
-/// configuring.
+/// configuring. `made`: the fresh context a spare made (see `Spare`).
 pub(super) fn new_context(
     isolate: &mut v8::Isolate,
     config: &VmConfig,
     from_snapshot: bool,
+    made: Option<v8::Global<v8::Context>>,
 ) -> Result<(v8::Global<v8::Context>, Shims), Failure> {
     v8::scope!(let scope, isolate);
-    let context = v8::Context::new(scope, Default::default());
+    let context = match made {
+        Some(made) => v8::Local::new(scope, made),
+        None => v8::Context::new(scope, Default::default()),
+    };
     context.set_allow_generation_from_strings(config.eval);
     let scope = &mut v8::ContextScope::new(scope, context);
     let global = context.global(scope);
@@ -71,8 +75,7 @@ pub(super) fn new_context(
         global.delete(scope, key.into());
     }
     if config.wasm {
-        run_internal(scope, "isolane:wasm-guard.js", WASM_GUARD)
-            .map_err(|e| fail(ErrorCode::IsolateRetired, e))?;
+        guard_wasm(scope).map_err(|e| fail(ErrorCode::IsolateRetired, e))?;
     }
     install_console(scope, global);
     let env = match &config.env {
@@ -120,6 +123,30 @@ pub(super) fn new_context(
 
 /// Keeps WebAssembly's shared memories (SharedArrayBuffers) from guests.
 const WASM_GUARD: &str = include_str!("wasm_guard.js");
+
+/// Run the wasm guard, giving it the worker's wasm cache to keep modules in.
+fn guard_wasm(scope: &mut v8::PinScope) -> Result<(), String> {
+    v8::tc_scope!(let tc, scope);
+    let guard = shim_script(tc, WASM_GUARD, "isolane:wasm-guard.js", 0)
+        .and_then(|script| script.run(tc))
+        .and_then(|value| v8::Local::<v8::Function>::try_from(value).ok());
+    let keep = super::wasm_cache::keeper(tc);
+    let ran = match (guard, keep) {
+        (Some(guard), Some(keep)) => {
+            let this = v8::undefined(tc).into();
+            guard.call(tc, this, &[keep.into()])
+        }
+        _ => None,
+    };
+    if ran.is_none() {
+        let msg = tc
+            .exception()
+            .map(|e| describe(tc, e))
+            .unwrap_or_else(|| "unknown error".into());
+        return Err(format!("vm setup failed: {msg}"));
+    }
+    Ok(())
+}
 
 /// Run one of isolane's own scripts in the context, before guest code.
 fn run_internal(scope: &mut v8::PinScope, filename: &str, code: &str) -> Result<(), String> {

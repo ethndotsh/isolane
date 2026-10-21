@@ -142,6 +142,15 @@ export interface RuntimeOptions {
    */
   spares?: number;
   /**
+   * Keep this many web isolates made ahead of their VMs in each tenant's
+   * worker (0 to 8), for isolates like the last one the worker created:
+   * one that starts the web platform, has no `random.seed`, and the same
+   * `limits.heapBytes`. A fresh web isolate then starts about 1 ms sooner
+   * (most of its start), and each spare holds an isolate's idle memory in
+   * the worker. Default 0.
+   */
+  spareIsolates?: number;
+  /**
    * After a security event, refuse the tenant for this long (new isolates
    * throw `ERR_TENANT_QUARANTINED`), so a tenant probing for an exploit
    * can't retry in a tight loop. Default 60 s; `null` to turn it off.
@@ -150,7 +159,7 @@ export interface RuntimeOptions {
   quarantineMs?: number | null;
 }
 
-const RUNTIME_KEYS = new Set(['workerPath', 'strict', 'defaults', 'tenants', 'hooks', 'limits', 'spares', 'quarantineMs']);
+const RUNTIME_KEYS = new Set(['workerPath', 'strict', 'defaults', 'tenants', 'hooks', 'limits', 'spares', 'spareIsolates', 'quarantineMs']);
 /** Stop starting spares after this many in a row die before being used. */
 const MAX_SPARE_FAILURES = 3;
 
@@ -181,6 +190,7 @@ export class Runtime {
   #quarantined = new Map<string, number>();
   #usage = new Map<string, TenantUsage>();
   #spares: SpareWorker[] = [];
+  #spareIsolates: number;
   #spareFailures = 0;
   #workers = new Map<string, TenantWorker>();
   /** Recycled workers finishing what they run, at most one per tenant. */
@@ -225,6 +235,10 @@ export class Runtime {
     }
     this.#spareCount = options.spares ?? 0;
     if (!(Number.isSafeInteger(this.#spareCount) && this.#spareCount >= 0)) throw invalidConfig('spares', 'must be a non-negative integer');
+    this.#spareIsolates = options.spareIsolates ?? 0;
+    if (!(Number.isSafeInteger(this.#spareIsolates) && this.#spareIsolates >= 0 && this.#spareIsolates <= 8)) {
+      throw invalidConfig('spareIsolates', 'must be an integer from 0 to 8');
+    }
     this.diagnostics = Object.freeze({ workerPid: (tenant: string) => this.#workers.get(tenant)?.pid });
     this.#refill();
   }
@@ -270,7 +284,7 @@ export class Runtime {
    * strict mode, so it works on hosts that strict mode would refuse.
    */
   async isolationReport(): Promise<IsolationReport> {
-    const probe = new WorkerProcess(this.#workerPath, { onMessage: () => {}, onExit: () => {} }, false, undefined, false, true);
+    const probe = new WorkerProcess(this.#workerPath, { onMessage: () => {}, onExit: () => {} }, false, { probe: true });
     try {
       const info = await probe.ready;
       return { ...info, meetsStrict: meetsStrict(info) };
@@ -416,7 +430,7 @@ export class Runtime {
     while (!this.#closed && this.#spares.length < this.#spareCount && this.#spareFailures < MAX_SPARE_FAILURES) {
       // Spares build the web snapshot up front when the defaults turn web on.
       const web = this.#tenantLevel(undefined).web !== false;
-      const spare = new SpareWorker(this.#workerPath, this.#strict, this.#spareMemory(), web, (gone) => {
+      const spare = new SpareWorker(this.#workerPath, this.#strict, { memoryLimitBytes: this.#spareMemory(), prepareWeb: web, spareIsolates: this.#spareIsolates }, (gone) => {
         // Died before anyone used it (it never ran guest code).
         this.#spares = this.#spares.filter((s) => s !== gone);
         this.#spareFailures++;
@@ -473,6 +487,7 @@ export class Runtime {
       onGone: (gone, exit) => this.#gone(tenant, gone, exit, chain),
       onRecycle: (old) => this.#recycled(tenant, old),
       prepareWeb: web,
+      spareIsolates: this.#spareIsolates,
       spare: this.#takeSpare(memory),
     });
     this.#workers.set(tenant, w);
