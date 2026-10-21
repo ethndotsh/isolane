@@ -262,9 +262,9 @@ tenant is acceptable, since the tenant is already the boundary. Sharing it
 with another tenant is not. V8 checks a code cache against its own version,
 flags, and the source hash, and rejects one that doesn't match, but that
 check is a guard against staleness, not against crafted input. So caches
-are per tenant: kept in the worker by content hash, and, if the supervisor
-keeps copies so they survive a worker recycle, sent back only to that
-tenant's workers. The same applies to compiled WebAssembly modules.
+are per tenant: kept in the worker by content hash. The same applies to
+compiled WebAssembly modules. (Phase 4 decided against the supervisor
+keeping copies across a worker recycle: see "Caches and invalidation".)
 
 What V8 offers. The rusty_v8 build in `build/rusty_v8` has what is needed:
 
@@ -518,9 +518,15 @@ main module under `startupCpuMs`. A failure here rejects `load` with
 once one instance is ready, or only after the compile check when `min` is
 0 and `reuse` is off.
 
-Phase 1 builds less of this. The supervisor sends the program's files (one
-module so far) in a `load` message to each new instance, with no hashing
-and no code cache; those come with phase 4. `load` always resolves once one
+As built, the supervisor hashes the program's files once per program (not
+the options: the worker keys its caches on those), sends them with the
+first load on each worker, and names the hash alone after that; the worker
+keeps up to 64 MiB of programs' files, and the supervisor, which tracks
+what each worker has, has it forget the least recently loaded first.
+Modules are compiled lazily rather than eagerly: the code cache is made
+once the first instance has evaluated, after its load's result is sent, so
+it holds the functions setup ran without the first load paying for eager
+compilation or for making the cache. `load` always resolves once one
 instance has loaded, also with `reuse: false`: that instance has served no
 call yet, so it serves the first one, and every later call gets a fresh
 instance.
@@ -599,9 +605,42 @@ The code cache and compiled wasm are keyed by content hash. V8 version and
 flags are implied by the worker, which checks its own build as the web
 snapshot header does. Nothing needs explicit invalidation: new content
 means a new hash, and a new worker binary means V8 rejects the old cache
-and makes a new one. The supervisor may keep the bytes per tenant, within
-a `cacheBytes` budget, so recycled workers start warm. Caches are never
-shared across tenants.
+and makes a new one. Caches are never shared across tenants.
+
+Phase 4 built the code cache in the worker (keyed by the module's path,
+its file's hash, and the transform options; 64 MiB, dropped whole when
+full) and kept compiled WebAssembly there too. V8 already shares a
+compiled module between the isolates of a process that compile the same
+bytes, but only while one of them holds it, so the worker keeps the
+modules guests compiled most recently (32 MiB of their bytes), which keeps
+that sharing alive between one isolate and the next.
+
+The supervisor keeps no copies. A copy would let a recycled worker start
+warm, which saves one compile per program per worker lifetime (a worker
+lives an hour or 100,000 evals by default), but a code cache is
+deserialized into V8's trusted space, where bytecode lives outside the
+sandbox, and nothing checks it against crafted input. A compromised worker
+could hand the supervisor a cache that the next worker of the tenant would
+load, so a compromise would outlive the recycle and the quarantine meant
+to end it. That trade is not worth one compile, and recorded as such.
+
+Measured on the macOS development build, with zod bundled by esbuild (747
+KB) and `reuse: false` (`bench/program-load.mjs`): a later instance loaded
+in 12.8 ms with neither cache, 9.3 ms with only the files kept, 8.0 ms
+with only the code cache, and 2.9 to 3.3 ms with both; the first instance
+stays at about 16 ms. Most of the 12.8 ms was not compiling: sending and
+parsing 747 KB of source for every instance took about 5 ms. A 1.1 MB
+WebAssembly module, compiled and run hot in each fresh instance with a
+pause between them, took about 2 ms less with the module kept.
+
+The isolate pool is `spareIsolates`, a runtime option (0 to 8, default
+0): each tenant's worker keeps that many web isolates and their contexts
+made from the snapshot, for VMs without a `random.seed` and with the heap
+limit of its last web VM. A fresh web run then takes about 0.25 ms
+instead of 1.5 ms, and a later program instance about 2.4 ms instead of
+3.3 ms, at about 3 MB of idle memory per spare (development build). It is
+off by default for that memory: a platform with many tenant workers pays
+it in every one.
 
 ### Time and limits
 
@@ -633,7 +672,8 @@ streamed from the socket into the request and bounded by `bodyBytes` (a
 413 past 1 MiB). The adapter and its `Outcome` schema are gone. Each app
 has up to two instances running eight requests each, since an app mostly
 waits on its deployer, and it counts page views with `ctx.waitUntil`.
-Redeploys of an unchanged file will reuse the cache by hash (phase 4).
+Since phase 4, a redeploy of unchanged files finds them, and their code
+caches, already on the worker.
 
 ## 6. Build plan
 
@@ -666,8 +706,11 @@ Redeploys of an unchanged file will reuse the cache by hash (phase 4).
    above 1 came forward from phase 6, and `instances.queue` bounds the
    number of queued calls. (The pools and `env` landed in phase 1.) Done.
 4. Caches: per-worker code cache by content hash, a per-tenant compiled
-   wasm cache, an optional supervisor-held copy with a `cacheBytes` budget,
-   and the isolate pool.
+   wasm cache, and the isolate pool. Done, with programs' files sent once
+   per worker (protocol 10), the files hashed once per tree in the worker,
+   and `programLoad` reporting how each load's modules compiled. The
+   supervisor-held copy (`cacheBytes`) was decided against: see "Caches
+   and invalidation". The pool is `spareIsolates`, off by default.
 5. Transforms and bundles: JSX and TypeScript transform mode through oxc,
    source maps for transformed code and supplied bundles, `isolane:`
    virtual modules backed by host functions, and the `modules` aliases for

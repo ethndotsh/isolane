@@ -6,6 +6,7 @@
 | `cold-start.mjs` | a new tenant's time to first result, with and without spare workers |
 | `web-cost.mjs` | what the web platform adds to isolate creation, first API use, and memory |
 | `protocol.mjs` | supervisor ↔ worker round trips |
+| `program-load.mjs` | a program's instance loads, first and later (what the worker's files, code cache, and spare isolates save), for a module of your own or zod bundled by esbuild |
 
 ## compare.mjs
 

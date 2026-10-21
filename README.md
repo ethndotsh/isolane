@@ -50,7 +50,10 @@ limit stopped. A fetch handler's `ctx.waitUntil` keeps work running after
 its response. A program can be many files, `{ main, files }`, with
 packages under `node_modules`, TypeScript, JSX, and JSON; the worker
 resolves its imports over those files and compiles them, and errors point
-at the original sources. See [Programs](docs/guide.md#programs).
+at the original sources. The tenant's worker keeps a program's files, V8
+code caches of its modules, and compiled WebAssembly, so a later instance
+of a 750 KB program loads in about 3 ms rather than 13 ms. See
+[Programs](docs/guide.md#programs).
 
 ## Security model
 

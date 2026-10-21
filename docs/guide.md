@@ -198,7 +198,10 @@ calls and queued ones (`ERR_PROGRAM_CLOSED`), waits for those running,
 and closes the instances; `await using` does the same. Events from a
 program's instances (`call`, `log`, `limit`, `guestError`, `policyDenial`)
 carry its `program` id, and `programLoad` (`onProgramLoad`) reports each
-instance's load, with `durationMs` and, if it failed, `error`.
+instance's load, with `durationMs` and, if it failed, `error`; a load that
+succeeded also has `modules`, how its code modules were compiled
+(`compiled`, how many of them `cached`, and `rejected`, as
+[What a worker keeps](#what-a-worker-keeps) explains).
 
 #### Modules
 
@@ -324,10 +327,60 @@ the limit fail with it, and the others with `ERR_ISOLATE_RETIRED`, not
 `retryable`, since they may have done part of their work. (A call an
 instance refused before it started is retried on another instance once.)
 
+#### What a worker keeps
+
+A program's later instances on a worker cost little more than a fresh
+isolate, because the tenant's worker keeps three things from the first.
+
+- The program's files. The supervisor sends them with the first load on
+  each worker, under a hash of their contents, and later loads name the
+  hash. A worker keeps up to 64 MiB of programs' files, the least recently
+  loaded going first, and is sent a program's files again if it loads one
+  it no longer has. Bytes in `files` are copied by `load`, so a loaded
+  program doesn't change.
+- A V8 code cache of each module, made once the first instance has
+  evaluated the program (after its load has returned), so it holds the
+  functions setup ran as well as the top level. Later instances
+  deserialize the bytecode instead of parsing and compiling. The cache is
+  keyed by the module's path, a hash of its file, and the transform's
+  options, holds up to 64 MiB, and is dropped whole when full. V8 checks a
+  cache against its version, flags, and source before using it; one it
+  rejects is counted in `programLoad`'s `modules.rejected` and made again.
+- Compiled WebAssembly. The worker keeps the modules guests compiled most
+  recently, up to 32 MiB of their bytes, so the next isolate that
+  compiles the same bytes reuses the compiled code (and the optimized code
+  it tiered up to) instead of compiling it again.
+
+Nothing kept crosses to another tenant: each tenant has its own worker,
+and a recycled worker starts without them.
+
+Measured on a macOS development build, with zod bundled by esbuild (747
+KB) as the program and `reuse: false`: the first instance loads in about
+16 ms, and each later one in about 3 ms, against 13 ms with neither the
+files nor the code cache kept (9.3 ms with only the files, 8.0 ms with
+only the code cache; `bench/program-load.mjs`). A 1.1 MB WebAssembly
+module, compiled and run hot in each fresh instance, takes about 2 ms
+less with the module kept.
+
+A worker can also keep spare isolates: the runtime's `spareIsolates`
+option (0 to 8, default 0) has each tenant's worker make that many web
+isolates and their contexts ahead of their VMs, from the web platform's
+snapshot, which is most of a fresh web isolate's start. A VM takes a spare
+when its isolate is one a spare could have made: it uses the web
+platform, has no `random.seed` (V8 draws an isolate's entropy as it makes
+it), and has the `limits.heapBytes` the worker's last web VM had. The
+worker makes spares after its first web VM, and makes them again when a VM
+with another heap limit comes. With one spare, a fresh web run takes about
+0.25 ms instead of 1.5 ms once the spare is ready, and a later program
+instance about 2.4 ms instead of 3.3 ms; each spare holds about 3 MB of
+the worker's memory while idle (development build), which is why they are
+off by default.
+
 Runtime-only options: `workerPath` (default: the installed
 `@isolane/worker-*` package, or `$ISOLANE_WORKER`), `strict` (default
 `true`), `spares` (workers kept started and ready for new tenants),
-`quarantineMs` (default 60 s), `limits.tenants`, and `hooks`.
+`spareIsolates` (web isolates each worker makes ahead of their VMs; see
+[What a worker keeps](#what-a-worker-keeps)), `quarantineMs` (default 60 s), `limits.tenants`, and `hooks`.
 `runtime.diagnostics` exposes internals for tests and diagnostics (the
 tenant's worker process id); it may change between releases.
 
