@@ -423,7 +423,6 @@ fn create_id(json: &[u8]) -> Option<u64> {
 /// process dies with SIGSYS), so `SURVIVED` means the lockdown failed.
 #[cfg(all(feature = "escape-tests", target_os = "linux"))]
 fn escape_test(probe: &str) -> ExitCode {
-    use std::ffi::CString;
     use std::io::Write;
 
     let locked = |msg: &str| {
@@ -458,7 +457,7 @@ fn escape_test(probe: &str) -> ExitCode {
         return Exit::Lockdown.into();
     }
     locked("LOCKED");
-    let path = CString::new("/etc/hostname").unwrap();
+    let path = c"/etc/hostname";
     // SAFETY: test-only probes; each passes valid, NUL-terminated strings
     // and null-terminated argv. They are expected to be refused or killed.
     let r = unsafe {
@@ -475,7 +474,7 @@ fn escape_test(probe: &str) -> ExitCode {
             }
             "socket" => libc::socket(libc::AF_INET, libc::SOCK_STREAM, 0) as i64,
             "execve" => {
-                let bin = CString::new("/bin/true").unwrap();
+                let bin = c"/bin/true";
                 let argv = [bin.as_ptr(), std::ptr::null()];
                 libc::execve(bin.as_ptr(), argv.as_ptr(), std::ptr::null()) as i64
             }
@@ -559,8 +558,8 @@ fn main() -> ExitCode {
     }
     match mode {
         Some("--self-check") => self_check(),
-        None | Some("--serve") => serve(true, memory_limit, web_background),
-        Some("--no-lockdown") => serve(false, memory_limit, web_background),
+        None | Some("--serve") => serve(/* lock_down */ true, memory_limit, web_background),
+        Some("--no-lockdown") => serve(/* lock_down */ false, memory_limit, web_background),
         Some(other) => {
             eprintln!(
                 "usage: isolane-worker [--serve | --self-check | --no-lockdown] [--memory-bytes=BYTES] [--prepare-web] | --make-web-snapshot=FILE (got {other})"

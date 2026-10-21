@@ -141,10 +141,12 @@ runs:
           ~/.cargo/git/db
         key: v8-linux-${{ inputs.arch }}-${{ hashFiles('scripts/fetch-rusty-v8.sh', 'scripts/v8.gn', 'patches/rusty_v8-*.patch', 'Cargo.lock', 'Cargo.toml') }}
 
-    - name: Lint (every unsafe block documented)
+    # The lints are the workspace's (Cargo.toml, after Google's Rust style
+    # guide); any warning fails the build.
+    - name: Lint
       if: inputs.snapshot == ''
       shell: bash
-      run: cargo clippy --release -p isolane-worker --features escape-tests -- -D clippy::undocumented_unsafe_blocks -D unsafe_op_in_unsafe_fn
+      run: cargo clippy --release -p isolane-worker --features escape-tests --all-targets -- -D warnings
 
     - name: Build escape-test worker
       if: inputs.snapshot == ''

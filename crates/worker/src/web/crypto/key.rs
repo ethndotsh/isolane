@@ -1,7 +1,7 @@
 // Copyright 2018-2026 the Deno authors. MIT license.
-// Ported from Deno's ext/crypto/key.rs (denoland/deno@eb4061f6f367) to
-// isolane's ops: see mod.rs. The aws-lc-rs algorithm mappings are gone
-// (ops.rs uses RustCrypto directly).
+//! Ported from Deno's ext/crypto/key.rs (denoland/deno@eb4061f6f367) to
+//! isolane's ops: see mod.rs. The aws-lc-rs algorithm mappings are gone
+//! (ops.rs uses RustCrypto directly).
 
 use serde::Deserialize;
 use serde::Serialize;

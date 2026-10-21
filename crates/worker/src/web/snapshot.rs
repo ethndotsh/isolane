@@ -16,6 +16,8 @@
 use std::borrow::Cow;
 use std::sync::OnceLock;
 
+use crate::js;
+
 /// The external references: function pointers, fixed for the life of the
 /// process, so safe to share between VM threads.
 struct References(&'static [v8::ExternalReference]);
@@ -166,7 +168,7 @@ fn build() -> Result<Vec<u8>, String> {
         let handle = super::bootstrap(scope, global)?;
         super::call_method(scope, handle, "materialize", &[])?;
         scope.perform_microtask_checkpoint();
-        let key = v8::String::new(scope, super::SNAPSHOT_HANDLE).unwrap();
+        let key = js::short_string(scope, super::SNAPSHOT_HANDLE);
         global.define_own_property(scope, key.into(), handle.into(), v8::PropertyAttribute::DONT_ENUM);
         scope.set_default_context(context);
     }

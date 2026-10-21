@@ -1,19 +1,18 @@
 // Copyright 2018-2026 the Deno authors. MIT license.
-// Ported from Deno's ext/crypto/generate_key.rs (denoland/deno@eb4061f6f367)
-// to isolane's ops: see mod.rs. Keys come from the isolate's randomness
-// (`IsolaneRng`), and P-256/P-384 keys from RustCrypto, not aws-lc-rs.
+//! Ported from Deno's ext/crypto/generate_key.rs (denoland/deno@eb4061f6f367)
+//! to isolane's ops: see mod.rs. Keys come from the isolate's randomness
+//! (`IsolaneRng`), and P-256/P-384 keys from RustCrypto, not aws-lc-rs.
 
 use std::sync::LazyLock as Lazy;
 
 use elliptic_curve::pkcs8::EncodePrivateKey;
-use num_traits::FromPrimitive;
 use rand_core::RngCore;
 use rsa::BigUint;
 use rsa::RsaPrivateKey;
 use rsa::pkcs1::EncodeRsaPrivateKey;
 use serde::Deserialize;
 
-use super::shared::*;
+use super::shared::{EcNamedCurve, ShaHash, SharedError};
 use super::IsolaneRng;
 
 #[derive(Debug, thiserror::Error, deno_error::JsError)]
@@ -53,9 +52,9 @@ const MAX_RSA_MODULUS_LENGTH: u32 = 4096;
 
 // Allowlist for RSA public exponents.
 static PUB_EXPONENT_1: Lazy<BigUint> =
-  Lazy::new(|| BigUint::from_u64(3).unwrap());
+  Lazy::new(|| BigUint::from(3u64));
 static PUB_EXPONENT_2: Lazy<BigUint> =
-  Lazy::new(|| BigUint::from_u64(65537).unwrap());
+  Lazy::new(|| BigUint::from(65537u64));
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", tag = "algorithm")]

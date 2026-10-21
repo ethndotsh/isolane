@@ -6,6 +6,7 @@ use std::rc::Rc;
 
 use super::host_call::Bridge;
 use crate::proto::Out;
+use crate::js;
 
 /// Send one console line within the eval's budget: the line that would
 /// exhaust it becomes a single notice, and later lines are dropped.
@@ -49,18 +50,18 @@ fn console_method(scope: &mut v8::PinScope, args: v8::FunctionCallbackArguments,
         let v = args.get(i);
         // Strings as-is, and values JSON can't represent by their string form.
         let part = if v.is_string() || v.is_function() || v.is_symbol() || v.is_undefined() || v.is_big_int() {
-            crate::js::string(scope, v, room)
+            js::string(scope, v, room)
         } else {
             v8::tc_scope!(let tc, scope);
             match v8::json::stringify(tc, v) {
-                Some(s) => crate::js::string(tc, s.into(), room),
+                Some(s) => js::string(tc, s.into(), room),
                 None if tc.has_terminated() => {
                     tc.rethrow();
                     return;
                 }
                 None => {
                     tc.reset();
-                    crate::js::string(tc, v, room)
+                    js::string(tc, v, room)
                 }
             }
         };
@@ -82,18 +83,18 @@ pub fn guest_log(scope: &mut v8::PinScope, level: &str, prefix: &str, value: v8:
     }
     let max_line = max_line();
     let mut message = String::from(prefix);
-    message.push_str(&crate::js::string(scope, value, max_line.saturating_sub(prefix.len())));
+    message.push_str(&js::string(scope, value, max_line.saturating_sub(prefix.len())));
     emit(&bridge, level, &message);
 }
 
 pub(super) fn install_console(scope: &mut v8::PinScope, global: v8::Local<v8::Object>) {
     let console = v8::Object::new(scope);
     for (name, level) in [("log", "log"), ("info", "info"), ("debug", "debug"), ("warn", "warn"), ("error", "error"), ("trace", "debug")] {
-        let level = v8::String::new(scope, level).unwrap();
+        let level = js::short_string(scope, level);
         let func = v8::Function::builder(console_method).data(level.into()).build(scope).expect("build console method");
-        let key = v8::String::new(scope, name).unwrap();
+        let key = js::short_string(scope, name);
         console.set(scope, key.into(), func.into());
     }
-    let key = v8::String::new(scope, "console").unwrap();
+    let key = js::short_string(scope, "console");
     global.set(scope, key.into(), console.into());
 }

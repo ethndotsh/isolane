@@ -169,3 +169,6 @@ jobs:
         run: |
           cargo install cargo-audit --locked --version 0.22.2
           cargo audit -D warnings
+      # Formatting needs no V8 build, so it's checked here, where it fails fast.
+      - name: rustfmt
+        run: cargo fmt --check

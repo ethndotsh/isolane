@@ -195,7 +195,7 @@ impl StopperState {
     /// Called by the VM thread once its watchdog runs (before it reads a
     /// message): hand it the aborts that came first.
     fn started(&self, watchdog: Arc<Watchdog>) {
-        let mut early = self.early.lock().unwrap();
+        let mut early = self.early.lock().expect(watchdog::POISONED);
         for req in early.drain(..) {
             watchdog.abort(req);
         }
@@ -212,7 +212,7 @@ impl Stopper {
 
     /// Abort eval `req` (see `Watchdog::abort`).
     pub fn abort(&self, req: u64) {
-        let mut early = self.0.early.lock().unwrap();
+        let mut early = self.0.early.lock().expect(watchdog::POISONED);
         match self.0.watchdog.get() {
             Some(watchdog) => watchdog.abort(req),
             None => early.push(req),
@@ -447,7 +447,7 @@ fn vm_main(id: u64, config: VmConfig, rx: Receiver<VmMsg>, out: Output, stopper:
     loop {
         // Between evals, wake for the next timer too (stateful isolates keep
         // theirs; see run_idle_timers), and to report background usage.
-        let next_timer = if retired.is_none() { crate::web::timers::next_timer().map(|(due, _)| due) } else { None };
+        let next_timer = if retired.is_none() { crate::web::timers::next_timer().map(|timer| timer.due) } else { None };
         // While the tenant's shared budget is empty, timers and deferred
         // continuations wait for it (evals and other messages don't).
         let pause = if retired.is_none() && (next_timer.is_some_and(|d| d.is_zero()) || !deferred.is_empty()) { background.paused(&out, id) } else { None };
@@ -459,9 +459,9 @@ fn vm_main(id: u64, config: VmConfig, rx: Receiver<VmMsg>, out: Output, stopper:
         let resumed = if pause.is_none() { deferred.pop_front() } else { None };
         let msg = match resumed.map(|(call, reply)| Ok(VmMsg::HostReply { call, reply })).unwrap_or_else(|| bridge.mailbox.idle(wake)) {
             Ok(m) => m,
-            Err(RecvTimeoutError::Timeout) if !crate::web::timers::next_timer().is_some_and(|(due, _)| due.is_zero()) || retired.is_some() => {
+            Err(RecvTimeoutError::Timeout) if !crate::web::timers::next_timer().is_some_and(|timer| timer.due.is_zero()) || retired.is_some() => {
                 // No timer is due: only a usage report was.
-                background.report(&out, id, false, None);
+                background.report(&out, id, /* force */ false, None);
                 continue;
             }
             Err(RecvTimeoutError::Timeout) => {
@@ -484,7 +484,7 @@ fn vm_main(id: u64, config: VmConfig, rx: Receiver<VmMsg>, out: Output, stopper:
             VmMsg::Dispose => break,
             VmMsg::Eval { req, code, filename, last } => {
                 // Usage from before this eval goes out first.
-                background.report(&out, id, true, None);
+                background.report(&out, id, /* force */ true, None);
                 if let Some(cause) = background_hit.take() {
                     send_result(&out, req, Err(cause), Usage::default());
                     continue;
@@ -569,7 +569,7 @@ fn vm_main(id: u64, config: VmConfig, rx: Receiver<VmMsg>, out: Output, stopper:
             }
         }
     }
-    background.report(&out, id, true, None);
+    background.report(&out, id, /* force */ true, None);
     watchdog.close();
     // The isolate holds a raw pointer to `oom`, and the context handle needs
     // a live isolate: drop in that order.

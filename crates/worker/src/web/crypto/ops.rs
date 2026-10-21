@@ -1,8 +1,8 @@
 // Copyright 2018-2026 the Deno authors. MIT license.
-// Ported from Deno's ext/crypto/lib.rs (denoland/deno@eb4061f6f367) to
-// isolane's ops: see mod.rs. HMAC, HKDF, PBKDF2, and digests are RustCrypto's
-// rather than aws-lc-rs's; randomness is the isolate's (`IsolaneRng`); and
-// PBKDF2 stops when the isolate's budget runs out.
+//! Ported from Deno's ext/crypto/lib.rs (denoland/deno@eb4061f6f367) to
+//! isolane's ops: see mod.rs. HMAC, HKDF, PBKDF2, and digests are RustCrypto's
+//! rather than aws-lc-rs's; randomness is the isolate's (`IsolaneRng`); and
+//! PBKDF2 stops when the isolate's budget runs out.
 
 use aes_kw::KekAes128;
 use aes_kw::KekAes192;

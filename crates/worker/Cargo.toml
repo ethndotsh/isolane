@@ -4,6 +4,9 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
+[lints]
+workspace = true
+
 [features]
 default = ["sandbox"]
 sandbox = ["v8/v8_enable_sandbox"]

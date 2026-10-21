@@ -16,11 +16,12 @@
 use v8::{ValueDeserializerHelper, ValueSerializerHelper};
 
 use super::{new_u8array, throw_type, with_bytes, Args, Rv};
+use crate::js;
 
 /// The private brand Deno's `markNotSerializable` puts on the prototypes of
 /// platform objects (URL, URLSearchParams) that structured clone must refuse.
 fn not_serializable<'s>(scope: &mut v8::PinScope<'s, '_>) -> v8::Local<'s, v8::Private> {
-    let name = v8::String::new(scope, "isolane#notSerializable").unwrap();
+    let name = js::short_string(scope, "isolane#notSerializable");
     v8::Private::for_api(scope, Some(name))
 }
 
@@ -29,7 +30,7 @@ fn not_serializable<'s>(scope: &mut v8::PinScope<'s, '_>) -> v8::Local<'s, v8::P
 /// registered symbol). For objects whose clone data is secret: a CryptoKey's
 /// is its key material, which `extractable: false` keeps from the guest.
 fn host_object<'s>(scope: &mut v8::PinScope<'s, '_>) -> v8::Local<'s, v8::Private> {
-    let name = v8::String::new(scope, "isolane#hostObject").unwrap();
+    let name = js::short_string(scope, "isolane#hostObject");
     v8::Private::for_api(scope, Some(name))
 }
 
@@ -52,7 +53,7 @@ const PRIVATE_TYPE: &str = "\0";
 pub fn mark_not_serializable(scope: &mut v8::PinScope, args: Args, _rv: Rv) {
     if let Ok(obj) = v8::Local::<v8::Object>::try_from(args.get(0)) {
         let key = not_serializable(scope);
-        let yes = v8::Boolean::new(scope, true).into();
+        let yes: v8::Local<v8::Value> = v8::Boolean::new(scope, true).into();
         obj.set_private(scope, key, yes);
     }
 }
@@ -94,7 +95,7 @@ impl Delegate {
         if let Some(cb) = &self.error_callback {
             let cb = v8::Local::new(scope, cb);
             v8::tc_scope!(let tc, scope);
-            let recv = v8::undefined(tc).into();
+            let recv: v8::Local<v8::Value> = v8::undefined(tc).into();
             cb.call(tc, recv, &[message.into()]);
             if tc.has_caught() || tc.has_terminated() {
                 tc.rethrow();
@@ -170,7 +171,7 @@ impl v8::ValueSerializerImpl for Delegate {
                 }
             }
         }
-        let message = v8::String::new(scope, "The object could not be cloned.").unwrap();
+        let message = js::short_string(scope, "The object could not be cloned.");
         self.clone_error(scope, message);
         None
     }
@@ -194,7 +195,7 @@ impl v8::ValueDeserializerImpl for Delegate {
         let data = deserializer.read_value(context)?;
         let deserializers = v8::Local::new(scope, self.deserializers.as_ref()?);
         let obj = data.to_object(scope)?;
-        let key = v8::String::new(scope, "type").unwrap();
+        let key = js::short_string(scope, "type");
         let ty = obj.get(scope, key.into())?.to_rust_string_lossy(scope);
         let name = match tag {
             IN_BAND_PRIVATE => format!("{PRIVATE_TYPE}{ty}"),
@@ -206,7 +207,7 @@ impl v8::ValueDeserializerImpl for Delegate {
         // V8 forbids running JS while deserializing, unless asked.
         let scope = std::pin::pin!(v8::AllowJavascriptExecutionScope::new(scope));
         let scope = &mut scope.init();
-        let recv = v8::null(scope).into();
+        let recv: v8::Local<v8::Value> = v8::null(scope).into();
         f.call(scope, recv, &[data])?.to_object(scope)
     }
 }
@@ -242,7 +243,7 @@ fn serialize(
                 } else {
                     format!("ArrayBuffer at index {i} is not transferable")
                 };
-                let message = v8::String::new(scope, &message).unwrap();
+                let message = js::short_string(scope, &message);
                 writer.clone_error(scope, message);
                 return None;
             }

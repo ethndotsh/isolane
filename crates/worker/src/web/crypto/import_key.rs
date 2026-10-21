@@ -1,6 +1,6 @@
 // Copyright 2018-2026 the Deno authors. MIT license.
-// Ported from Deno's ext/crypto/import_key.rs (denoland/deno@eb4061f6f367) to
-// isolane's ops: see mod.rs.
+//! Ported from Deno's ext/crypto/import_key.rs (denoland/deno@eb4061f6f367) to
+//! isolane's ops: see mod.rs.
 
 use base64::Engine;
 use super::bridge::JsBuffer;
@@ -14,7 +14,7 @@ use serde::Deserialize;
 use serde::Serialize;
 use spki::der::Decode;
 
-use super::shared::*;
+use super::shared::{EcNamedCurve, RustRawKeyData, SharedError, ID_SECP256R1_OID, ID_SECP384R1_OID, ID_SECP521R1_OID, RSA_ENCRYPTION_OID};
 
 #[derive(Debug, thiserror::Error, deno_error::JsError)]
 #[class("DOMExceptionDataError")]
@@ -261,7 +261,7 @@ fn import_key_rsa_jwk(
         .encode_to_vec(&mut data)
         .map_err(|_| ImportKeyError::InvalidRSAPublicKey)?;
 
-      let public_exponent =
+      let public_exponent: ToJsBuffer =
         public_key.public_exponent.as_bytes().to_vec().into();
       let modulus_length = public_key.modulus.as_bytes().len() * 8;
 
@@ -352,8 +352,8 @@ fn import_key_rsassa(
         return Err(ImportKeyError::PublicKeyTooLong);
       }
 
-      let data = pk_info.subject_public_key.raw_bytes().to_vec().into();
-      let public_exponent =
+      let data: ToJsBuffer = pk_info.subject_public_key.raw_bytes().to_vec().into();
+      let public_exponent: ToJsBuffer =
         public_key.public_exponent.as_bytes().to_vec().into();
       let modulus_length = public_key.modulus.as_bytes().len() * 8;
 
@@ -387,7 +387,7 @@ fn import_key_rsassa(
         return Err(ImportKeyError::PrivateKeyTooLong);
       }
 
-      let data = pk_info.private_key.to_vec().into();
+      let data: ToJsBuffer = pk_info.private_key.to_vec().into();
       let public_exponent =
         private_key.public_exponent.as_bytes().to_vec().into();
       let modulus_length = private_key.modulus.as_bytes().len() * 8;
@@ -436,8 +436,8 @@ fn import_key_rsapss(
         return Err(ImportKeyError::PublicKeyTooLong);
       }
 
-      let data = pk_info.subject_public_key.raw_bytes().to_vec().into();
-      let public_exponent =
+      let data: ToJsBuffer = pk_info.subject_public_key.raw_bytes().to_vec().into();
+      let public_exponent: ToJsBuffer =
         public_key.public_exponent.as_bytes().to_vec().into();
       let modulus_length = public_key.modulus.as_bytes().len() * 8;
 
@@ -471,7 +471,7 @@ fn import_key_rsapss(
         return Err(ImportKeyError::PrivateKeyTooLong);
       }
 
-      let data = pk_info.private_key.to_vec().into();
+      let data: ToJsBuffer = pk_info.private_key.to_vec().into();
       let public_exponent =
         private_key.public_exponent.as_bytes().to_vec().into();
       let modulus_length = private_key.modulus.as_bytes().len() * 8;
@@ -520,8 +520,8 @@ fn import_key_rsaoaep(
         return Err(ImportKeyError::PublicKeyTooLong);
       }
 
-      let data = pk_info.subject_public_key.raw_bytes().to_vec().into();
-      let public_exponent =
+      let data: ToJsBuffer = pk_info.subject_public_key.raw_bytes().to_vec().into();
+      let public_exponent: ToJsBuffer =
         public_key.public_exponent.as_bytes().to_vec().into();
       let modulus_length = public_key.modulus.as_bytes().len() * 8;
 
@@ -555,7 +555,7 @@ fn import_key_rsaoaep(
         return Err(ImportKeyError::PrivateKeyTooLong);
       }
 
-      let data = pk_info.private_key.to_vec().into();
+      let data: ToJsBuffer = pk_info.private_key.to_vec().into();
       let public_exponent =
         private_key.public_exponent.as_bytes().to_vec().into();
       let modulus_length = private_key.modulus.as_bytes().len() * 8;

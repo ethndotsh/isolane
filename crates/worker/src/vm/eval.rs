@@ -15,6 +15,8 @@ use super::watchdog::CpuClock;
 use super::{pump_tasks, Output, VmMsg};
 use super::errors;
 use crate::proto::{fail, limit, ErrorCode, Failure, Out, ShimRef, Usage};
+use crate::js;
+use crate::web::timers::NextTimer;
 
 /// How often to look for V8's foreground tasks while it has background work
 /// in flight and nothing else to wait for.
@@ -33,14 +35,14 @@ pub(super) enum EvalEnd {
 /// `errors::TEXT_MAX` bytes (copied out of V8 no further than that).
 pub(super) fn describe(scope: &mut v8::PinScope, exception: v8::Local<v8::Value>) -> String {
     if let Ok(obj) = v8::Local::<v8::Object>::try_from(exception) {
-        let key = v8::String::new(scope, "stack").unwrap();
+        let key = js::short_string(scope, "stack");
         if let Some(stack) = obj.get(scope, key.into()) {
             if stack.is_string() {
-                return crate::js::string(scope, stack, errors::TEXT_MAX);
+                return js::string(scope, stack, errors::TEXT_MAX);
             }
         }
     }
-    crate::js::text(scope, exception, errors::TEXT_MAX).unwrap_or_default()
+    js::text(scope, exception, errors::TEXT_MAX).unwrap_or_default()
 }
 
 /// `ERR_GUEST_EXCEPTION` for a thrown value: the one-line message ("stack"
@@ -72,7 +74,7 @@ pub(super) fn shim_failure(shim: &ShimRef, what: String) -> Failure {
 }
 
 fn clip(s: String) -> String {
-    crate::js::clip(s, errors::TEXT_MAX)
+    js::clip(s, errors::TEXT_MAX)
 }
 
 fn to_json(scope: &mut v8::PinScope, value: v8::Local<v8::Value>) -> Result<String, Failure> {
@@ -96,7 +98,7 @@ fn to_json(scope: &mut v8::PinScope, value: v8::Local<v8::Value>) -> Result<Stri
             Ok(if s == "undefined" { "null".into() } else { s })
         }
         None => {
-            let msg = tc.exception().map(|e| crate::js::string(tc, e, errors::TEXT_MAX)).unwrap_or_default();
+            let msg = tc.exception().map(|e| js::string(tc, e, errors::TEXT_MAX)).unwrap_or_default();
             Err(fail(ErrorCode::NotSerializable, msg))
         }
     }
@@ -208,7 +210,7 @@ fn run(
             return EvalEnd::Done(to_json(tc, result));
         };
         let func = v8::Local::new(tc, func);
-        let this = v8::undefined(tc).into();
+        let this: v8::Local<v8::Value> = v8::undefined(tc).into();
         let Some(promise) = func.call(tc, this, &[result]) else {
             return EvalEnd::Done(Err(shim_threw(tc, at)));
         };
@@ -257,7 +259,7 @@ fn settle(
         let timer = crate::web::timers::next_timer();
         // Only ref'd timers keep a pending eval waiting (AbortSignal.timeout
         // without listeners doesn't).
-        let timers = timer.is_some_and(|(_, refed)| refed);
+        let timers = timer.is_some_and(|timer| timer.refed);
         if !waiting && !background && !timers {
             return Settled::Failed(fail(
                 ErrorCode::Unsettled,
@@ -277,7 +279,7 @@ fn settle(
         if background {
             wait = Some(wait.map_or(BACKGROUND_POLL, |w| w.min(BACKGROUND_POLL)));
         }
-        if let Some((due, _)) = timer {
+        if let Some(NextTimer { due, .. }) = timer {
             wait = Some(wait.map_or(due, |w| w.min(due)));
         }
         let msg = match mailbox.during_eval(wait) {

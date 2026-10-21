@@ -59,7 +59,7 @@ pub fn split(frame: &[u8]) -> io::Result<(&[u8], &[u8])> {
     }
     let bad = |m: &str| io::Error::new(io::ErrorKind::InvalidData, m.to_string());
     let header = frame.get(1..BINARY_HEADER).ok_or_else(|| bad("truncated binary frame"))?;
-    let json_len = u32::from_le_bytes(header.try_into().unwrap()) as usize;
+    let json_len = u32::from_le_bytes(header.try_into().expect("the length field is 4 bytes")) as usize;
     let rest = &frame[BINARY_HEADER..];
     if json_len > rest.len() {
         return Err(bad("binary frame's JSON overruns it"));

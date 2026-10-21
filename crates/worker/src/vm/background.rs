@@ -170,7 +170,7 @@ impl Background {
             let cause = format!(
                 "the tenant's isolates used more than {ms}ms of {of} per minute between evals together (limits.workerBackgroundMs): their timers and continuations wait until it refills"
             );
-            self.report(out, vm, true, Some(("workerBackgroundMs", &cause)));
+            self.report(out, vm, /* force */ true, Some(("workerBackgroundMs", &cause)));
         }
         wait
     }
@@ -242,17 +242,17 @@ impl Background {
         self.record(spent);
         let retire = |cause: String| fail(ErrorCode::IsolateRetired, cause);
         if heap_hit {
-            self.report(out, vm, true, None);
+            self.report(out, vm, /* force */ true, None);
             return Some((retire(format!("the isolate was terminated by an earlier {what} (heap limit); create a new one")), None));
         }
         if !exhausted {
-            self.report(out, vm, false, None);
+            self.report(out, vm, /* force */ false, None);
             return None;
         }
         let ms = self.budget.unwrap_or_default().as_millis();
         let of = if self.clock.is_some() { "CPU time" } else { "time" };
         let cause = format!("the isolate's timers and continuations used more than {ms}ms of {of} per minute between evals (limits.backgroundMs)");
-        self.report(out, vm, true, Some(("backgroundMs", &cause)));
+        self.report(out, vm, /* force */ true, Some(("backgroundMs", &cause)));
         Some((retire(format!("the isolate was retired: {cause}; create a new one")), Some(limit("backgroundMs", cause))))
     }
 }

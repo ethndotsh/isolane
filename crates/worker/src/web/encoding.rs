@@ -10,6 +10,7 @@ use std::collections::HashMap;
 use encoding_rs::{CoderResult, Decoder, DecoderResult, Encoding};
 
 use super::{copy_bytes, string_arg, throw_range, throw_type, with_bytes, with_bytes_mut, with_u32s_mut, Args, Rv};
+use crate::js;
 
 struct StreamDecoder {
     decoder: Decoder,
@@ -67,7 +68,7 @@ fn decoder_for(label: &str, ignore_bom: bool) -> Option<Decoder> {
 pub fn op_encoding_normalize_label(scope: &mut v8::PinScope, args: Args, mut rv: Rv) {
     let label = string_arg(scope, &args, 0);
     match Encoding::for_label_no_replacement(label.as_bytes()) {
-        Some(e) => rv.set(v8::String::new(scope, &e.name().to_lowercase()).unwrap().into()),
+        Some(e) => rv.set(js::short_string(scope, &e.name().to_lowercase()).into()),
         None => invalid_label(scope, &label),
     }
 }
@@ -107,7 +108,7 @@ pub fn op_encoding_decode_single(scope: &mut v8::PinScope, args: Args, mut rv: R
         invalid_label(scope, &label);
         return;
     };
-    let Some(decoded) = with_bytes(scope, args.get(0), |b| run_decoder(&mut decoder, fatal, b, true)) else {
+    let Some(decoded) = with_bytes(scope, args.get(0), |b| run_decoder(&mut decoder, fatal, b, /* last */ true)) else {
         throw_type(scope, "expected a buffer");
         return;
     };

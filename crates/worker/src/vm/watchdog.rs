@@ -56,6 +56,10 @@ pub(super) enum Fired {
 
 /// Aborts remembered for evals not yet started, at most (older ones are for
 /// evals that had already finished when their abort came).
+/// Why a lock here is never poisoned: a panic aborts the worker
+/// (`panic = "abort"`), so no thread unwinds while holding one.
+pub(super) const POISONED: &str = "a panic aborts the worker, so no lock is poisoned";
+
 const MAX_EARLY_ABORTS: usize = 1024;
 
 struct WatchState {
@@ -92,7 +96,7 @@ impl Watchdog {
         });
         let watch = w.clone();
         let spawned = std::thread::Builder::new().stack_size(WATCHDOG_STACK).spawn(move || {
-            let mut s = watch.state.lock().unwrap();
+            let mut s = watch.state.lock().expect(POISONED);
             loop {
                 if s.closed {
                     return;
@@ -117,10 +121,10 @@ impl Watchdog {
                 let wall = s.deadline.map(|d| d - now);
                 let cpu = s.cpu_deadline.and(watch.cpu).map(|_| CPU_POLL);
                 s = match (wall, cpu) {
-                    (None, None) => watch.cv.wait(s).unwrap(),
+                    (None, None) => watch.cv.wait(s).expect(POISONED),
                     (w, c) => {
                         let wait = w.unwrap_or(Duration::MAX).min(c.unwrap_or(Duration::MAX));
-                        watch.cv.wait_timeout(s, wait).unwrap().0
+                        watch.cv.wait_timeout(s, wait).expect(POISONED).0
                     }
                 };
             }
@@ -133,7 +137,7 @@ impl Watchdog {
     pub(super) fn arm(&self, wall: Option<Duration>, cpu: Option<Duration>) -> Option<Instant> {
         let deadline = wall.map(|t| Instant::now() + t);
         let cpu_deadline = cpu.and_then(|c| self.cpu.map(|clock| clock.now() + c));
-        let mut s = self.state.lock().unwrap();
+        let mut s = self.state.lock().expect(POISONED);
         s.deadline = deadline;
         s.cpu_deadline = cpu_deadline;
         s.fired = Fired::No;
@@ -152,7 +156,7 @@ impl Watchdog {
     /// it (as fired) and cancels it: an idle isolate is never left with a
     /// termination pending. Callable from any thread.
     pub(super) fn stop(&self) {
-        let mut s = self.state.lock().unwrap();
+        let mut s = self.state.lock().expect(POISONED);
         s.stopping = true;
         if s.armed {
             s.deadline = None;
@@ -165,7 +169,7 @@ impl Watchdog {
     /// Eval `req` is about to run (call before `arm`). False if it was
     /// aborted already: don't run it.
     pub(super) fn begin_eval(&self, req: u64) -> bool {
-        let mut s = self.state.lock().unwrap();
+        let mut s = self.state.lock().expect(POISONED);
         if let Some(i) = s.aborted.iter().position(|&r| r == req) {
             s.aborted.remove(i);
             return false;
@@ -177,7 +181,7 @@ impl Watchdog {
     /// Stop eval `req`: terminate it if it's running (it ends with
     /// `Fired::Aborted`), or skip it when it starts. Callable from any thread.
     pub(super) fn abort(&self, req: u64) {
-        let mut s = self.state.lock().unwrap();
+        let mut s = self.state.lock().expect(POISONED);
         if s.eval == Some(req) {
             if s.armed && s.fired == Fired::No {
                 s.deadline = None;
@@ -195,12 +199,12 @@ impl Watchdog {
 
     /// Has a budget run out since the last `arm`?
     pub(super) fn fired(&self) -> bool {
-        self.state.lock().unwrap().fired != Fired::No
+        self.state.lock().expect(POISONED).fired != Fired::No
     }
 
     /// Disarm; returns which budget ran out, if one did.
     pub(super) fn disarm(&self) -> Fired {
-        let mut s = self.state.lock().unwrap();
+        let mut s = self.state.lock().expect(POISONED);
         s.deadline = None;
         s.cpu_deadline = None;
         s.armed = false;
@@ -209,7 +213,7 @@ impl Watchdog {
     }
 
     pub(super) fn close(&self) {
-        self.state.lock().unwrap().closed = true;
+        self.state.lock().expect(POISONED).closed = true;
         self.cv.notify_one();
     }
 }

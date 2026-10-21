@@ -10,6 +10,7 @@ use urlpattern::quirks::{StringOrInit, UrlPatternInit};
 use urlpattern::UrlPatternOptions;
 
 use super::{throw_range, throw_type, with_u32s_mut, Args, Rv};
+use crate::js;
 
 /// The longest pattern or match input accepted, in bytes.
 const MAX_INPUT_BYTES: usize = 64 * 1024;
@@ -182,7 +183,7 @@ pub fn op_urlpattern_parse(scope: &mut v8::PinScope, args: Args, mut rv: Rv) {
     let options = args.get(2);
     let ignore_case = match options.to_object(scope) {
         Some(o) => {
-            let key = v8::String::new(scope, "ignoreCase").unwrap();
+            let key = js::short_string(scope, "ignoreCase");
             o.get(scope, key.into()).is_some_and(|v| v.boolean_value(scope))
         }
         None => false,

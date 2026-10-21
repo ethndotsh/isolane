@@ -1,6 +1,6 @@
 // Copyright 2018-2026 the Deno authors. MIT license.
-// Ported from Deno's ext/crypto/shared.rs (denoland/deno@eb4061f6f367) to
-// isolane's ops: see mod.rs.
+//! Ported from Deno's ext/crypto/shared.rs (denoland/deno@eb4061f6f367) to
+//! isolane's ops: see mod.rs.
 
 use std::borrow::Cow;
 

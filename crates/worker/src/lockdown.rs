@@ -14,6 +14,8 @@ use serde::Serialize;
 
 #[derive(Clone, Copy, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
+// Only Linux has these layers, so elsewhere every level is `None`.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 pub enum Level {
     /// Every restriction this layer offers is in force.
     Full,
@@ -149,6 +151,7 @@ mod linux {
 
     /// Install the allowlist on every thread. Stacked filters, because a
     /// single seccompiler filter has one match action:
+    ///
     /// - `clone3` returns ENOSYS, so libc falls back to `clone`, whose flags
     ///   the allowlist can inspect (`clone3` passes them in memory).
     /// - filesystem calls return EACCES.
@@ -157,6 +160,7 @@ mod linux {
     /// - the allowlist kills the process on anything else, and allows
     ///   `clone` only for threads: CLONE_THREAD with the memory, files, and
     ///   signal handlers shared, and no new namespace (never a process).
+    ///
     /// The kernel applies the most restrictive result across filters.
     pub fn seccomp() -> Result<Level, String> {
         let arch = std::env::consts::ARCH.try_into().map_err(|e| format!("seccomp: {e:?}"))?;

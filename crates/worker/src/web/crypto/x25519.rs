@@ -1,7 +1,7 @@
 // Copyright 2018-2026 the Deno authors. MIT license.
-// Ported from Deno's ext/crypto/x25519.rs (denoland/deno@eb4061f6f367) to
-// isolane's ops: see mod.rs. Buffer lengths are checked before copying (a
-// mismatch would panic, which aborts the worker).
+//! Ported from Deno's ext/crypto/x25519.rs (denoland/deno@eb4061f6f367) to
+//! isolane's ops: see mod.rs. Buffer lengths are checked before copying (a
+//! mismatch would panic, which aborts the worker).
 
 use base64::prelude::BASE64_URL_SAFE_NO_PAD;
 use curve25519_dalek::montgomery::MontgomeryPoint;

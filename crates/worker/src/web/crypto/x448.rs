@@ -1,9 +1,9 @@
 // Copyright 2018-2026 the Deno authors. MIT license.
-// Ported from Deno's ext/crypto/x448.rs (denoland/deno@eb4061f6f367) to
-// isolane's ops: see mod.rs. Buffer lengths are checked before copying (a
-// mismatch would panic, which aborts the worker). The curve arithmetic is
-// RustCrypto's x448 crate (RFC 7748's X448, scalar clamping included), not
-// ed448-goldilocks directly, whose prerelease Deno pins.
+//! Ported from Deno's ext/crypto/x448.rs (denoland/deno@eb4061f6f367) to
+//! isolane's ops: see mod.rs. Buffer lengths are checked before copying (a
+//! mismatch would panic, which aborts the worker). The curve arithmetic is
+//! RustCrypto's x448 crate (RFC 7748's X448, scalar clamping included), not
+//! ed448-goldilocks directly, whose prerelease Deno pins.
 
 use elliptic_curve::subtle::ConstantTimeEq;
 use elliptic_curve::pkcs8::PrivateKeyInfo;

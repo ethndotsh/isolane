@@ -9,6 +9,17 @@ version = "0.0.0"
 edition = "2021"
 license = "MIT"
 
+[workspace.lints.rust]
+unsafe_op_in_unsafe_fn = "warn"
+
+[workspace.lints.clippy]
+undocumented_unsafe_blocks = "warn"
+unwrap_used = "warn"
+wildcard_imports = "warn"
+needless_for_each = "warn"
+string_add = "warn"
+fn_params_excessive_bools = "warn"
+
 # What ships: whole-program optimization, abort on panic (a panicking VM
 # thread kills the worker, which the supervisor sees as a crash, rather than
 # leaving a VM silently stuck), no symbols (V8 crash traces in a static

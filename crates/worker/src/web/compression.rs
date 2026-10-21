@@ -127,7 +127,7 @@ impl Inflater {
             if out.is_empty() {
                 e
             } else {
-                std::io::Error::new(e.kind(), PartialOutput(out, e.to_string()))
+                std::io::Error::new(e.kind(), PartialOutput { produced: out, message: e.to_string() })
             }
         };
         loop {
@@ -188,7 +188,7 @@ impl BrotliDecoder {
             if out.is_empty() {
                 e
             } else {
-                std::io::Error::new(e.kind(), PartialOutput(out, e.to_string()))
+                std::io::Error::new(e.kind(), PartialOutput { produced: out, message: e.to_string() })
             }
         };
         let mut step = vec![0u8; BROTLI_STEP];
@@ -257,9 +257,9 @@ pub fn compression_new(scope: &mut v8::PinScope, args: Args, mut rv: Rv) {
     let is_decoder = args.get(1).boolean_value(scope);
     let w = Vec::new();
     let inner = match (format.as_str(), is_decoder) {
-        ("deflate", true) => Inner::DeflateDecoder(Inflater::new(true)),
+        ("deflate", true) => Inner::DeflateDecoder(Inflater::new(/* zlib_header */ true)),
         ("deflate", false) => Inner::DeflateEncoder(ZlibEncoder::new(w, Compression::default())),
-        ("deflate-raw", true) => Inner::DeflateRawDecoder(Inflater::new(false)),
+        ("deflate-raw", true) => Inner::DeflateRawDecoder(Inflater::new(/* zlib_header */ false)),
         ("deflate-raw", false) => Inner::DeflateRawEncoder(DeflateEncoder::new(w, Compression::default())),
         ("gzip", true) => Inner::GzDecoder(GzDecoder::new(w)),
         ("gzip", false) => Inner::GzEncoder(GzEncoder::new(w, Compression::default())),
@@ -289,26 +289,26 @@ fn write_slice(inner: &mut Inner, input: &[u8], budget: usize) -> std::io::Resul
             Ok(()) => Ok(produced),
             Err(e) if produced.is_empty() => Err(e),
             // Keep what decoded before the failure; report the error next.
-            Err(e) => Err(std::io::Error::new(e.kind(), PartialOutput(produced, e.to_string()))),
+            Err(e) => Err(std::io::Error::new(e.kind(), PartialOutput { produced, message: e.to_string() })),
         }
     }
     match inner {
         Inner::DeflateDecoder(d) => d.write(input, FlushDecompress::None, budget),
-        Inner::DeflateEncoder(d) => drain(d, false, input, |d| d.get_mut()),
+        Inner::DeflateEncoder(d) => drain(d, /* flush */ false, input, |d| d.get_mut()),
         Inner::DeflateRawDecoder(d) => d.write(input, FlushDecompress::None, budget),
-        Inner::DeflateRawEncoder(d) => drain(d, false, input, |d| d.get_mut()),
+        Inner::DeflateRawEncoder(d) => drain(d, /* flush */ false, input, |d| d.get_mut()),
         Inner::GzDecoder(d) => {
             let mut out = Vec::new();
             for piece in input.chunks(GZIP_PIECE) {
-                match drain(d, true, piece, |d| d.get_mut()) {
+                match drain(d, /* flush */ true, piece, |d| d.get_mut()) {
                     Ok(produced) => out.extend_from_slice(&produced),
                     Err(e) if out.is_empty() => return Err(e),
                     Err(e) => {
                         let msg = e.to_string();
                         if let Some(partial) = e.into_inner().and_then(|inner| inner.downcast::<PartialOutput>().ok()) {
-                            out.extend_from_slice(&partial.0);
+                            out.extend_from_slice(&partial.produced);
                         }
-                        return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, PartialOutput(out, msg)));
+                        return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, PartialOutput { produced: out, message: msg }));
                     }
                 }
                 if out.len() > budget {
@@ -317,18 +317,21 @@ fn write_slice(inner: &mut Inner, input: &[u8], budget: usize) -> std::io::Resul
             }
             Ok(out)
         }
-        Inner::GzEncoder(d) => drain(d, false, input, |d| d.get_mut()),
-        Inner::BrotliDecoder(d) => d.write(input, false, budget),
+        Inner::GzEncoder(d) => drain(d, /* flush */ false, input, |d| d.get_mut()),
+        Inner::BrotliDecoder(d) => d.write(input, /* finish */ false, budget),
         Inner::BrotliEncoder(e) => e.compress(input, BrotliEncoderOperation::BROTLI_OPERATION_PROCESS),
     }
 }
 
 /// An error carrying the output produced before it.
 #[derive(Debug)]
-struct PartialOutput(Vec<u8>, String);
+struct PartialOutput {
+    produced: Vec<u8>,
+    message: String,
+}
 impl std::fmt::Display for PartialOutput {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(&self.1)
+        f.write_str(&self.message)
     }
 }
 impl std::error::Error for PartialOutput {}
@@ -356,7 +359,7 @@ pub fn compression_write(scope: &mut v8::PinScope, args: Args, mut rv: Rv) {
                     let msg = e.to_string();
                     match e.into_inner().and_then(|inner| inner.downcast::<PartialOutput>().ok()) {
                         Some(partial) => {
-                            out.extend_from_slice(&partial.0);
+                            out.extend_from_slice(&partial.produced);
                             s.insert(id, Entry::Failed(msg));
                             return Ok(out);
                         }
@@ -407,7 +410,7 @@ pub fn compression_finish(scope: &mut v8::PinScope, args: Args, mut rv: Rv) {
         Inner::DeflateRawEncoder(d) => d.finish(),
         Inner::GzDecoder(d) => d.finish(),
         Inner::GzEncoder(d) => d.finish(),
-        Inner::BrotliDecoder(mut d) => d.write(&[], true, max_output()),
+        Inner::BrotliDecoder(mut d) => d.write(&[], /* finish */ true, max_output()),
         Inner::BrotliEncoder(mut e) => e.compress(&[], BrotliEncoderOperation::BROTLI_OPERATION_FINISH),
     };
     match out {

@@ -13,6 +13,7 @@ use super::errors;
 use super::mailbox::Mailbox;
 use super::{Output, Reply, VmMsg};
 use crate::proto::{limit, Failure, Out, PathSegment};
+use crate::js;
 
 /// Per-isolate state reachable from host-function callbacks (isolate slot).
 pub(super) struct Bridge {
@@ -91,7 +92,7 @@ fn send_host_call(scope: &mut v8::PinScope, args: &v8::FunctionCallbackArguments
         if let Some(b) = crate::bytes::copy_bytes(scope, arg) {
             bin.push((i as u32, b.len()));
             attached.push(b);
-            let null = v8::null(scope).into();
+            let null: v8::Local<v8::Value> = v8::null(scope).into();
             arr.set_index(scope, i as u32, null);
         } else {
             arr.set_index(scope, i as u32, arg);
@@ -101,7 +102,7 @@ fn send_host_call(scope: &mut v8::PinScope, args: &v8::FunctionCallbackArguments
     let json = v8::json::stringify(scope, arr.into())?.to_rust_string_lossy(scope);
     let attached_len: usize = attached.iter().map(Vec::len).sum();
     if !crate::frame::fits(json.len() + 128, attached_len) {
-        crate::js::throw_range(scope, "host function arguments are larger than 64 MiB");
+        js::throw_range(scope, "host function arguments are larger than 64 MiB");
         return None;
     }
     let call = bridge.next_call.get();
@@ -131,7 +132,7 @@ fn refuse<T>(scope: &mut v8::PinScope, bridge: &Bridge, name: &'static str, mess
     if bridge.in_eval.get() && bridge.limit_hit.borrow().is_none() {
         *bridge.limit_hit.borrow_mut() = Some(limit(name, message.clone()));
     }
-    crate::js::throw_with(scope, crate::js::Class::Range, &message, &[("code", "ERR_LIMIT"), ("limit", name)]);
+    js::throw_with(scope, js::Class::Range, &message, &[("code", "ERR_LIMIT"), ("limit", name)]);
     None
 }
 
@@ -152,8 +153,8 @@ fn place_bytes<'s>(
         };
         let key = |scope: &mut v8::PinScope<'s, '_>, seg: &PathSegment| -> v8::Local<'s, v8::Name> {
             match seg {
-                PathSegment::Index(i) => v8::String::new(scope, &i.to_string()).unwrap().into(),
-                PathSegment::Key(k) => v8::String::new(scope, k).unwrap().into(),
+                PathSegment::Index(i) => js::short_string(scope, &i.to_string()).into(),
+                PathSegment::Key(k) => js::short_string(scope, k).into(),
             }
         };
         let mut holder = Some(value);
@@ -261,12 +262,12 @@ fn settle<'s>(scope: &mut v8::PinScope<'s, '_>, reply: Reply) -> Result<v8::Loca
         return match parsed {
             Some(v) => Ok(place_bytes(scope, v, reply.bytes)),
             None => {
-                let msg = v8::String::new(scope, "host function returned invalid JSON").unwrap();
+                let msg = js::short_string(scope, "host function returned invalid JSON");
                 Err(v8::Exception::error(scope, msg))
             }
         };
     }
-    let msg = v8::String::new(scope, reply.error.as_deref().unwrap_or("host function failed")).unwrap();
+    let msg = js::short_string(scope, reply.error.as_deref().unwrap_or("host function failed"));
     let e = match reply.error_name.as_deref() {
         Some("TypeError") => v8::Exception::type_error(scope, msg),
         Some("RangeError") => v8::Exception::range_error(scope, msg),
@@ -275,8 +276,8 @@ fn settle<'s>(scope: &mut v8::PinScope<'s, '_>, reply: Reply) -> Result<v8::Loca
     };
     if let Ok(obj) = v8::Local::<v8::Object>::try_from(e) {
         if let Some(code) = &reply.error_code {
-            let key = v8::String::new(scope, "code").unwrap();
-            let val = v8::String::new(scope, code).unwrap();
+            let key = js::short_string(scope, "code");
+            let val = js::short_string(scope, code);
             obj.set(scope, key.into(), val.into());
         }
     }

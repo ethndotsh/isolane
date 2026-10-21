@@ -130,3 +130,10 @@ pub fn guest_string<'s>(scope: &mut v8::PinScope<'s, '_>, s: &str) -> Option<v8:
     }
     string
 }
+
+/// A JS string for text isolane bounds itself (property names, fixed
+/// messages, values already clipped): V8 refuses only strings past its
+/// maximum length, which this text never approaches.
+pub fn short_string<'s>(scope: &mut v8::PinScope<'s, '_>, s: &str) -> v8::Local<'s, v8::String> {
+    v8::String::new(scope, s).expect("text isolane bounds is within V8's maximum string length")
+}

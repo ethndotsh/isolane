@@ -7,6 +7,7 @@ use super::eval::{describe, shim_failure};
 use super::host_call::{host_function, sync_host_function};
 use super::VmConfig;
 use crate::proto::{fail, ErrorCode, Failure, Shim, ShimRef};
+use crate::js;
 
 /// The `before` and `after` shims, compiled once when the VM starts: each
 /// `before` a script, each `after` an `async function (result)`.
@@ -54,7 +55,7 @@ pub(super) fn new_context(
     }
     let wasm: &[&str] = if config.wasm { &[] } else { &["WebAssembly"] };
     for name in REMOVED_GLOBALS.iter().chain(wasm) {
-        let key = v8::String::new(scope, name).unwrap();
+        let key = js::short_string(scope, name);
         global.delete(scope, key.into());
     }
     if config.wasm {
@@ -71,7 +72,7 @@ pub(super) fn new_context(
         // The web platform's hooks for the prelude to hand over the
         // brokers: gone before guest code runs, whether or not they were used.
         for hook in [crate::web::FETCH_HOOK, crate::web::CONNECT_HOOK, crate::web::FS_HOOK] {
-            let key = v8::String::new(scope, hook).unwrap();
+            let key = js::short_string(scope, hook);
             global.delete(scope, key.into());
         }
     }
@@ -168,7 +169,7 @@ fn install_functions(scope: &mut v8::PinScope, global: v8::Local<v8::Object>, co
                 Some((_, obj)) => *obj,
                 None => {
                     let obj = v8::Object::new(scope);
-                    let key = v8::String::new(scope, &prefix[depth - 1]).unwrap();
+                    let key = js::short_string(scope, &prefix[depth - 1]);
                     holder.set(scope, key.into(), obj.into());
                     namespaces.push((prefix.to_vec(), obj));
                     obj
@@ -179,7 +180,7 @@ fn install_functions(scope: &mut v8::PinScope, global: v8::Local<v8::Object>, co
         let builder =
             if spec.sync { v8::Function::builder(sync_host_function) } else { v8::Function::builder(host_function) };
         let func = builder.data(data.into()).build(scope).expect("build host function");
-        let key = v8::String::new(scope, name).unwrap();
+        let key = js::short_string(scope, name);
         holder.set(scope, key.into(), func.into());
     }
     for (_, ns) in namespaces {

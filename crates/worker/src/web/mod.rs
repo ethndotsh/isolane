@@ -86,6 +86,7 @@ type Rv<'a> = v8::ReturnValue<'a, v8::Value>;
 
 pub(crate) use crate::bytes::{copy_bytes, new_u8array, with_bytes, with_bytes_mut, with_u32s_mut};
 pub(crate) use crate::js::{guest_string, throw_range, throw_type};
+use crate::js;
 
 fn string_arg(scope: &mut v8::PinScope, args: &Args, i: i32) -> String {
     args.get(i).to_rust_string_lossy(scope)
@@ -136,7 +137,7 @@ fn compile_ext(scope: &mut v8::PinScope, args: Args, mut rv: Rv) {
     }
     wrapped.push_str("\n})");
     let Some(code) = v8::String::new(scope, &wrapped) else { return };
-    let name = v8::String::new(scope, &specifier).unwrap();
+    let name = js::short_string(scope, &specifier);
     let origin = script_origin(scope, name);
     let Some(script) = v8::Script::compile(scope, code, Some(&origin)) else { return };
     if let Some(f) = script.run(scope) {
@@ -221,7 +222,7 @@ fn random_uuid(scope: &mut v8::PinScope, _args: Args, mut rv: Rv) {
         hex[8..10].concat(),
         hex[10..16].concat()
     );
-    rv.set(v8::String::new(scope, &s).unwrap().into());
+    rv.set(js::short_string(scope, &s).into());
 }
 
 /// An error nothing handled (reportError with no listener, a timer or
@@ -356,7 +357,7 @@ fn all_natives() -> impl Iterator<Item = v8::FunctionCallback> {
 fn object_of<'s>(scope: &mut v8::PinScope<'s, '_>, natives: Natives) -> v8::Local<'s, v8::Object> {
     let obj = v8::Object::new(scope);
     for (name, f) in natives {
-        let key = v8::String::new(scope, name).unwrap();
+        let key = js::short_string(scope, name);
         let func = v8::Function::builder_raw(f).build(scope).expect("build web native");
         obj.set(scope, key.into(), func.into());
     }
@@ -373,7 +374,7 @@ fn max_timers(scope: &mut v8::PinScope, _args: Args, mut rv: Rv) {
 
 fn run_script<'s>(scope: &mut v8::PinScope<'s, '_>, name: &str, source: &str) -> Option<v8::Local<'s, v8::Value>> {
     let code = v8::String::new(scope, source)?;
-    let name = v8::String::new(scope, name).unwrap();
+    let name = js::short_string(scope, name);
     let origin = script_origin(scope, name);
     v8::Script::compile(scope, code, Some(&origin))?.run(scope)
 }
@@ -384,7 +385,7 @@ fn call<'s>(
     args: &[v8::Local<'s, v8::Value>],
 ) -> Option<v8::Local<'s, v8::Value>> {
     let f = v8::Local::<v8::Function>::try_from(f).ok()?;
-    let recv = v8::undefined(scope).into();
+    let recv: v8::Local<v8::Value> = v8::undefined(scope).into();
     f.call(scope, recv, args)
 }
 
@@ -402,12 +403,12 @@ fn bootstrap<'s>(scope: &mut v8::PinScope<'s, '_>, global: v8::Local<'s, v8::Obj
     if run_script(tc, "ext:core/00_primordials.js", PRIMORDIALS).is_none() {
         return Err(failed(tc, "primordials"));
     }
-    let key = v8::String::new(tc, "__bootstrap").unwrap();
+    let key = js::short_string(tc, "__bootstrap");
     let primordials = global
         .get(tc, key.into())
         .and_then(|b| v8::Local::<v8::Object>::try_from(b).ok())
         .and_then(|b| {
-            let k = v8::String::new(tc, "primordials").unwrap();
+            let k = js::short_string(tc, "primordials");
             b.get(tc, k.into())
         });
     global.delete(tc, key.into());
@@ -415,8 +416,8 @@ fn bootstrap<'s>(scope: &mut v8::PinScope<'s, '_>, global: v8::Local<'s, v8::Obj
         return Err("web platform setup failed: no primordials".into());
     };
 
-    let native = object_of(tc, native_fns()).into();
-    let ops = object_of(tc, op_fns()).into();
+    let native: v8::Local<v8::Value> = object_of(tc, native_fns()).into();
+    let ops: v8::Local<v8::Value> = object_of(tc, op_fns()).into();
     let Some(core) = run_script(tc, "isolane:core.js", CORE) else {
         return Err(failed(tc, "core.js"));
     };
@@ -440,7 +441,7 @@ fn call_method<'s>(
     args: &[v8::Local<'s, v8::Value>],
 ) -> Result<(), String> {
     v8::tc_scope!(let tc, scope);
-    let key = v8::String::new(tc, method).unwrap();
+    let key = js::short_string(tc, method);
     let ran = handle.get(tc, key.into()).and_then(|f| call(tc, f, args));
     if ran.is_none() {
         let msg = tc.exception().map(|e| e.to_rust_string_lossy(tc)).unwrap_or_else(|| "unknown error".into());
@@ -454,7 +455,7 @@ fn call_method<'s>(
 fn configure_with<'s>(scope: &mut v8::PinScope<'s, '_>, handle: v8::Local<'s, v8::Object>, base_url: Option<&str>) -> Result<(), String> {
     let url = match base_url {
         // The supervisor checked it's an absolute http(s) URL.
-        Some(url) => v8::String::new(scope, url).unwrap().into(),
+        Some(url) => js::short_string(scope, url).into(),
         None => v8::undefined(scope).into(),
     };
     call_method(scope, handle, "configure", &[url])
@@ -473,7 +474,7 @@ const SNAPSHOT_HANDLE: &str = "__isolane_web_setup";
 
 /// Configure a context created from the snapshot.
 pub fn configure<'s>(scope: &mut v8::PinScope<'s, '_>, global: v8::Local<'s, v8::Object>, base_url: Option<&str>) -> Result<(), String> {
-    let key = v8::String::new(scope, SNAPSHOT_HANDLE).unwrap();
+    let key = js::short_string(scope, SNAPSHOT_HANDLE);
     let handle = global.get(scope, key.into()).and_then(|h| v8::Local::<v8::Object>::try_from(h).ok());
     global.delete(scope, key.into());
     let Some(handle) = handle else {

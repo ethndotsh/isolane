@@ -209,6 +209,7 @@ try {
 - [Roadmap](docs/roadmap.md)
 - [Serverless example](examples/serverless)
 - [Security policy](SECURITY.md)
+- [Contributing](CONTRIBUTING.md): the Rust style the worker follows.
 
 ## Building from source
 

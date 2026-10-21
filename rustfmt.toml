@@ -1,0 +1,4 @@
+# Google's Rust style guide (https://google.github.io/styleguide/rustguide.html),
+# its settings that stable rustfmt has. hex_literal_case, format_macro_matchers,
+# and imports_granularity = "Module" are nightly-only, so they're left out.
+max_width = 100

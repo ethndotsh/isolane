@@ -62,15 +62,22 @@ pub fn set_timer_runner(scope: &mut v8::PinScope, args: Args, _rv: Rv) {
     }
 }
 
-/// The next timer, if any: how long until it's due, and whether any ref'd
-/// timer is live (which keeps a pending eval from being unsettled).
-pub fn next_timer() -> Option<(Duration, bool)> {
+/// When the next timer is due, and whether any ref'd timer is live.
+#[derive(Clone, Copy)]
+pub struct NextTimer {
+    pub due: Duration,
+    /// A ref'd timer keeps a pending eval from being unsettled.
+    pub refed: bool,
+}
+
+/// The next timer, if any.
+pub fn next_timer() -> Option<NextTimer> {
     let next = NEXT.with(|n| n.get());
     if !next.is_finite() {
         return None;
     }
     let wait = (next - now_ms()).max(0.0);
-    Some((Duration::from_secs_f64(wait / 1000.0), REFED.with(|r| r.get()) > 0))
+    Some(NextTimer { due: Duration::from_secs_f64(wait / 1000.0), refed: REFED.with(|r| r.get()) > 0 })
 }
 
 /// Run one due timer's callback (after moving a frozen clock forward).
@@ -86,8 +93,8 @@ pub fn run_due_timer(scope: &mut v8::PinScope) -> bool {
     };
     crate::clock::advance();
     let f = v8::Local::new(scope, &runner.0);
-    let recv = v8::undefined(scope).into();
-    let now = v8::Number::new(scope, now).into();
+    let recv: v8::Local<v8::Value> = v8::undefined(scope).into();
+    let now: v8::Local<v8::Value> = v8::Number::new(scope, now).into();
     f.call(scope, recv, &[now]);
     true
 }

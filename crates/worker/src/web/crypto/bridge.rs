@@ -233,7 +233,7 @@ impl<'de> de::Deserializer<'de> for Val {
         match self {
             Val::Str(s) => visitor.visit_enum(s.into_deserializer()),
             Val::Map(mut entries) if entries.len() == 1 => {
-                let (variant, value) = entries.pop().unwrap();
+                let (variant, value) = entries.pop().expect("the guard checked for one entry");
                 visitor.visit_enum(Enum { variant, value })
             }
             _ => Err(de::Error::custom("expected an enum (a string or an object with one key)")),

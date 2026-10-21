@@ -1,6 +1,6 @@
 // Copyright 2018-2026 the Deno authors. MIT license.
-// Ported from Deno's ext/crypto/export_key.rs (denoland/deno@eb4061f6f367) to
-// isolane's ops: see mod.rs.
+//! Ported from Deno's ext/crypto/export_key.rs (denoland/deno@eb4061f6f367) to
+//! isolane's ops: see mod.rs.
 
 use base64::Engine;
 use base64::prelude::BASE64_URL_SAFE_NO_PAD;
@@ -19,7 +19,7 @@ use spki::AlgorithmIdentifierOwned;
 use spki::der::asn1;
 use spki::der::asn1::BitString;
 
-use super::shared::*;
+use super::shared::{EcNamedCurve, SharedError, V8RawKeyData};
 
 #[derive(Debug, thiserror::Error, deno_error::JsError)]
 pub enum ExportKeyError {

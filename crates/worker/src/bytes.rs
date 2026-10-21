@@ -84,5 +84,5 @@ pub fn new_u8array<'s>(scope: &mut v8::PinScope<'s, '_>, data: &[u8]) -> v8::Loc
         // else references yet.
         unsafe { std::ptr::copy_nonoverlapping(data.as_ptr(), p.as_ptr() as *mut u8, data.len()) };
     }
-    v8::Uint8Array::new(scope, buffer, 0, data.len()).unwrap()
+    v8::Uint8Array::new(scope, buffer, 0, data.len()).expect("a view of the whole buffer is in bounds")
 }

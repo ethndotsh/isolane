@@ -1,6 +1,6 @@
 // Copyright 2018-2026 the Deno authors. MIT license.
-// Ported from Deno's ext/crypto/encrypt.rs (denoland/deno@eb4061f6f367) to
-// isolane's ops: see mod.rs.
+//! Ported from Deno's ext/crypto/encrypt.rs (denoland/deno@eb4061f6f367) to
+//! isolane's ops: see mod.rs.
 
 use aes::cipher::BlockEncryptMut;
 use aes::cipher::KeyIvInit;
@@ -19,7 +19,7 @@ use sha3::Sha3_256;
 use sha3::Sha3_384;
 use sha3::Sha3_512;
 
-use super::shared::*;
+use super::shared::{ShaHash, SharedError, V8RawKeyData};
 use super::IsolaneRng;
 
 #[derive(Deserialize)]

@@ -1,10 +1,10 @@
-// Two things for the web platform's startup snapshot (src/web/snapshot.rs):
-//
-// - ISOLANE_WEB_SNAPSHOT: a snapshot made by this crate's own previous build
-//   (`isolane-worker --make-web-snapshot`, see scripts/build-worker.sh), to
-//   embed in the binary. Without it, the worker builds one at startup.
-// - A hash of runtime/, the JS the snapshot is made from, so a worker can
-//   tell an embedded snapshot made from other JS and ignore it.
+//! Two things for the web platform's startup snapshot (src/web/snapshot.rs):
+//!
+//! - ISOLANE_WEB_SNAPSHOT: a snapshot made by this crate's own previous build
+//!   (`isolane-worker --make-web-snapshot`, see scripts/build-worker.sh), to
+//!   embed in the binary. Without it, the worker builds one at startup.
+//! - A hash of runtime/, the JS the snapshot is made from, so a worker can
+//!   tell an embedded snapshot made from other JS and ignore it.
 
 use std::path::{Path, PathBuf};
 
@@ -26,15 +26,15 @@ fn main() {
     let mut hash = Fnv::new();
     for file in &files {
         println!("cargo:rerun-if-changed={}", file.display());
-        hash.write(file.strip_prefix(&runtime).unwrap().to_string_lossy().as_bytes());
-        hash.write(&std::fs::read(file).unwrap());
+        hash.write(file.strip_prefix(&runtime).expect("collect returns paths under runtime/").to_string_lossy().as_bytes());
+        hash.write(&std::fs::read(file).unwrap_or_else(|e| panic!("{}: {e}", file.display())));
     }
     println!("cargo:rustc-env=ISOLANE_RUNTIME_HASH={:016x}", hash.0);
 }
 
 fn collect(dir: &Path, out: &mut Vec<PathBuf>) {
-    for entry in std::fs::read_dir(dir).unwrap() {
-        let path = entry.unwrap().path();
+    for entry in std::fs::read_dir(dir).unwrap_or_else(|e| panic!("{}: {e}", dir.display())) {
+        let path = entry.unwrap_or_else(|e| panic!("{}: {e}", dir.display())).path();
         if path.is_dir() {
             println!("cargo:rerun-if-changed={}", path.display());
             collect(&path, out);

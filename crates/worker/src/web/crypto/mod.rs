@@ -39,6 +39,7 @@ use serde::de::DeserializeOwned;
 use serde::Serialize;
 
 use super::{copy_bytes, new_u8array, with_bytes, with_bytes_mut, Args, Natives, Rv};
+use crate::js;
 
 /// The isolate's randomness, as a `rand_core` generator for the RustCrypto
 /// crates: its seeded stream if it has one, else the OS (`fill_random`).
@@ -62,7 +63,7 @@ impl rand_core::RngCore for IsolaneRng {
         if super::fill_random(dest) {
             Ok(())
         } else {
-            Err(rand_core::Error::from(std::num::NonZeroU32::new(rand_core::Error::CUSTOM_START).unwrap()))
+            Err(rand_core::Error::from(std::num::NonZeroU32::new(rand_core::Error::CUSTOM_START).expect("CUSTOM_START is nonzero")))
         }
     }
 }
@@ -78,7 +79,7 @@ fn throw(scope: &mut v8::PinScope, class: &str, message: &str) {
     use crate::js::Class;
     // An error can quote guest input (a serde message names the value it
     // refused): keep it short.
-    let message = crate::js::prefix(message, 1024);
+    let message = js::prefix(message, 1024);
     let class = match class {
         "TypeError" => Class::Type,
         "RangeError" => Class::Range,
@@ -87,7 +88,7 @@ fn throw(scope: &mut v8::PinScope, class: &str, message: &str) {
         "NotSupported" => Class::Named("DOMExceptionNotSupportedError"),
         other => Class::Named(other),
     };
-    crate::js::throw(scope, class, message);
+    js::throw(scope, class, message);
 }
 
 fn fail(scope: &mut v8::PinScope, error: &impl JsErrorClass) {

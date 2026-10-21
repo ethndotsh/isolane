@@ -17,9 +17,9 @@ use std::rc::Rc;
 use serde_json::value::RawValue;
 
 use super::console::guest_log;
-use crate::js::text;
 use super::host_call::Bridge;
 use crate::proto::{GuestError, Location, Out};
+use crate::js;
 
 /// Longest text sent for one part (message, stack) of a thrown value: a
 /// guest can throw an Error with any size of message.
@@ -64,7 +64,7 @@ fn has_own<'s>(scope: &mut v8::PinScope<'s, '_>, obj: v8::Local<'s, v8::Object>,
 }
 
 fn string_prop<'s>(scope: &mut v8::PinScope<'s, '_>, obj: v8::Local<'s, v8::Object>, key: &str, max: usize) -> Option<String> {
-    get(scope, obj, key).filter(|v| v.is_string()).and_then(|v| text(scope, v, max))
+    get(scope, obj, key).filter(|v| v.is_string()).and_then(|v| js::text(scope, v, max))
 }
 
 /// The thrown `value`, described for the supervisor.
@@ -82,13 +82,13 @@ fn node<'s>(scope: &mut v8::PinScope<'s, '_>, value: v8::Local<'s, v8::Value>, d
     *nodes = nodes.saturating_sub(1);
     let max = if depth == 0 { top } else { NESTED_TEXT_MAX.min(top) };
     let Ok(obj) = v8::Local::<v8::Object>::try_from(value) else {
-        return GuestError { message: text(scope, value, max).unwrap_or_default(), ..Default::default() };
+        return GuestError { message: js::text(scope, value, max).unwrap_or_default(), ..Default::default() };
     };
     if scope.is_execution_terminating() {
         return GuestError { message: "(terminated)".into(), ..Default::default() };
     }
     let name = string_prop(scope, obj, "name", max);
-    let message = string_prop(scope, obj, "message", max).or_else(|| text(scope, value, max)).unwrap_or_default();
+    let message = string_prop(scope, obj, "message", max).or_else(|| js::text(scope, value, max)).unwrap_or_default();
     let stack = string_prop(scope, obj, "stack", max);
     let mut cause = None;
     if depth + 1 < MAX_DEPTH && *nodes > 0 && has_own(scope, obj, "cause") {
@@ -146,7 +146,7 @@ fn properties<'s>(scope: &mut v8::PinScope<'s, '_>, obj: v8::Local<'s, v8::Objec
             break;
         }
         let Some(key) = names.get_index(scope, i).filter(|k| k.is_string()) else { continue };
-        let Some(key) = text(scope, key, KEY_BYTES + 1).filter(|k| k.len() <= KEY_BYTES) else { continue };
+        let Some(key) = js::text(scope, key, KEY_BYTES + 1).filter(|k| k.len() <= KEY_BYTES) else { continue };
         if matches!(key.as_str(), "name" | "message" | "stack" | "cause" | "errors") {
             continue;
         }
@@ -174,7 +174,7 @@ fn properties<'s>(scope: &mut v8::PinScope<'s, '_>, obj: v8::Local<'s, v8::Objec
 /// Where code failed to compile, from V8's message for it, and the caret
 /// line that goes under its source line.
 pub(super) fn compile_location(scope: &mut v8::PinScope, message: v8::Local<v8::Message>) -> Option<(Location, String)> {
-    let file = message.get_script_resource_name(scope).and_then(|n| text(scope, n, 1024)).unwrap_or_default();
+    let file = message.get_script_resource_name(scope).and_then(|n| js::text(scope, n, 1024)).unwrap_or_default();
     let line = message.get_line_number(scope)? as u32;
     let start = message.get_start_column();
     let end = message.get_end_column().max(start + 1);
@@ -343,7 +343,7 @@ pub(super) fn report_rejections(scope: &mut v8::PinScope) {
     }
     let dropped = state.dropped.replace(0);
     if dropped > 0 {
-        let note = v8::String::new(scope, &format!("{dropped} more promise rejections with no handler weren't reported")).unwrap();
+        let note = js::short_string(scope, &format!("{dropped} more promise rejections with no handler weren't reported"));
         guest_log(scope, "error", "", note.into());
     }
 }
@@ -352,7 +352,7 @@ pub(super) fn report_rejections(scope: &mut v8::PinScope) {
 fn dispatch_rejection(scope: &mut v8::PinScope, promise: v8::Local<v8::Promise>, reason: v8::Local<v8::Value>) -> bool {
     let Some(reporter) = scope.get_slot::<Rc<RejectionReporter>>().cloned() else { return true };
     let f = v8::Local::new(scope, &reporter.0);
-    let recv = v8::undefined(scope).into();
+    let recv: v8::Local<v8::Value> = v8::undefined(scope).into();
     v8::tc_scope!(let tc, scope);
     let unhandled = f.call(tc, recv, &[promise.into(), reason]).map(|v| v.boolean_value(tc));
     if tc.has_caught() {

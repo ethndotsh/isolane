@@ -1,11 +1,13 @@
 //! The wall clock guest code sees (Date, Intl's default "now", Temporal.Now),
 //! chosen per VM:
+//!
 //! - Frozen (default): moves forward only at I/O, when an eval starts and
 //!   when a host function's reply arrives (Cloudflare Workers' rule). Guest
 //!   code can't time itself, which, with SharedArrayBuffer and Atomics gone,
 //!   leaves it no high-resolution timer for side channels.
 //! - Real: the real clock.
 //! - Fixed: one instant, forever (reproducible runs).
+//!
 //! Each VM runs on its own thread, so the state is thread-local. Threads that
 //! never set a clock (V8's background threads) see real time.
 
