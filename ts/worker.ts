@@ -342,6 +342,10 @@ export interface WorkerProcessOptions {
   prepareWeb?: boolean;
   /** Isolates it keeps made ahead of their VMs (the runtime's `spareIsolates`). */
   spareIsolates?: number;
+  /** Bytes of code cache it keeps (the runtime's `caches.codeBytes`); the worker's default if unset. */
+  codeCacheBytes?: number;
+  /** Wire bytes of compiled WebAssembly it keeps (the runtime's `caches.wasmBytes`); the worker's default if unset. */
+  wasmCacheBytes?: number;
   /** It only reports the isolation it has (`isolationReport`). */
   probe?: boolean;
 }
@@ -354,11 +358,13 @@ export class WorkerProcess {
   #stall: NodeJS.Timeout | undefined;
 
   constructor(workerPath: string, handlers: WorkerHandlers, strict: boolean, options: WorkerProcessOptions = {}) {
-    const { memoryLimitBytes, prepareWeb = false, spareIsolates = 0, probe = false } = options;
+    const { memoryLimitBytes, prepareWeb = false, spareIsolates = 0, codeCacheBytes, wasmCacheBytes, probe = false } = options;
     const args = ['--serve'];
     if (memoryLimitBytes !== undefined) args.push(`--memory-bytes=${memoryLimitBytes}`);
     if (prepareWeb) args.push('--prepare-web');
     if (spareIsolates > 0) args.push(`--spare-isolates=${spareIsolates}`);
+    if (codeCacheBytes !== undefined) args.push(`--code-cache-bytes=${codeCacheBytes}`);
+    if (wasmCacheBytes !== undefined) args.push(`--wasm-cache-bytes=${wasmCacheBytes}`);
     // Empty environment and no inherited fds beyond the three pipes: nothing
     // from the application process (secrets in env vars, open sockets) is
     // reachable from the worker.

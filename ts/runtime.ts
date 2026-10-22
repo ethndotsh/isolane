@@ -12,7 +12,7 @@ import { DRAIN, FETCH, LOAD, OBSERVE, Program, USABLE, resolveInstances, type In
 import { requestParts, responseFrom } from './program-fetch.js';
 import { checkReturn, isStandardSchema, type StandardSchemaV1 } from './schema.js';
 import { resolveWorkerBinary } from './worker-binary.js';
-import { SpareWorker, TenantWorker, emptyUsage, exitCode, isOutOfMemory, type IsolateState, type ProgramSpec, type TenantUsage } from './worker-pool.js';
+import { DEFAULT_CACHES, MAX_CACHE_BYTES, SpareWorker, TenantWorker, emptyUsage, type CacheBudgets, exitCode, isOutOfMemory, type IsolateState, type ProgramSpec, type TenantUsage } from './worker-pool.js';
 import { WorkerProcess, meetsStrict, type IsolationInfo, type ModuleOptionsWire, type WorkerExit, type WorkerUsage } from './worker.js';
 
 /** What `isolationReport()` finds: the host's isolation, and whether strict mode accepts it. */
@@ -107,6 +107,22 @@ function checkFilename(filename: unknown): string | undefined {
   return filename;
 }
 
+/** The runtime's `caches`, over the defaults. */
+function validateCaches(caches: RuntimeOptions['caches']): CacheBudgets {
+  if (caches === undefined) return DEFAULT_CACHES;
+  if (caches === null || typeof caches !== 'object' || Array.isArray(caches)) throw invalidConfig('caches', 'must be an object');
+  const resolved = { ...DEFAULT_CACHES };
+  for (const [key, value] of Object.entries(caches)) {
+    if (!CACHE_KEYS.has(key)) throw invalidConfig(`caches.${key}`, 'is not a cache (fileBytes, codeBytes, wasmBytes)');
+    if (value === undefined) continue;
+    if (!(Number.isSafeInteger(value) && value >= 0 && value <= MAX_CACHE_BYTES)) {
+      throw invalidConfig(`caches.${key}`, `must be an integer from 0 to ${MAX_CACHE_BYTES} (1 GiB)`);
+    }
+    resolved[key as keyof CacheBudgets] = value;
+  }
+  return resolved;
+}
+
 /** The tenant's name as a path segment for default filenames. */
 const filenameSafe = (tenant: string) => tenant.replace(/[^\w.@-]/g, '_').slice(0, 128);
 
@@ -143,13 +159,28 @@ export interface RuntimeOptions {
   spares?: number;
   /**
    * Keep this many web isolates made ahead of their VMs in each tenant's
-   * worker (0 to 8), for isolates like the last one the worker created:
-   * one that starts the web platform, has no `random.seed`, and the same
-   * `limits.heapBytes`. A fresh web isolate then starts about 1 ms sooner
-   * (most of its start), and each spare holds an isolate's idle memory in
-   * the worker. Default 0.
+   * worker (0 to 8), for each shape of isolate the worker created most
+   * recently (up to four shapes): isolates that start the web platform and
+   * have no `random.seed`, by their `limits.heapBytes`. A fresh web isolate
+   * of one of those shapes then starts about 1 ms sooner (most of its
+   * start). Each spare holds an isolate's idle memory in the worker (about
+   * 3 MB), so a worker holds at most `spareIsolates` × 4 of them. Default 0.
    */
   spareIsolates?: number;
+  /**
+   * What each tenant's worker keeps for programs' later instances, in bytes
+   * (0 keeps none; each at most 1 GiB). What is kept counts against the
+   * worker's `workerMemoryBytes`, and goes with the worker when it is
+   * recycled.
+   */
+  caches?: {
+    /** Programs' files, so later instances aren't sent them again. Default 64 MiB. */
+    fileBytes?: number;
+    /** V8 code caches of programs' modules. Default 64 MiB. */
+    codeBytes?: number;
+    /** Compiled WebAssembly, counted by wire bytes (its compiled code is a few times larger). Default 32 MiB. */
+    wasmBytes?: number;
+  };
   /**
    * After a security event, refuse the tenant for this long (new isolates
    * throw `ERR_TENANT_QUARANTINED`), so a tenant probing for an exploit
@@ -159,7 +190,8 @@ export interface RuntimeOptions {
   quarantineMs?: number | null;
 }
 
-const RUNTIME_KEYS = new Set(['workerPath', 'strict', 'defaults', 'tenants', 'hooks', 'limits', 'spares', 'spareIsolates', 'quarantineMs']);
+const RUNTIME_KEYS = new Set(['workerPath', 'strict', 'defaults', 'tenants', 'hooks', 'limits', 'spares', 'spareIsolates', 'caches', 'quarantineMs']);
+const CACHE_KEYS = new Set(['fileBytes', 'codeBytes', 'wasmBytes']);
 /** Stop starting spares after this many in a row die before being used. */
 const MAX_SPARE_FAILURES = 3;
 
@@ -191,6 +223,7 @@ export class Runtime {
   #usage = new Map<string, TenantUsage>();
   #spares: SpareWorker[] = [];
   #spareIsolates: number;
+  #caches: CacheBudgets;
   #spareFailures = 0;
   #workers = new Map<string, TenantWorker>();
   /** Recycled workers finishing what they run, at most one per tenant. */
@@ -239,6 +272,7 @@ export class Runtime {
     if (!(Number.isSafeInteger(this.#spareIsolates) && this.#spareIsolates >= 0 && this.#spareIsolates <= 8)) {
       throw invalidConfig('spareIsolates', 'must be an integer from 0 to 8');
     }
+    this.#caches = validateCaches(options.caches);
     this.diagnostics = Object.freeze({ workerPid: (tenant: string) => this.#workers.get(tenant)?.pid });
     this.#refill();
   }
@@ -430,7 +464,13 @@ export class Runtime {
     while (!this.#closed && this.#spares.length < this.#spareCount && this.#spareFailures < MAX_SPARE_FAILURES) {
       // Spares build the web snapshot up front when the defaults turn web on.
       const web = this.#tenantLevel(undefined).web !== false;
-      const spare = new SpareWorker(this.#workerPath, this.#strict, { memoryLimitBytes: this.#spareMemory(), prepareWeb: web, spareIsolates: this.#spareIsolates }, (gone) => {
+      const spare = new SpareWorker(this.#workerPath, this.#strict, {
+          memoryLimitBytes: this.#spareMemory(),
+          prepareWeb: web,
+          spareIsolates: this.#spareIsolates,
+          codeCacheBytes: this.#caches.codeBytes,
+          wasmCacheBytes: this.#caches.wasmBytes,
+        }, (gone) => {
         // Died before anyone used it (it never ran guest code).
         this.#spares = this.#spares.filter((s) => s !== gone);
         this.#spareFailures++;
@@ -488,6 +528,7 @@ export class Runtime {
       onRecycle: (old) => this.#recycled(tenant, old),
       prepareWeb: web,
       spareIsolates: this.#spareIsolates,
+      caches: this.#caches,
       spare: this.#takeSpare(memory),
     });
     this.#workers.set(tenant, w);

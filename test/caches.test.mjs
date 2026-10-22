@@ -124,9 +124,9 @@ test('spare isolates: fresh web isolates start from one, with their own config',
   // makes it), so its randomness is still the seed's.
   const seeded = () => tenant.run('[Math.random(), crypto.getRandomValues(new Uint32Array(1))[0]]', { random: { seed: 7 } });
   assert.deepEqual(await seeded(), await seeded());
-  // A spare made for one heap limit isn't used for another; each VM's limit holds.
+  // Spares are kept for each heap limit; each VM's limit holds.
   const fill = 'const a = []; for (;;) a.push({ x: "y".repeat(1000) + Math.random() })';
-  for (const heapBytes of [16 << 20, 16 << 20, 24 << 20, 16 << 20]) {
+  for (const heapBytes of [16 << 20, 16 << 20, 24 << 20, 16 << 20, 32 << 20, 24 << 20, 40 << 20, 48 << 20, 16 << 20]) {
     await assert.rejects(tenant.run(fill, { limits: { heapBytes } }), limit('heapBytes'));
     assert.equal(await tenant.run('1 + 1', { limits: { heapBytes } }), 2);
   }
@@ -134,4 +134,39 @@ test('spare isolates: fresh web isolates start from one, with their own config',
   const program = await tenant.load('export const f = () => typeof Response;', { instances: { reuse: false } });
   t.after(() => program.close());
   for (let i = 0; i < 3; i++) assert.equal(await program.call('f'), 'function');
+});
+
+test('the caches are runtime options, checked, and 0 keeps nothing', async (t) => {
+  for (const caches of [null, [], { fileBytes: -1 }, { codeBytes: 1.5 }, { wasmBytes: 2 ** 30 + 1 }, { other: 1 }]) {
+    assert.throws(() => new Runtime({ caches }), code('ERR_INVALID_CONFIG'), JSON.stringify(caches));
+  }
+  const rt = new Runtime({ strict, caches: { fileBytes: 0, codeBytes: 0, wasmBytes: 0 } });
+  t.after(() => rt.close());
+  const loads = [];
+  rt.on('programLoad', (e) => loads.push(e.modules));
+  const program = await rt.tenant('no-caches').load({ main: 'index.js', files: { 'index.js': "import { x } from './x.js'; export const f = () => x;", 'x.js': 'export const x = 7;' } }, { instances: { reuse: false, max: 1 } });
+  t.after(() => program.close());
+  for (let i = 0; i < 3; i++) assert.equal(await program.call('f'), 7);
+  assert.ok(loads.length >= 3);
+  for (const modules of loads) assert.deepEqual(modules, { compiled: 2, cached: 0, rejected: 0 });
+  // (module (func (export "one") (result i32) i32.const 1))
+  const bytes = [0, 97, 115, 109, 1, 0, 0, 0, 1, 5, 1, 96, 0, 1, 127, 3, 2, 1, 0, 7, 7, 1, 3, 111, 110, 101, 0, 0, 10, 6, 1, 4, 0, 65, 1, 11];
+  const config = { wasm: true, globals: { bytes } };
+  for (let i = 0; i < 2; i++) {
+    assert.equal(await rt.tenant('no-caches').run('new WebAssembly.Instance(new WebAssembly.Module(new Uint8Array(bytes))).exports.one()', config), 1);
+  }
+});
+
+test('a smaller file cache has the worker let programs\' files go sooner', async (t) => {
+  const rt = new Runtime({ strict, caches: { fileBytes: 1 << 20 } });
+  t.after(() => rt.close());
+  const big = (tag) => `export const tag = () => ${JSON.stringify(tag)};\n/*${'x'.repeat(600 << 10)}*/`;
+  const tenant = rt.tenant('small-trees');
+  const programs = [];
+  for (const tag of ['one', 'two']) {
+    const program = await tenant.load(big(tag), { instances: { reuse: false, max: 1 } });
+    programs.push(program);
+    t.after(() => program.close());
+  }
+  for (const [i, tag] of ['one', 'two', 'one', 'two'].entries()) assert.equal(await programs[i % 2].call('tag'), tag);
 });

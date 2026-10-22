@@ -18,6 +18,7 @@ mod js;
 mod limits;
 mod lockdown;
 mod proto;
+mod spares;
 mod vm;
 mod web;
 
@@ -215,8 +216,7 @@ fn serve(
         vms: HashMap::new(),
         failed: HashMap::new(),
         trees: HashMap::new(),
-        spares: Vec::new(),
-        spare_isolates,
+        spares: spares::Spares::new(spare_isolates),
     };
     let mut stdin = BufReader::new(std::io::stdin().lock());
     match worker.run(&mut stdin) {
@@ -332,11 +332,9 @@ struct Worker {
     failed: HashMap<u64, Failure>,
     /// Programs' files as loads sent them, by tree id, until `forget`.
     trees: HashMap<String, Arc<vm::Tree>>,
-    /// Isolates made ahead of their VMs (see `vm::Spare`), at most
-    /// `spare_isolates` of them: made once a web VM has been created, for
-    /// VMs like it.
-    spares: Vec<vm::Spare>,
-    spare_isolates: usize,
+    /// Isolates made ahead of their VMs (see `vm::Spare`): made once a web
+    /// VM has been created, for VMs of its shape.
+    spares: spares::Spares<vm::Shape, vm::Spare>,
 }
 
 impl Worker {
@@ -518,35 +516,19 @@ impl Worker {
     fn create(&mut self, vm: u64, config: VmConfig) {
         vm::init_shared_background(config.limits.worker_background_ms);
         let (tx, rx) = mpsc::channel();
-        let fits = vm::Spare::fits(&config);
-        // Spares made for another heap limit won't fit the VMs to come
-        // either, most likely: make them again for this one.
-        if fits && self.spares.iter().any(|s| !s.matches(&config)) {
-            self.spares.clear();
-        }
-        let refill = fits.then_some(config.limits.heap_bytes);
-        let started = match self.spares.pop() {
-            Some(spare) if spare.matches(&config) => {
-                match spare.take(vm, config, rx, self.out.clone()) {
-                    Ok(stopper) => Ok(stopper),
-                    Err(parts) => {
-                        let (config, rx, out) = *parts;
-                        vm::spawn(vm, config, rx, out)
-                    }
+        let shape = vm::Spare::shape(&config);
+        let started = match shape.and_then(|shape| self.spares.take(shape)) {
+            Some(spare) => match spare.take(vm, config, rx, self.out.clone()) {
+                Ok(stopper) => Ok(stopper),
+                Err(parts) => {
+                    let (config, rx, out) = *parts;
+                    vm::spawn(vm, config, rx, out)
                 }
-            }
-            other => {
-                self.spares.extend(other);
-                vm::spawn(vm, config, rx, self.out.clone())
-            }
+            },
+            None => vm::spawn(vm, config, rx, self.out.clone()),
         };
-        if let Some(heap_bytes) = refill {
-            while self.spares.len() < self.spare_isolates {
-                match vm::Spare::start(heap_bytes) {
-                    Ok(spare) => self.spares.push(spare),
-                    Err(_) => break,
-                }
-            }
+        if let Some(shape) = shape {
+            self.spares.refill(shape, vm::Spare::start);
         }
         match started {
             Ok(stopper) => {
@@ -748,6 +730,9 @@ fn escape_test(probe: &str) -> ExitCode {
 /// Most `--spare-isolates` (each holds an isolate's memory while idle).
 const MAX_SPARE_ISOLATES: usize = 8;
 
+/// Most `--code-cache-bytes` and `--wasm-cache-bytes`.
+const MAX_CACHE_BYTES: usize = 1 << 30;
+
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
     #[cfg(all(feature = "escape-tests", target_os = "linux"))]
@@ -764,6 +749,8 @@ fn main() -> ExitCode {
     let mut memory_limit = None;
     let mut web_background = false;
     let mut spare_isolates = 0;
+    let mut code_cache_bytes = vm::DEFAULT_CODE_CACHE_BYTES;
+    let mut wasm_cache_bytes = vm::DEFAULT_WASM_CACHE_BYTES;
     for arg in &args {
         if arg == "--prepare-web" {
             web_background = true;
@@ -776,6 +763,19 @@ fn main() -> ExitCode {
                     );
                     return Exit::Usage.into();
                 }
+            }
+        } else if let Some((flag, n)) = arg
+            .split_once('=')
+            .filter(|(flag, _)| matches!(*flag, "--code-cache-bytes" | "--wasm-cache-bytes"))
+        {
+            let Some(n) = n.parse::<usize>().ok().filter(|n| *n <= MAX_CACHE_BYTES) else {
+                eprintln!("isolane-worker: bad {flag} {n} (0 to {MAX_CACHE_BYTES})");
+                return Exit::Usage.into();
+            };
+            if flag == "--code-cache-bytes" {
+                code_cache_bytes = n;
+            } else {
+                wasm_cache_bytes = n;
             }
         } else if let Some(n) = arg.strip_prefix("--memory-bytes=") {
             match n.parse::<u64>() {
@@ -791,6 +791,7 @@ fn main() -> ExitCode {
             mode = Some("");
         }
     }
+    vm::set_cache_budgets(code_cache_bytes, wasm_cache_bytes);
     match mode {
         Some("--self-check") => self_check(),
         None | Some("--serve") => serve(
@@ -807,7 +808,7 @@ fn main() -> ExitCode {
         ),
         Some(other) => {
             eprintln!(
-                "usage: isolane-worker [--serve | --self-check | --no-lockdown] [--memory-bytes=BYTES] [--prepare-web] [--spare-isolates=N] | --make-web-snapshot=FILE (got {other})"
+                "usage: isolane-worker [--serve | --self-check | --no-lockdown] [--memory-bytes=BYTES] [--prepare-web] [--spare-isolates=N] [--code-cache-bytes=BYTES] [--wasm-cache-bytes=BYTES] | --make-web-snapshot=FILE (got {other})"
             );
             Exit::Usage.into()
         }

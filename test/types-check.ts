@@ -58,7 +58,9 @@ async function typed() {
   void rt.tenant('t').load('', { instances: { size: 2 } });
   rt.on('programLoad', (e) => void (e.durationMs satisfies number));
   rt.on('programLoad', (e) => void (e.modules?.cached satisfies number | undefined));
-  void new Runtime({ spareIsolates: 1 });
+  void new Runtime({ spareIsolates: 1, caches: { fileBytes: 0, codeBytes: 128 << 20 } });
+  // @ts-expect-error caches are named
+  void new Runtime({ caches: { transformBytes: 1 } });
   void rt.tenant('t').load(
     { main: 'src/index.ts', files: { 'src/index.ts': 'export {}', 'logo.png': new Uint8Array(1) } },
     { ts: { mode: 'transform', experimentalDecorators: true }, jsx: { runtime: 'classic', factory: 'h' }, define: { DEBUG: 'false' }, modules: { 'node:fs': './fs.js', 'isolane:kv': { get: (key: string) => key } } },

@@ -60,7 +60,11 @@ export interface InstancesOptions {
    * Calls one instance runs at once (only with `reuse`). Default 1: each
    * call has the instance to itself, and `limits.cpuMs` and the other
    * per-eval limits are its own. Above 1 they are the instance's, shared
-   * by the calls in it (see the guide).
+   * by the calls in it (see the guide), and the calls share its event
+   * loop: a call stuck in a synchronous loop holds up the others, which can
+   * reach their own `timeoutMs` while waiting, so one stuck call can fail
+   * every call in its instance. That is defined behaviour; use 1 for
+   * handlers that may compute for long.
    */
   concurrency?: number;
   /** Close an instance idle this long, while there are more than `min`. Default 30 s. */

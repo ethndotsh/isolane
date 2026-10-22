@@ -263,6 +263,8 @@ export interface TenantWorkerOptions {
   prepareWeb: boolean;
   /** Isolates the worker keeps made ahead of their VMs. */
   spareIsolates: number;
+  /** What the worker keeps for programs' later instances (the runtime's `caches`). */
+  caches: CacheBudgets;
   spare?: SpareWorker;
 }
 
@@ -290,11 +292,22 @@ function processCpuMs(pid: number | undefined): number | undefined {
 const RECYCLE_DRAIN_MS = 60_000;
 
 /**
- * Most bytes of programs' files a worker keeps (see `TenantWorker.load`):
- * a program's later instances on the worker load from its copy instead of
- * being sent the files again.
+ * What a worker keeps for programs' later instances, in bytes (the
+ * runtime's `caches`): programs' files (see `TenantWorker.load`), so a
+ * program's later instances on the worker load from its copy instead of
+ * being sent the files again; V8 code caches of their modules; and
+ * compiled WebAssembly, by wire bytes. 0 keeps none.
  */
-const TREE_BYTES = 64 << 20;
+export interface CacheBudgets {
+  fileBytes: number;
+  codeBytes: number;
+  wasmBytes: number;
+}
+
+export const DEFAULT_CACHES: CacheBudgets = Object.freeze({ fileBytes: 64 << 20, codeBytes: 64 << 20, wasmBytes: 32 << 20 });
+
+/** The most any of `caches` can be set to. */
+export const MAX_CACHE_BYTES = 1 << 30;
 
 /** A program's files, ready for `load` frames, and what they weigh. */
 interface PreparedFiles {
@@ -389,6 +402,8 @@ export class TenantWorker {
   #evals = 0;
   /** Programs' files the worker keeps, by tree id, least recently loaded first: their sizes. */
   #trees = new Map<string, number>();
+  /** Most bytes of programs' files it keeps (`caches.fileBytes`). */
+  #treeBytes: number;
   #lifetimeTimer: NodeJS.Timeout | undefined;
   #drainTimer: NodeJS.Timeout | undefined;
   #cpuTimer: NodeJS.Timeout | undefined;
@@ -402,6 +417,7 @@ export class TenantWorker {
     this.#chain = o.chain;
     this.#onGone = (exit) => o.onGone(this, exit);
     this.#onRecycle = () => o.onRecycle(this);
+    this.#treeBytes = o.caches.fileBytes;
     const lifetime = o.limits.workerLifetimeMs;
     if (lifetime !== null) {
       this.#lifetimeTimer = setTimeout(() => this.#recycle(`it reached limits.workerLifetimeMs (${lifetime}ms)`), lifetime);
@@ -419,6 +435,8 @@ export class TenantWorker {
         memoryLimitBytes: o.limits.workerMemoryBytes ?? undefined,
         prepareWeb: o.prepareWeb,
         spareIsolates: o.spareIsolates,
+        codeCacheBytes: o.caches.codeBytes,
+        wasmCacheBytes: o.caches.wasmBytes,
       });
     }
     this.#proc.ready.then(
@@ -563,18 +581,18 @@ export class TenantWorker {
 
   /**
    * The worker now has `tree`'s files: note it, and have it forget the
-   * least recently loaded trees past TREE_BYTES (or this one, if it alone
-   * is larger).
+   * least recently loaded trees past `caches.fileBytes` (or this one, if it
+   * alone is larger).
    */
   #keepTree(tree: PreparedFiles): void {
-    if (tree.bytes > TREE_BYTES) {
+    if (tree.bytes > this.#treeBytes) {
       this.#proc.send({ t: 'forget', tree: tree.id }, []);
       return;
     }
     let kept = tree.bytes;
     for (const bytes of this.#trees.values()) kept += bytes;
     for (const [id, bytes] of this.#trees) {
-      if (kept <= TREE_BYTES) break;
+      if (kept <= this.#treeBytes) break;
       this.#trees.delete(id);
       this.#proc.send({ t: 'forget', tree: id }, []);
       kept -= bytes;

@@ -279,7 +279,11 @@ pub(super) fn loaded(scope: &mut v8::PinScope) -> Compiled {
 /// program has evaluated, after its load's result is sent (it's off the
 /// load's path), so the caches hold the functions setup ran too.
 pub(super) fn make_code_caches(scope: &mut v8::PinScope) {
-    for (key, module) in program(scope).uncached.take() {
+    let uncached = program(scope).uncached.take();
+    if !code_cache::enabled() {
+        return;
+    }
+    for (key, module) in uncached {
         let module = v8::Local::new(scope, module);
         let script = module.get_unbound_module_script(scope);
         if let Some(data) = script.create_code_cache() {

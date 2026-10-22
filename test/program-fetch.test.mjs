@@ -231,6 +231,28 @@ test('with concurrency, a call stopped part-way stops the others in its instance
   assert.ok(program.usage().loads >= 2);
 });
 
+test('with concurrency, a call stuck in a synchronous loop fails the calls it holds up, even ones whose work was done', async (t) => {
+  // Defined behaviour: the calls in an instance share its event loop, so a
+  // call blocking it keeps the others from finishing, and they reach their
+  // own timeoutMs (or are retired with the instance) before they can.
+  const program = await load(
+    `
+    export async function quick() { await new Promise((r) => setTimeout(r, 20)); return 'quick'; }
+    export function spin() { for (;;) {} }`,
+    { limits: { timeoutMs: 300 }, instances: { max: 1, concurrency: 3 } },
+  );
+  t.after(() => program.close());
+  const quick = [program.call('quick'), program.call('quick')];
+  const results = await Promise.allSettled([...quick, program.call('spin')]);
+  for (const r of results) {
+    assert.equal(r.status, 'rejected');
+    assert.ok(['ERR_LIMIT', 'ERR_ISOLATE_RETIRED'].includes(r.reason.code), `${r.reason.code}: ${r.reason.message}`);
+    if (r.reason.code === 'ERR_LIMIT') assert.equal(r.reason.limit, 'timeoutMs');
+  }
+  assert.ok(results.slice(0, 2).some((r) => r.reason.code === 'ERR_LIMIT'), 'a held-up call reaches its own timeoutMs');
+  assert.equal(await program.call('quick'), 'quick');
+});
+
 test('with concurrency, an aborted call stops its instance; the other call there fails with ERR_ISOLATE_RETIRED', async (t) => {
   const program = await load('export async function wait(ms) { await new Promise((r) => setTimeout(r, ms)); return "waited"; }', {
     instances: { max: 1, concurrency: 2 },

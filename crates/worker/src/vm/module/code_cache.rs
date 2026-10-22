@@ -14,12 +14,27 @@
 //! supervisor keeps no copies).
 
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 
 use sha2::{Digest, Sha256};
 
-/// Most bytes of code cache the worker keeps.
-const CACHE_BYTES: usize = 64 << 20;
+/// Most bytes of code cache the worker keeps, by default.
+pub(crate) const DEFAULT_BYTES: usize = 64 << 20;
+
+/// Most bytes of code cache the worker keeps (`--code-cache-bytes`); 0
+/// makes no caches.
+static BUDGET: AtomicUsize = AtomicUsize::new(DEFAULT_BYTES);
+
+/// Set how many bytes of code cache the worker keeps, before any VM starts.
+pub(crate) fn set_budget(bytes: usize) {
+    BUDGET.store(bytes, Ordering::Relaxed);
+}
+
+/// Whether the worker keeps code caches at all.
+pub(crate) fn enabled() -> bool {
+    BUDGET.load(Ordering::Relaxed) > 0
+}
 
 /// A module's cache key: what its code is made from, hashed (its name, and
 /// its file's hash and the transform's options, or the code itself).
@@ -56,11 +71,12 @@ pub(crate) fn put(key: Key, bytes: Arc<Vec<u8>>) -> bool {
     let Ok(mut cache) = cache().lock() else {
         return false;
     };
+    let budget = BUDGET.load(Ordering::Relaxed);
     let size = bytes.len();
-    if size > CACHE_BYTES {
+    if size > budget {
         return false;
     }
-    if cache.bytes + size > CACHE_BYTES {
+    if cache.bytes + size > budget {
         *cache = Cache::default();
     }
     if let Some(old) = cache.entries.insert(key, bytes) {

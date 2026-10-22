@@ -7,16 +7,26 @@
 //! identical wire bytes, but only while some isolate holds it. A program
 //! with `reuse: false`, or a tenant's one-shot runs, close each isolate
 //! before the next compiles, so every one compiled again. The worker keeps
-//! the modules guests compiled most recently, up to `KEEP_BYTES` of wire
-//! bytes, which keeps V8's cache warm for them; nothing else is needed, and
+//! the modules guests compiled most recently, up to its budget of wire
+//! bytes (`--wasm-cache-bytes`), which keeps V8's cache warm for them; nothing else is needed, and
 //! nothing compiled ever crosses to another tenant's worker.
 
 use std::collections::VecDeque;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Mutex, OnceLock};
 
-/// Most wire bytes of modules kept (their compiled code is a few times
-/// this, and counts against the worker's memory limit).
-const KEEP_BYTES: usize = 32 << 20;
+/// Most wire bytes of modules kept, by default (their compiled code is a
+/// few times this, and counts against the worker's memory limit).
+pub(crate) const DEFAULT_BYTES: usize = 32 << 20;
+
+/// Most wire bytes of modules kept (`--wasm-cache-bytes`); 0 keeps none.
+static BUDGET: AtomicUsize = AtomicUsize::new(DEFAULT_BYTES);
+
+/// Set how many wire bytes of modules the worker keeps, before any VM
+/// starts.
+pub(crate) fn set_budget(bytes: usize) {
+    BUDGET.store(bytes, Ordering::Relaxed);
+}
 
 #[derive(Default)]
 struct Kept {
@@ -30,16 +40,17 @@ fn kept() -> &'static Mutex<Kept> {
     KEPT.get_or_init(|| Mutex::new(Kept::default()))
 }
 
-/// Keep `module` (most recently compiled), dropping the oldest past
-/// KEEP_BYTES. A module already kept moves to the back.
+/// Keep `module` (most recently compiled), dropping the oldest past the
+/// budget. A module already kept moves to the back.
 fn keep(module: v8::CompiledWasmModule) {
+    let budget = BUDGET.load(Ordering::Relaxed);
+    let size = module.get_wire_bytes_ref().len();
+    if budget == 0 || size > budget {
+        return;
+    }
     let Ok(mut kept) = kept().lock() else {
         return;
     };
-    let size = module.get_wire_bytes_ref().len();
-    if size > KEEP_BYTES {
-        return;
-    }
     // One NativeModule has one copy of its wire bytes: the same pointer is
     // the same module.
     let wire = module.get_wire_bytes_ref().as_ptr();
@@ -51,7 +62,7 @@ fn keep(module: v8::CompiledWasmModule) {
         let old = kept.modules.remove(at).expect("the position is in range");
         kept.bytes -= old.get_wire_bytes_ref().len();
     }
-    while kept.bytes + size > KEEP_BYTES {
+    while kept.bytes + size > budget {
         let Some(oldest) = kept.modules.pop_front() else {
             break;
         };

@@ -53,6 +53,18 @@ pub type Output = Arc<Writer<Stdout>>;
 
 static PLATFORM: std::sync::OnceLock<v8::SharedRef<v8::Platform>> = std::sync::OnceLock::new();
 
+/// What the worker keeps by default for its next isolates: bytes of code
+/// cache, and wire bytes of compiled WebAssembly.
+pub const DEFAULT_CODE_CACHE_BYTES: usize = module::code_cache::DEFAULT_BYTES;
+pub const DEFAULT_WASM_CACHE_BYTES: usize = wasm_cache::DEFAULT_BYTES;
+
+/// Set what the worker keeps for its next isolates (`--code-cache-bytes`,
+/// `--wasm-cache-bytes`; 0 keeps nothing), before any VM starts.
+pub fn set_cache_budgets(code_bytes: usize, wasm_bytes: usize) {
+    module::code_cache::set_budget(code_bytes);
+    wasm_cache::set_budget(wasm_bytes);
+}
+
 /// The platform V8 was initialized with, for running each isolate's
 /// foreground tasks.
 pub fn set_platform(platform: v8::SharedRef<v8::Platform>) {
@@ -246,11 +258,14 @@ pub fn spawn(
 ///
 /// Only VMs whose isolate a spare could have made take one: web VMs
 /// without a seeded `random` (V8 draws an isolate's entropy as it makes
-/// it) and with the spare's heap limit.
+/// it) and with the spare's heap limit (its shape).
 pub struct Spare {
-    heap_bytes: Option<u64>,
     tx: std::sync::mpsc::Sender<Takeover>,
 }
+
+/// What a spare's isolate is made with, so which VMs can take it: the heap
+/// limit.
+pub type Shape = Option<u64>;
 
 /// What a spare is handed to become VM `id`.
 struct Takeover {
@@ -268,13 +283,14 @@ struct Made {
 }
 
 impl Spare {
-    /// Whether a VM of `config` can take a spare (one made for `config`).
-    pub fn fits(config: &VmConfig) -> bool {
-        config.web && config.random.seed.is_none() && crate::web::snapshot().is_some()
+    /// The shape of spare a VM of `config` can take, if any can.
+    pub fn shape(config: &VmConfig) -> Option<Shape> {
+        let fits = config.web && config.random.seed.is_none() && crate::web::snapshot().is_some();
+        fits.then_some(config.limits.heap_bytes)
     }
 
     /// Start a spare for web VMs with the heap limit `heap_bytes`.
-    pub fn start(heap_bytes: Option<u64>) -> std::io::Result<Spare> {
+    pub fn start(heap_bytes: Shape) -> std::io::Result<Spare> {
         let (tx, rx) = std::sync::mpsc::channel::<Takeover>();
         std::thread::Builder::new()
             .name("vm-spare".into())
@@ -290,21 +306,16 @@ impl Spare {
                     };
                     Made { isolate, context }
                 };
-                // Dropped unused (the worker is exiting, or a VM unlike
-                // this one came): the isolate goes with the thread.
+                // Dropped unused (the worker is exiting, or its shape was
+                // evicted): the isolate goes with the thread.
                 if let Ok(t) = rx.recv() {
                     vm_main(t.id, t.config, t.rx, t.out, t.stopper, Some(made));
                 }
             })?;
-        Ok(Spare { heap_bytes, tx })
+        Ok(Spare { tx })
     }
 
-    /// Whether this spare can become a VM of `config`.
-    pub fn matches(&self, config: &VmConfig) -> bool {
-        Self::fits(config) && config.limits.heap_bytes == self.heap_bytes
-    }
-
-    /// Become VM `id` (a VM this spare `matches`). Gives the VM's parts back
+    /// Become VM `id` (a VM of this spare's shape). Gives the VM's parts back
     /// if the spare's thread is gone, to `spawn` instead.
     pub fn take(
         self,
