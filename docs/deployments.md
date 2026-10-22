@@ -302,6 +302,13 @@ thread, and interleaved continuations would have to be attributed to
 calls. So concurrency inside an isolate is opt-in, and when it is on,
 limits apply to the instance.
 
+One consequence is accepted as defined behaviour: the calls in an instance
+share its event loop, so a call stuck in a synchronous loop holds up the
+others, including calls whose own work is done, and they reach their own
+`timeoutMs` while waiting. One stuck call can fail every call in its
+instance with `timeoutMs`. Handlers that may compute for long should run
+with `concurrency` 1.
+
 ## 4. Naming
 
 The roadmap sketch is `tenant.deploy(code, { entrypoints })` returning a
@@ -521,7 +528,8 @@ once one instance is ready, or only after the compile check when `min` is
 As built, the supervisor hashes the program's files once per program (not
 the options: the worker keys its caches on those), sends them with the
 first load on each worker, and names the hash alone after that; the worker
-keeps up to 64 MiB of programs' files, and the supervisor, which tracks
+keeps up to 64 MiB of programs' files by default (the runtime's
+`caches.fileBytes`), and the supervisor, which tracks
 what each worker has, has it forget the least recently loaded first.
 Modules are compiled lazily rather than eagerly: the code cache is made
 once the first instance has evaluated, after its load's result is sent, so
@@ -608,12 +616,20 @@ means a new hash, and a new worker binary means V8 rejects the old cache
 and makes a new one. Caches are never shared across tenants.
 
 Phase 4 built the code cache in the worker (keyed by the module's path,
-its file's hash, and the transform options; 64 MiB, dropped whole when
-full) and kept compiled WebAssembly there too. V8 already shares a
+its file's hash, and the transform options; 64 MiB by default, dropped
+whole when full) and kept compiled WebAssembly there too. V8 already shares a
 compiled module between the isolates of a process that compile the same
 bytes, but only while one of them holds it, so the worker keeps the
-modules guests compiled most recently (32 MiB of their bytes), which keeps
-that sharing alive between one isolate and the next.
+modules guests compiled most recently (32 MiB of their bytes by default),
+which keeps that sharing alive between one isolate and the next.
+
+The three budgets became the runtime's `caches` option (`fileBytes`,
+`codeBytes`, `wasmBytes`, each 0 to 1 GiB, 0 keeping nothing), since what
+a worker keeps counts against its `workerMemoryBytes` and the right amount
+depends on a platform's programs. They are runtime-wide rather than per
+tenant: a worker is started with its code and wasm budgets as flags, and
+per-tenant budgets would have to be resolved before the tenant's first
+isolate, for little gain over setting `workerMemoryBytes` per tenant.
 
 The supervisor keeps no copies. A copy would let a recycled worker start
 warm, which saves one compile per program per worker lifetime (a worker
@@ -635,8 +651,14 @@ pause between them, took about 2 ms less with the module kept.
 
 The isolate pool is `spareIsolates`, a runtime option (0 to 8, default
 0): each tenant's worker keeps that many web isolates and their contexts
-made from the snapshot, for VMs without a `random.seed` and with the heap
-limit of its last web VM. A fresh web run then takes about 0.25 ms
+made from the snapshot, for VMs without a `random.seed`, by heap limit:
+up to that many of each of the four heap limits its web VMs used most
+recently, the least recently used limit's spares dropped when a fifth
+comes. The count is per shape rather than a total shared by them, because
+a shared total refilled for the shape just used takes the other shapes'
+spares, which for a tenant alternating between two heap limits is no
+better than keeping one shape. A worker therefore holds at most
+`spareIsolates` × 4 spares. A fresh web run then takes about 0.25 ms
 instead of 1.5 ms, and a later program instance about 2.4 ms instead of
 3.3 ms, at about 3 MB of idle memory per spare (development build). It is
 off by default for that memory: a platform with many tenant workers pays

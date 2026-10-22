@@ -327,6 +327,16 @@ the limit fail with it, and the others with `ERR_ISOLATE_RETIRED`, not
 `retryable`, since they may have done part of their work. (A call an
 instance refused before it started is retried on another instance once.)
 
+The calls in an instance share its event loop, so a call that blocks it,
+in a synchronous loop or a long computation, holds up every other call
+there, including calls whose own work is done and only need the loop to
+send their results. They reach their own `timeoutMs` while held up, so one
+stuck call can make every call in its instance fail with `timeoutMs` (and
+any not yet at its deadline with `ERR_ISOLATE_RETIRED`). This is the
+defined behaviour, not a fault: concurrency suits handlers that mostly
+wait on I/O, and a program whose handlers may compute for long should keep
+`concurrency` at 1, where a call's timeout fails only that call.
+
 #### What a worker keeps
 
 A program's later instances on a worker cost little more than a fresh
@@ -334,8 +344,8 @@ isolate, because the tenant's worker keeps three things from the first.
 
 - The program's files. The supervisor sends them with the first load on
   each worker, under a hash of their contents, and later loads name the
-  hash. A worker keeps up to 64 MiB of programs' files, the least recently
-  loaded going first, and is sent a program's files again if it loads one
+  hash. A worker keeps up to 64 MiB of programs' files by default
+  (`caches.fileBytes`), the least recently loaded going first, and is sent a program's files again if it loads one
   it no longer has. Bytes in `files` are copied by `load`, so a loaded
   program doesn't change.
 - A V8 code cache of each module, made once the first instance has
@@ -343,16 +353,29 @@ isolate, because the tenant's worker keeps three things from the first.
   functions setup ran as well as the top level. Later instances
   deserialize the bytecode instead of parsing and compiling. The cache is
   keyed by the module's path, a hash of its file, and the transform's
-  options, holds up to 64 MiB, and is dropped whole when full. V8 checks a
+  options, holds up to 64 MiB by default (`caches.codeBytes`), and is
+  dropped whole when full. V8 checks a
   cache against its version, flags, and source before using it; one it
   rejects is counted in `programLoad`'s `modules.rejected` and made again.
 - Compiled WebAssembly. The worker keeps the modules guests compiled most
-  recently, up to 32 MiB of their bytes, so the next isolate that
+  recently, up to 32 MiB of their bytes by default (`caches.wasmBytes`;
+  their compiled code is a few times that), so the next isolate that
   compiles the same bytes reuses the compiled code (and the optimized code
   it tiered up to) instead of compiling it again.
 
 Nothing kept crosses to another tenant: each tenant has its own worker,
 and a recycled worker starts without them.
+
+The three budgets are the runtime's `caches` option, in bytes: `new
+Runtime({ caches: { fileBytes, codeBytes, wasmBytes } })`, each from 0 to
+1 GiB. They apply to every tenant's worker, and what a worker keeps counts
+against its `workerMemoryBytes`, so a platform with large programs or many
+WebAssembly modules can raise them along with that limit, and one with
+tight workers can lower them. A budget of 0 keeps nothing of that kind:
+with `fileBytes: 0` every load sends the program's files, with
+`codeBytes: 0` no code caches are made, and with `wasmBytes: 0` each
+isolate compiles its WebAssembly again unless another isolate still holds
+the module.
 
 Measured on a macOS development build, with zod bundled by esbuild (747
 KB) as the program and `reuse: false`: the first instance loads in about
@@ -367,10 +390,14 @@ option (0 to 8, default 0) has each tenant's worker make that many web
 isolates and their contexts ahead of their VMs, from the web platform's
 snapshot, which is most of a fresh web isolate's start. A VM takes a spare
 when its isolate is one a spare could have made: it uses the web
-platform, has no `random.seed` (V8 draws an isolate's entropy as it makes
-it), and has the `limits.heapBytes` the worker's last web VM had. The
-worker makes spares after its first web VM, and makes them again when a VM
-with another heap limit comes. With one spare, a fresh web run takes about
+platform and has no `random.seed` (V8 draws an isolate's entropy as it
+makes it). Spares are kept by shape, which is the VM's `limits.heapBytes`:
+the worker keeps up to `spareIsolates` spares of each of the four shapes
+its web VMs used most recently, so a tenant whose programs run under two
+heap limits has spares for both. The worker makes spares of a shape after
+its first web VM of that shape, and drops those of the least recently
+used shape when a fifth comes, so a worker holds at most `spareIsolates`
+× 4 spares. With one spare, a fresh web run takes about
 0.25 ms instead of 1.5 ms once the spare is ready, and a later program
 instance about 2.4 ms instead of 3.3 ms; each spare holds about 3 MB of
 the worker's memory while idle (development build), which is why they are
@@ -379,7 +406,8 @@ off by default.
 Runtime-only options: `workerPath` (default: the installed
 `@isolane/worker-*` package, or `$ISOLANE_WORKER`), `strict` (default
 `true`), `spares` (workers kept started and ready for new tenants),
-`spareIsolates` (web isolates each worker makes ahead of their VMs; see
+`spareIsolates` (web isolates each worker makes ahead of their VMs) and
+`caches` (what each worker keeps for programs; both in
 [What a worker keeps](#what-a-worker-keeps)), `quarantineMs` (default 60 s), `limits.tenants`, and `hooks`.
 `runtime.diagnostics` exposes internals for tests and diagnostics (the
 tenant's worker process id); it may change between releases.
