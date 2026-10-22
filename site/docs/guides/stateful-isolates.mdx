@@ -110,7 +110,7 @@ your process and give the guest host functions to read and write it.
 
 A stateful isolate keeps the timers and unawaited promises an eval leaves
 behind, and runs them between evals. That work is limited by
-[`backgroundMs`](/reference/limits#backgroundms), 1 second per minute by
+[`backgroundMs`](/reference/limits#work-between-evals), 1 second per minute by
 default. An isolate that uses up its budget is retired, `onLimit` fires
 with `limit: 'backgroundMs'`, and its next eval fails with `ERR_LIMIT`.
 A one-shot `tenant.run()` drops pending timers when it returns, so this
@@ -134,7 +134,7 @@ the end of the block (TypeScript 5.2 or later, or Node.js 24):
 ```
 
 Each open isolate counts toward the tenant's
-[`isolates`](/reference/limits#isolates) limit, 100 by default, and keeps
+[`isolates`](/reference/limits#tenant-limits) limit, 100 by default, and keeps
 the tenant's worker running. An isolate you forget to close is freed only
 when the worker is recycled or stopped.
 

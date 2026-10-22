@@ -134,7 +134,7 @@ shared by reference with the host (isolated-vm), or Windows support.
 | `random` | OS | Seeded randomness for reproducible runs |
 
 The web platform passes 99.6% of the applicable web-platform-tests, and the
-engine 98.8% of the applicable test262 runs. See
+engine 97.5% of the applicable test262 runs. See
 [conformance](docs/guide.md#web-platform-conformance).
 
 ```js

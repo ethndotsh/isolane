@@ -31,6 +31,7 @@ A program is immutable. To deploy a new version, load it and close the old one.
 | `ts` | `TsOptions` | `{ mode: 'strip' }` | How TypeScript is compiled. See [Modules](/reference/modules). |
 | `jsx` | `JsxOptions` | automatic runtime from `react` | How JSX is compiled. See [Modules](/reference/modules). |
 | `define` | `Record<string, string>` | none | Compile-time constants, as in esbuild. See [Modules](/reference/modules). |
+| `tsconfig` | `string \| false` | the nearest `tsconfig.json` | The `tsconfig.json` whose `paths` and `baseUrl` imports resolve with: a path to one of the program's files, or `false` for none. See [tsconfig.json](/reference/modules#tsconfigjson). |
 
 ### env
 
@@ -155,4 +156,4 @@ These figures are reported by the worker, as `tenant.usage()` is. See [Usage](/r
 
 ## Events
 
-Events from a program's instances (`call`, `log`, `limit`, `guestError`, `policyDenial`) carry the program's `id` as `program`. `onProgramLoad` reports each instance's load. See [Hooks](/reference/hooks#onprogramload).
+Events from a program's instances (`call`, `log`, `limit`, `guestError`, `policyDenial`) carry the program's `id` as `program`. `onProgramLoad` reports each instance's load. See [Hooks](/reference/hooks#programloadevent).

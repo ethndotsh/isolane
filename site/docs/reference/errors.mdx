@@ -87,7 +87,7 @@ Each text is cut to 64 KiB, or 8 KiB inside `cause` and `errors`, with `…` mar
 
 isolane's own frames are the web platform's scripts, named `ext:…`, and isolane's, named `isolane:…`. They are removed from `stack` and `frames`. The guest's own `error.stack` keeps them, and `Error.prepareStackTrace` and `Error.captureStackTrace` work as in V8. A custom `prepareStackTrace` that returns a string is reported as is.
 
-For a program, frames in `stack` and `frames`, and the `location` of a syntax error, point at the original source files, through the source maps of transformed modules and of bundles that carry one.
+For a program, frames in `stack` and `frames`, and the `location` of a syntax error, point at the original source files, through the source maps of transformed modules and of bundles that carry one. The guest's own `error.stack` in a program is mapped the same way, so the stack guest code logs matches the one in `err.guest`. A custom `prepareStackTrace` receives the compiled code's positions; see [source maps](/reference/modules#source-maps).
 
 ### GuestStackFrame
 

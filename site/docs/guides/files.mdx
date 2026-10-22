@@ -5,6 +5,8 @@ description: Let guest code read, and optionally write, files under one host dir
 
 An `fs` policy gives guest code an `fs` object over one host directory, which it sees as `/`. Your process performs each operation after confining its path to that directory. Nothing outside it is reachable.
 
+A program's own files, the ones passed to `tenant.load`, are a different thing: it reads them with the [`isolane:files`](/reference/guest-environment#isolanefiles) module, without an `fs` policy, and during setup too.
+
 ## Read files
 
 ```js

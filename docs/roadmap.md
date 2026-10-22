@@ -502,6 +502,13 @@ differences.
 | `shims`: the embedder's JS in the isolate, `setup` once and `before`/`after` each eval, each its own script (exact guest line numbers), compiled by isolane (works with `eval` off), layered like the config, `ERR_SHIM` for their failures; the serverless example invokes `handle()` with one | done |
 | Delete the minimal fetch/base64/UTF-8 prelude once the web platform is always on | done: `web` defaults to on, and `fetch`, `connect`, and `fs` need it (`ERR_INVALID_CONFIG` with `web: false`); the prelude only hands the raw broker functions to the web platform and builds `fs` on its `TextEncoder`/`TextDecoder` |
 | Split the end-to-end tests by area | done |
+| Found while writing the docs site (October 2026): a `globals` name that is a built-in web global (`URL`) is refused only when the isolate starts, as `ERR_ISOLATE_RETIRED` ("vm setup failed"); check it when the config resolves and fail with `ERR_INVALID_CONFIG` | planned |
+| Found while writing the docs site: `console.log(new Error(...))` reaches `onLog` as `{}`, since objects are written as JSON; format errors as their stack, as Node and browsers do | planned |
+| Found while writing the docs site: a `hostFunction` without `args` gets its context only as `this`, not as a last parameter; decide whether every handler gets `ctx` the same way | idea |
+| Found while writing the docs site: `ERR_WORKER_CRASHED` is `retryable`, but with the default `quarantineMs` an immediate retry fails with `ERR_TENANT_QUARANTINED`; either give the error a retry delay or document a backoff in the error itself | idea |
+| Found while writing the docs site: `usage().hostCalls` counts isolane's own `fetch`, `connect`, and `fs` calls, which the `hostCalls` limit does not; make the two count the same calls | idea |
+| Found while writing the docs site: a `beforeEval` interceptor that throws fails the eval with the thrown value, not an `IsolaneError`; wrap it as `beforeHostCall` failures are | idea |
+| Found while writing the docs site: the `TenantUsage.cpuMs` doc comment doesn't say it is Linux only (it reads 0 on macOS) | planned |
 
 ## 5. Performance
 
@@ -629,3 +636,10 @@ Linux 2-core $0.006/min, Linux arm64 2-core $0.005/min, macOS $0.062/min.
 - Enable "Allow GitHub Actions to create and approve pull requests" for the
   V8 update workflow's PRs.
 - README `using` examples need Node 24+ (or TypeScript's downlevel).
+- The documentation site (`site/`, Blume) builds and checks its links in
+  CI (`docs.yml`) but is not published. Where it is hosted (GitHub Pages
+  under `/isolane`, or a domain) is undecided; publishing needs
+  `deployment.site` (and `basePath` for Pages) in `site/blume.config.ts`.
+- `docs/guide.md` and the site's reference pages now cover the same
+  ground. Once the site is published, the guide should shrink to a pointer
+  so that there is one copy to keep current.

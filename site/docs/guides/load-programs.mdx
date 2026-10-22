@@ -70,6 +70,36 @@ await tenant.load({ main: 'src/index.ts', files }, { ts: { mode: 'transform', ex
 
 Run `tsc --noEmit` in your build pipeline if you want type errors to stop a deployment; isolane doesn't check them.
 
+## Resolve tsconfig paths
+
+Pass the program's `tsconfig.json` with its sources, and imports resolve through its `paths` and `baseUrl` as they do for `tsc`:
+
+```js
+const program = await tenant.load({
+  main: 'src/index.ts',
+  files: {
+    'tsconfig.json': await readFile(join(root, 'tsconfig.json'), 'utf8'),
+    ...(await readTree(root, join(root, 'src'))),
+  },
+});
+```
+
+```jsonc tsconfig.json
+{
+  // Comments and trailing commas are fine.
+  "compilerOptions": {
+    "baseUrl": ".",
+    "paths": { "@lib/*": ["src/lib/*"] },
+  },
+}
+```
+
+```ts src/index.ts
+import { total } from '@lib/orders'; // src/lib/orders.ts
+```
+
+Each import uses the nearest `tsconfig.json` above the importing file, and packages under `node_modules` use none. A repository with several configs can name the one to use with `tsconfig: 'tsconfig.app.json'`, and `tsconfig: false` turns them off. Only `paths` and `baseUrl` are read; compile settings come from the `ts` and `jsx` options.
+
 ## Use JSX
 
 `.jsx` and `.tsx` files compile with the automatic runtime from `react/jsx-runtime`, which must be among the program's files. For another library, name its package:
@@ -85,7 +115,7 @@ await tenant.load({ main: 'src/index.tsx', files }, { jsx: { importSource: 'hono
 Programs have no Node.js built-in modules. An import of one fails the load:
 
 ```
-TypeError: Cannot import "node:events" from src/bus.js: isolane has no Node.js built-in modules; give the program one with the modules option ({ 'node:x': './x.js' })
+TypeError: Cannot import "node:events" from src/bus.js: isolane has no Node.js built-in modules; give the program one with the modules option ({ 'node:x': './x.js' }), or read its files with isolane:files
 ```
 
 Point the specifier at a file of the program, or at a package in its files:
@@ -101,6 +131,38 @@ await tenant.load({ main: 'src/index.js', files }, {
 
 A package named this way must be an ES module. Many Node.js polyfills, such as npm's `buffer`, are CommonJS; bundle those.
 
+## Read the program's own files
+
+Templates, translations, and other assets travel in `files` with the code, and the program reads them with `isolane:files`. Pass them under any extension; files that aren't imported are only read.
+
+```js src/index.js
+import { readFileSync, readdirSync } from 'isolane:files';
+
+// Runs once per instance, at setup. Reading the program's files is not I/O.
+const dir = new URL('./locales/', import.meta.url);
+const locales = Object.fromEntries(
+  readdirSync(dir).map((name) => [name.replace('.json', ''), JSON.parse(readFileSync(new URL(name, dir), 'utf8'))]),
+);
+
+export function greet(name, locale = 'en') {
+  return locales[locale].hello.replace('{name}', name);
+}
+```
+
+```js
+const program = await tenant.load({
+  main: 'src/index.js',
+  files: {
+    'src/index.js': await readFile('src/index.js', 'utf8'),
+    'src/locales/en.json': '{ "hello": "Hello, {name}" }',
+    'src/locales/fr.json': '{ "hello": "Bonjour, {name}" }',
+  },
+});
+await program.call('greet', ['Ada', 'fr']); // 'Bonjour, Ada'
+```
+
+A file that is a module can also be imported as data, as `import en from './locales/en.json'`; reading it suits files the program lists or picks at run time. Code written for Node.js that reads its assets with `node:fs` works when the program is loaded with `modules: { 'node:fs': 'isolane:files' }`, as long as it only reads. [`isolane:files`](/reference/guest-environment#isolanefiles) lists every function and error. These files are separate from the [`fs` capability](/guides/files), which reaches a directory on the host.
+
 ## Load a bundle
 
 Bundling suits CommonJS dependencies, programs past the module limits, and build pipelines that already produce one file. Target ES modules and the Workers conditions, as for Cloudflare Workers:
@@ -108,7 +170,7 @@ Bundling suits CommonJS dependencies, programs past the module limits, and build
 ```sh
 npx esbuild src/index.ts --bundle --format=esm --platform=neutral \
   --conditions=workerd,worker,browser --main-fields=browser,module,main \
-  --external:isolane:env --external:cloudflare:sockets \
+  --external:isolane:env --external:isolane:files --external:cloudflare:sockets \
   --sourcemap --outfile=dist/index.js
 ```
 
@@ -122,7 +184,7 @@ await tenant.load({
 });
 ```
 
-Keep `isolane:env`, `cloudflare:sockets`, and any host modules external, since the worker provides them. Rolldown takes the same settings, as `platform: 'neutral'` and `resolve.conditionNames`. [Connecting to databases](/guides/sockets#run-postgresjs-in-a-program) bundles postgres.js this way.
+Keep `isolane:env`, `isolane:files`, `cloudflare:sockets`, and any host modules external, since the worker provides them. Rolldown takes the same settings, as `platform: 'neutral'` and `resolve.conditionNames`. [Connecting to databases](/guides/sockets#run-postgresjs-in-a-program) bundles postgres.js this way.
 
 ## Read errors
 
@@ -138,7 +200,7 @@ try {
 }
 ```
 
-The worker maps positions through the source maps of files it transformed, and through a bundle's map, found by its `//# sourceMappingURL=` comment or as a `.map` file beside it. Pass the map in `files` for bundles.
+The worker maps positions through the source maps of files it transformed, and through a bundle's map, found by its `//# sourceMappingURL=` comment or as a `.map` file beside it. Pass the map in `files` for bundles. The program's own `error.stack` is mapped too, so the stacks it logs name the same files and lines.
 
 ## Common failures
 

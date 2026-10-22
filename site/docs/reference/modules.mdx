@@ -14,7 +14,7 @@ description: How a program's files are named, resolved, compiled, and limited, a
 
 `files` maps paths to contents. A content is a string or a `Uint8Array`; `load` copies the bytes, so changing the array afterwards doesn't change the program.
 
-Paths are relative, such as `src/index.ts` or `node_modules/hono/package.json`. A leading `./` is removed. A path must not start with `/`, contain empty, `.`, or `..` segments, contain backslashes or control characters, be longer than 1,024 characters, or start with `ext:` or `isolane:`. Two paths that name the same file are refused. Paths become the modules' names in stack traces, and `import.meta.url` is the path as a `file:` URL (`file:///src/index.ts`).
+Paths are relative, such as `src/index.ts` or `node_modules/hono/package.json`. A leading `./` is removed. A path must not start with `/`, contain empty, `.`, or `..` segments, contain backslashes or control characters, be longer than 1,024 characters, or start with `ext:` or `isolane:`. Two paths that name the same file are refused. Paths become the modules' names in stack traces. Inside the program, each file's path is absolute, under `/`: `src/index.ts` is `/src/index.ts`, and its URL is `file:///src/index.ts`, as [`import.meta`](#importmeta) gives it.
 
 ## Resolution
 
@@ -25,8 +25,10 @@ The worker resolves every import over the program's files and nothing else, with
 | A relative path, `./routes` | A file of the program. Without an extension, the resolver tries `.ts`, `.tsx`, `.mts`, `.js`, `.jsx`, `.mjs`, and `.json`, then the directory's `index` file. |
 | A relative path ending in `.js` or `.mjs` | The `.ts`, `.tsx`, `.js`, or `.jsx` file (for `.js`) or the `.mts` or `.mjs` file (for `.mjs`) of that name, as TypeScript's convention has it |
 | A bare specifier, `hono` or `hono/jsx` | A package under `node_modules`, by its `package.json` |
+| A pattern in the applicable `tsconfig.json`'s `paths`, `@lib/two` | The file the pattern maps to. See [tsconfig.json](#tsconfigjson). |
+| A `file:` URL of one of the program's files, `file:///src/lib/a.js` | That file. A `file:` URL of anything else fails as a missing file. |
 | A key of the [`modules` option](/reference/capabilities#modules) | What that option says, before any other rule |
-| `isolane:env`, `cloudflare:sockets` | The [built-in modules](/reference/guest-environment#built-in-modules) |
+| `isolane:env`, `isolane:files`, `cloudflare:sockets` | The [built-in modules](/reference/guest-environment#built-in-modules) |
 
 A package's `exports` and `imports` fields are matched with these conditions, in this order: `workerd`, `worker`, `browser`, `import`, `default`. This is the order bundlers for Cloudflare Workers use, so a package with a Workers build gets it. A package without `exports` is entered by its `browser`, `module`, or `main` field, in that order, and its `browser` field's aliases apply.
 
@@ -35,14 +37,59 @@ An import that resolves to nothing fails the load with a `TypeError` that names 
 | Import | Error message |
 |---|---|
 | A missing file | `Cannot find module "./missing.js" imported from a.js` |
-| A Node.js built-in, `node:fs` | `Cannot import "node:fs" from a.js: isolane has no Node.js built-in modules; give the program one with the modules option ({ 'node:x': './x.js' })` |
-| A URL | `Cannot import "https://esm.sh/x" from a.js: only the program's files, isolane:env, cloudflare:sockets, and the modules option's specifiers can be imported` |
+| A Node.js built-in, `node:fs` | `Cannot import "node:fs" from a.js: isolane has no Node.js built-in modules; give the program one with the modules option ({ 'node:x': './x.js' }), or read its files with isolane:files` |
+| A URL other than a program file's `file:` URL | `Cannot import "https://esm.sh/x" from a.js: only the program's files, isolane:env, isolane:files, cloudflare:sockets, and the modules option's specifiers can be imported` |
 
-Packages must be ES modules. A CommonJS package needs bundling first, as [loading programs](/guides/load-programs#bundles) shows.
+Packages must be ES modules. A CommonJS package needs bundling first, as [loading programs](/guides/load-programs#load-a-bundle) shows.
+
+## tsconfig.json
+
+A `tsconfig.json` among the program's files applies its `compilerOptions.paths` and `baseUrl` to imports, with `extends` and project references followed. As TypeScript does, the resolver uses the nearest `tsconfig.json` in the importing file's directory or above it, and none for files under `node_modules`. The file may contain comments and trailing commas.
+
+```json tsconfig.json
+{
+  "compilerOptions": {
+    "baseUrl": ".",
+    "paths": { "@lib/*": ["src/lib/*"], "~config": ["src/config.ts"] }
+  }
+}
+```
+
+With this file, `import { two } from '@lib/two'` loads `src/lib/two.ts`, and `baseUrl` makes `import 'src/lib/three'` load `src/lib/three.ts`.
+
+The `tsconfig` load option changes which file applies:
+
+| `tsconfig` | Effect |
+|---|---|
+| omitted | The nearest `tsconfig.json` above each importing file |
+| a path, `'config/tsconfig.app.json'` | That file, for every import. It must be one of the program's files, or `load` throws `ERR_INVALID_CONFIG`. |
+| `false` | No tsconfig file applies |
+
+A tsconfig file that can't be read, such as one whose `extends` names a missing file, fails the load with a `TypeError` that names it. Only `paths` and `baseUrl` are used. Compiler options such as `target`, `jsx`, or `experimentalDecorators` don't change how files compile; the [`ts`](#typescript) and [`jsx`](#jsx) options do.
 
 ## Dynamic import
 
 `import()` works for the program's files and the built-in modules, during setup and in calls. A module imported in a call is compiled then, under the call's `cpuMs`. Classic scripts run with `run`, `isolate.eval`, and `isolate.call` can't import; `import()` there rejects with a `TypeError`.
+
+## import.meta
+
+Each module's `import.meta` has the properties Node.js gives it, for the module's path under `/`.
+
+| Property | Value, for `src/index.ts` |
+|---|---|
+| `url` | `'file:///src/index.ts'`. Characters that URLs escape are escaped: `src/a b.js` is `file:///src/a%20b.js`. |
+| `filename` | `'/src/index.ts'` |
+| `dirname` | `'/src'` |
+| `main` | `true` in the program's main module, `false` in the others |
+| `resolve(specifier)` | The URL an import of `specifier` from this module would load, without loading it |
+
+`import.meta.resolve` follows the [resolution](#resolution) rules. For a built-in module or a key of the `modules` option it returns the specifier itself (`'isolane:env'`, `'kv'`). For an import that would fail it throws the `TypeError` the import would fail with, such as `Cannot find module "./nope.js" imported from src/index.js`. Its result can be imported, since a program file's `file:` URL is a specifier:
+
+```js
+const { routes } = await import(import.meta.resolve('./routes.js'));
+```
+
+`new URL('./data.json', import.meta.url)` names a file beside the module, and [`isolane:files`](/reference/guest-environment#isolanefiles) reads it.
 
 ## File types
 
@@ -105,7 +152,9 @@ Stack traces in errors isolane reports point at the original files. This covers 
 - the source map of each module it transformed itself;
 - a bundle's own map, named by a `//# sourceMappingURL=` comment as a `data:` URL or a path in the program, or a `.map` file beside the bundle with the same name.
 
-Mapping happens in the worker before the error is sent. The guest's own `error.stack`, read by guest code, keeps V8's positions in the compiled code.
+Mapping happens in the worker before the error is sent. The guest's own `error.stack` is mapped the same way, when V8 creates it, so a stack a program logs names the same files and lines as the one isolane reports. Deno maps stacks the same way.
+
+A program that sets `Error.prepareStackTrace` receives V8's call sites with their generated positions, which are the compiled code's, not the source's. If that function throws, `error.stack` takes the default, mapped form.
 
 ## Limits
 

@@ -1,0 +1,27 @@
+name: Docs
+
+on:
+  push:
+    paths: ['site/**', '.github/workflows/docs.yml']
+  pull_request:
+    paths: ['site/**', '.github/workflows/docs.yml']
+  workflow_dispatch:
+
+jobs:
+  build:
+    # Builds the Blume site in site/ and checks its internal links and
+    # anchors; publishing it is not set up yet.
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: site
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 22.19.0
+      - run: npx -y pnpm@10.34.6 install --frozen-lockfile --ignore-workspace
+      - run: npx blume doctor
+      - run: npx blume build
+      - run: npx blume validate

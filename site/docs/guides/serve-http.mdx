@@ -104,7 +104,7 @@ as server-sent events, are not supported yet.
 
 A promise passed to `ctx.waitUntil` keeps running in the instance after
 `program.fetch` has resolved. It runs under the isolate's
-[`backgroundMs`](/reference/limits#backgroundms) budget, and a rejection is
+[`backgroundMs`](/reference/limits#work-between-evals) budget, and a rejection is
 reported through `onGuestError`. When an instance closes, because of
 `program.close()`, `instances.idleMs`, or `instances.reuse: false`, isolane
 waits for its `waitUntil` work, up to `timeoutMs`.

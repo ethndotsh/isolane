@@ -242,4 +242,4 @@ await tenant.load(source, {
 });
 ```
 
-A host module's functions are host functions in every other way: hooks see them, `hostFunction` schemas apply, and they count against the host call limits and throw `ERR_SETUP_IO` during setup. `isolane:env` and names starting with `isolane:runtime/` are reserved. [Modules](/reference/modules) describes resolution.
+A host module's functions are host functions in every other way: hooks see them, `hostFunction` schemas apply, and they count against the host call limits and throw `ERR_SETUP_IO` during setup. `isolane:env`, `isolane:files`, and names starting with `isolane:runtime/` are reserved. [Modules](/reference/modules) describes resolution.

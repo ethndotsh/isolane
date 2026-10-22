@@ -101,14 +101,43 @@ With a [`connect` policy](/reference/capabilities#connect), the global `connect(
 
 ## Built-in modules
 
-Programs can import two modules that are not files:
+Programs can import three modules that are not files:
 
 | Specifier | Exports |
 |---|---|
 | `isolane:env` | `env`: the program's [`env` option](/reference/capabilities#env), with its `host` functions mounted in it. An empty object when the program has none. |
+| `isolane:files` | Read-only functions over the program's own files, as described [below](#isolanefiles) |
 | `cloudflare:sockets` | `connect`: the Sockets API's, as the program started with it, whatever its code later does to the global |
 
-The [`modules` option](/reference/capabilities#modules) adds host modules, such as `isolane:kv`.
+The [`modules` option](/reference/capabilities#modules) adds host modules, such as `isolane:kv`. A module's [`import.meta`](/reference/modules#importmeta) has `url`, `filename`, `dirname`, `main`, and `resolve()`, as in Node.js.
+
+### isolane:files
+
+`isolane:files` reads the files the program was loaded with. It has the names and shapes of `node:fs` for reading, as named exports and as the default export:
+
+| Function | Returns |
+|---|---|
+| `readFileSync(path)` | A `Uint8Array` |
+| `readFileSync(path, 'utf8')` or `readFileSync(path, { encoding: 'utf8' })` | A string. `utf8` and `utf-8` are the only encodings. |
+| `existsSync(path)` | `true` or `false`. `false` for a path that is not a string or URL. |
+| `readdirSync(path)` | The entry names, sorted |
+| `statSync(path)` | `{ size, isFile(), isDirectory() }`. `size` is 0 for a directory. |
+| `promises.readFile`, `promises.readdir`, `promises.stat` | The same, as promises |
+
+A path is a program path, absolute (`/src/data.json`) or from the root (`src/data.json`), or a `file:` URL as a string or `URL` object, so `readFileSync(new URL('./data.json', import.meta.url), 'utf8')` reads the file beside the module. Errors have Node.js's codes and messages:
+
+| Case | `code` | Message |
+|---|---|---|
+| No such file | `ENOENT` | `ENOENT: no such file or directory, open '/missing.txt'` |
+| Reading a directory | `EISDIR` | `EISDIR: illegal operation on a directory, open '/src'` |
+| Listing a file | `ENOTDIR` | `ENOTDIR: not a directory, scandir '/src/data.json'` |
+| A URL that isn't `file:` | `ERR_INVALID_URL_SCHEME` | `The URL "https://example.com/x" must be a file: URL with an absolute path` |
+| Another encoding | `ERR_INVALID_ARG_VALUE` | `The encoding "latin1" is not supported: isolane:files reads bytes, or utf8 text` |
+| A path of another type | `ERR_INVALID_ARG_TYPE` | `The "path" argument must be of type string or an instance of URL` |
+
+File system errors also have `syscall` and `path`. The files are the ones the worker received with the load, held in its memory, so reading them is not I/O: it works during setup, where [`fs`](#fs) and host calls fail with `ERR_SETUP_IO`, and it involves no host call. Writes are not possible, and the [`fs` policy](/reference/capabilities#fs) has no effect on this module.
+
+Code written for Node.js that reads its assets with `node:fs` runs unchanged with `modules: { 'node:fs': 'isolane:files' }`, as long as it only reads. `isolane:files` itself can't be a key of the `modules` option.
 
 ## Console
 
