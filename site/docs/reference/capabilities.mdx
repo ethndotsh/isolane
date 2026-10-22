@@ -35,34 +35,7 @@ Functions guest code can call, by name. A nested object becomes a frozen namespa
 
 Names contain letters, digits, `_`, and `$`, and must not start with `__isolane_`. A name can't be both a function and a namespace across configuration levels. A name taken by a policy's global (`fetch`, `Headers`, `Response`, `connect`, or `fs`) is refused when that policy is set.
 
-`hostFunction` fields:
-
-| Field | Type | Meaning |
-|---|---|---|
-| `handler` | function | Does the work. Receives the validated arguments, then the context when `args` is a list. |
-| `args` | Standard Schema, or a list of them | One schema per positional argument, or one for the whole argument list. The handler gets each schema's output, so defaults and transforms apply. |
-| `returns` | Standard Schema | Checked before the guest sees the value. |
-| `sync` | `boolean` | The guest gets the value directly instead of a promise, and its isolate waits for the reply within `timeoutMs`. Default `false`. |
-
-The context has `tenant`, `isolate` (the calling isolate's id), `signal`, and `log(level, ...args)`. The `signal` aborts when nobody is waiting for the result any more: the eval reached a time or CPU limit, the isolate closed, or the worker exited. `log` reports through `onLog` with `source: 'host'`.
-
-What crosses between guest and host:
-
-| Direction | Crosses as JSON | Crosses as bytes |
-|---|---|---|
-| Guest arguments to the handler | Every value, with `undefined` as `null` | `ArrayBuffer` and its views at the top level, which arrive as `Buffer` |
-| Handler result to the guest | Every value | `Buffer` and typed arrays, which arrive as `Uint8Array` |
-
-Failures the guest sees:
-
-| Cause | Guest error |
-|---|---|
-| An argument fails `args` | `TypeError` with `code: 'ERR_INVALID_ARGUMENTS'` and a message listing each issue |
-| The result fails `returns` | `Error` with `code: 'ERR_INVALID_RETURN'` |
-| The handler throws | An error with the thrown error's `name`, `message`, and `code`, without its stack |
-| `beforeHostCall` denies the call | An error with `code: 'ERR_DENIED'` |
-| More than `limits.hostCalls` calls in one eval | `RangeError`, and the eval fails with `ERR_LIMIT` |
-| More than `limits.pendingHostCalls` calls waiting at once | `RangeError`, and the eval fails with `ERR_LIMIT` |
+[`hostFunction`](/reference/runtime#hostfunction) describes the definition's fields, the [call context](/reference/runtime#hostcontext), and how [values cross](/reference/runtime#values-across-the-boundary) between guest and host. [Errors](/reference/errors#what-guest-code-sees) lists the errors the guest sees when a host call fails.
 
 Host functions count against [`hostCalls`, `pendingHostCalls`, and `pendingHostCallBytes`](/reference/limits). In a program, the `host` functions are mounted in `env` instead of on the global, and they throw `ERR_SETUP_IO` during setup.
 
@@ -208,7 +181,7 @@ Errors carry Node.js-style codes (`ENOENT`, `EEXIST`, `ENOTDIR`, `EISDIR`, `ENOT
 
 | Value | `Date.now()`, `new Date()`, `performance.now()`, and `Intl`'s default time |
 |---|---|
-| `'frozen'` (default) | Real time, moved forward only when an eval or call starts and when a host call, fetch, or other I/O returns. Busy code can't time itself. |
+| `'frozen'` (default) | Real time, moved forward only when an eval, call, or setup starts, when a host call, fetch, or other I/O returns, and when a timer fires. Busy code can't time itself. |
 | `'real'` | The real clock |
 | `{ fixedMs }` | The fixed instant `fixedMs` (milliseconds since the epoch), for reproducible runs |
 

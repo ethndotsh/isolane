@@ -150,12 +150,11 @@ the pool replaces a retired instance automatically, and a stateful isolate
 should be recreated; its `ERR_ISOLATE_RETIRED` is `retryable` on a new
 isolate.
 
-## What a limit does when it is reached
+## Limits that fail one operation
 
-Every limit reached emits `onLimit`. Beyond that, a limit has one of three
-effects. Most fail the eval with `ERR_LIMIT`, with `err.limit` naming the
-limit. Limits on individual guest operations, such as `timers`,
-`decompressedBytes`, and the `fetch`, `connect`, and `fs` policies' own
-limits, fail that operation in the guest and let the eval continue, so
-the guest can handle them. The output limits cut the output and fail
-nothing.
+Most limits fail the eval with `ERR_LIMIT`. Limits on individual guest
+operations, such as `timers`, `decompressedBytes`, and the `fetch`,
+`connect`, and `fs` policies' own limits, fail only that operation, so the
+guest can catch the error and carry on. The output limits cut the output
+and fail nothing. The [limits reference](/reference/limits#what-every-limit-does)
+says which limit has which effect.

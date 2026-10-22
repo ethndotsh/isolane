@@ -91,6 +91,8 @@ Each worker locks itself down before it reads guest code, in this order:
    so a crash writes no core dump containing tenant data.
 2. While it still has one thread, it applies Landlock: no filesystem
    access, and on kernels that support it, no TCP bind or connect.
+   Landlock restricts only the calling thread and the threads it later
+   creates, so it has to be in place before V8 starts its own threads.
 3. It initializes V8.
 4. It installs a seccomp filter on every thread. The filter allows pipe
    reads and writes, memory management, futexes, clocks, signal handling,
@@ -183,7 +185,10 @@ that harder but not impossible. Native work that V8 cannot interrupt, such
 as RSA key generation (capped at 4,096 bits) and URLPattern parsing, runs
 on the isolate's thread and can overrun a time limit by its bounded cost.
 seccomp allows `uname`, which V8 needs on arm64, so a compromised worker
-can read the kernel release and the host name.
+can read the kernel release and the host name. Every host call moves the
+frozen clock to the real time, so a guest that makes many host calls can
+measure coarse durations, in whole milliseconds at the cost of a round
+trip each ([time and determinism](/concepts/time-and-determinism#where-it-leaks)).
 
 ## Reporting a vulnerability
 

@@ -3,11 +3,10 @@ title: Tune warm starts
 description: Size a program's instance pool, keep instances and spare workers ready, and set what each worker caches, then measure the result.
 ---
 
-This guide reduces the time a call waits before it runs: the time to start
-a [worker](/concepts/architecture), create an isolate, and load a program's
-modules. It uses
-`instances` on each program and three runtime options, `spares`,
-`spareIsolates`, and `caches`.
+Before a call runs, it can wait for a [worker](/concepts/architecture) to
+start, an isolate to be created, and a program's modules to load. The
+`instances` option on each program and three runtime options, `spares`,
+`spareIsolates`, and `caches`, shorten each of those waits.
 
 ## Measure first
 
@@ -44,15 +43,11 @@ const program = await tenant.load(source, {
 });
 ```
 
-| Option | Default | Effect |
-|---|---|---|
-| `min` | 0 | Instances kept loaded even when idle; loaded right after `load` |
-| `max` | 4 | Most instances at once |
-| `idleMs` | 30 s | An idle instance above `min` closes after this long |
-| `queueMs` | 10 s | A call that finds every instance busy at `max` waits this long, then fails with `ERR_LIMIT` (`instances.queueMs`) |
-| `queue` | 1,000 | Most calls waiting at once; one more fails at once with `ERR_LIMIT` (`instances.queue`) |
-| `concurrency` | 1 | Calls one instance runs at once |
-| `reuse` | `true` | `false` gives every call a fresh instance |
+By default a program keeps no idle instances (`min: 0`), runs at most 4
+(`max`), closes an idle one after 30 s (`idleMs`), and lets a call wait 10
+s (`queueMs`) behind at most 1,000 others (`queue`) before it fails with
+`ERR_LIMIT`. [Program](/reference/program#instances) lists every field and
+its range.
 
 Set `min` to the number of calls you expect at once in quiet periods, so
 the first request after a lull does not wait for a load. Each instance is
@@ -77,13 +72,10 @@ loop at once, and new instances are loaded only when every instance is
 full. The calls share the instance's per-eval budgets (`cpuMs`,
 `hostCalls`, `logBytes`) and its event loop.
 
-:::warning
 With `concurrency` above 1, one call stuck in a synchronous loop holds up
-every call in its instance. Those calls reach their own `timeoutMs` while
-they wait, so one stuck call can fail every call in the instance, and the
-instance is retired. This is defined behaviour. Keep `concurrency` at 1
-for handlers that may compute for a long time.
-:::
+every call in its instance, so one stuck call can fail them all and retire
+the instance ([Programs](/concepts/programs#concurrency) explains why).
+Keep `concurrency` at 1 for handlers that may compute for a long time.
 
 ## Keep workers and isolates ready
 
@@ -99,7 +91,8 @@ const runtime = new Runtime({ spares: 2, spareIsolates: 2 });
 isolates in advance, which is most of a fresh web isolate's start. Spares
 are kept for each of the four heap sizes (`limits.heapBytes`) the worker
 used most recently, so a worker holds at most `spareIsolates` × 4. An
-isolate with a `random.seed`, or with `web: false`, cannot use a spare.
+isolate with a `random.seed`, or with `web: false`, cannot use a spare;
+[Caches](/concepts/caches#spare-isolates) explains why.
 
 Measured on a macOS development build, a fresh web run took 0.25 ms with a
 spare ready instead of 1.5 ms, and a later program instance 2.4 ms instead
@@ -117,18 +110,13 @@ const runtime = new Runtime({
 });
 ```
 
-| Field | Default | Keeps |
-|---|---|---|
-| `fileBytes` | 64 MiB | Programs' files, so later loads do not send them again; least recently loaded go first |
-| `codeBytes` | 64 MiB | V8 code caches of programs' modules, made after the first instance evaluated them; dropped whole when full |
-| `wasmBytes` | 32 MiB | Compiled WebAssembly, by the size of its bytes; its compiled code is a few times larger |
-
-Each budget is an integer from 0 to 1 GiB, and 0 keeps nothing of that
-kind. What a worker keeps counts against its `workerMemoryBytes`, so raise
-that limit with the budgets if your programs are large. The budgets apply
-to every tenant's worker, since they are set when the worker starts.
-Nothing cached crosses to another tenant, and a recycled worker starts
-empty.
+`fileBytes` keeps programs' files (64 MiB by default), `codeBytes` V8 code
+caches of their modules (64 MiB), and `wasmBytes` compiled WebAssembly (32
+MiB); [Configuration](/reference/configuration#caches) has the details. 0
+keeps nothing of that kind. What a worker keeps counts against its
+`workerMemoryBytes`, so raise that limit with the budgets if your programs
+are large. The budgets apply to every tenant's worker, and a recycled
+worker starts empty.
 
 Measured on a macOS development build with a 747 KB bundle and
 `reuse: false`, the first instance loaded in about 16 ms and each later one

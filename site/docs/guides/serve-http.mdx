@@ -3,8 +3,8 @@ title: Serve HTTP with a program
 description: Route HTTP requests from a Node.js server to a tenant's fetch handler with program.fetch.
 ---
 
-This guide puts a tenant's Workers-style fetch handler behind a Node.js HTTP
-server, so that each incoming request runs in one of the
+Put a tenant's Workers-style fetch handler behind a Node.js HTTP server,
+so that each incoming request runs in one of the
 [program's](/concepts/programs) warm instances.
 
 ## Write the handler
@@ -135,17 +135,11 @@ abort it on the response's `close` event.
 
 ## Status codes for failures
 
-`program.fetch` rejects rather than returning a `Response` when the call
-fails. The error's `kind` separates the tenant's faults from yours:
-
-| `err.kind` | Typical codes | Suggested status |
-|---|---|---|
-| `guest` | `ERR_GUEST_EXCEPTION` (the handler threw, or returned something other than a `Response`), `ERR_HANDLER_NOT_FOUND` | 500 |
-| `limit` | `ERR_LIMIT` (`timeoutMs`, `instances.queueMs`, ...), `ERR_ISOLATE_RETIRED` | 503, or 413 for `bodyBytes` |
-| `usage`, `security`, `infrastructure` | `ERR_PROGRAM_CLOSED`, `ERR_TENANT_QUARANTINED`, `ERR_WORKER_CRASHED` | 502 or 503 |
-
-[Handle errors and retries](/guides/errors-and-retries) covers which of
-these to retry. Do not send `err.guest.stack` to end users unless the tenant
+When the call fails, `program.fetch` rejects with an `IsolaneError`; it
+does not resolve to an error `Response`. A handler that returns something
+other than a `Response` fails with `ERR_GUEST_EXCEPTION`.
+[Handle errors and retries](/guides/errors-and-retries#map-errors-to-http-statuses)
+maps each error `kind` to a status and says which errors to retry. Do not send `err.guest.stack` to end users unless the tenant
 is the one making the request.
 
 ## If every request fails

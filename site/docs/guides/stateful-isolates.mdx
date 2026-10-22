@@ -3,9 +3,9 @@ title: Keep state in an isolate
 description: Create a stateful isolate that keeps its globals between evals and calls, and replace it when it is retired.
 ---
 
-This guide creates one [isolate](/concepts/architecture) that keeps its state across many evals and
-calls, which suits a session, a REPL, or a long-lived script that is not an
-ES module. For module code served to many requests, use a
+A stateful [isolate](/concepts/architecture) keeps its state across many
+evals and calls, which suits a session, a REPL, or a long-lived script
+that is not an ES module. For module code served to many requests, use a
 [program](/guides/call-exports) instead: it keeps a pool of instances and
 replaces them for you.
 

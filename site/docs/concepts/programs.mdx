@@ -27,8 +27,8 @@ Setup is the evaluation of the program's modules: everything at their top
 level. It runs once per instance, when the instance is created, and the
 first instance's setup runs before `load` resolves. A syntax error or an
 exception at the top level rejects `load` itself, with the location in
-`err.guest`, so a broken program fails when it is deployed rather than on
-its first request.
+`err.guest`, so a broken program fails when it is deployed, not on its
+first request.
 
 Setup has its own CPU budget, `startupCpuMs` (one second by default, Linux
 only), in place of the per-call `cpuMs`, with `timeoutMs` as its wall
@@ -136,8 +136,8 @@ call that hit the limit fails with it, and the others fail with
 `ERR_ISOLATE_RETIRED`, not `retryable`, because they may have done part
 of their work.
 
-The shared event loop has a consequence that is defined behaviour, not a
-fault. A call that blocks the loop, in a synchronous loop or a long
+The shared event loop has a further consequence, which is defined
+behaviour. A call that blocks the loop, in a synchronous loop or a long
 computation, holds up every other call in the instance, including calls
 whose own work is finished and only need the loop to send their results.
 Those calls reach their own `timeoutMs` while they wait, so one stuck

@@ -3,7 +3,9 @@ title: Expose host functions
 description: Give guest code functions that run in your process, with validated arguments and results, cancellation, and errors that don't leak your internals.
 ---
 
-Guest code reaches your data and services only through the host functions you pass in `host`. This guide defines one with schemas, uses its call context, and keeps its errors safe to show a tenant.
+Guest code reaches your data and services only through the host
+functions you pass in `host`. Define one with schemas, use its call
+context, and keep its errors safe to show a tenant.
 
 ## Pass a function
 
@@ -70,7 +72,7 @@ Host functions keep running after the guest stops waiting unless they watch `ctx
 
 ## Keep errors safe
 
-When a handler throws, the guest's promise rejects with the error's `name`, `message`, and `code`, but not its stack. A database driver's message can contain a connection string, a host path, or part of a query, so catch errors from such libraries inside the handler and throw what the tenant may see:
+When a handler throws, the guest's promise rejects with the error's `message` and string `code`, but not its stack. A `TypeError`, `RangeError`, or `SyntaxError` keeps its class; any other error arrives as an `Error`. A database driver's message can contain a connection string, a host path, or part of a query, so catch errors from such libraries inside the handler and throw what the tenant may see:
 
 ```js
 const getOrders = hostFunction({

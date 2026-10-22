@@ -52,7 +52,7 @@ await program.call('check', [{ id: 'A-1', total: 12 }]); // { id: 'A-1', total: 
 
 Imports resolve over these files only. `zod` resolves to `node_modules/zod` by its `package.json`, with the export conditions `workerd`, `worker`, `browser`, `import`, and `default`, so a package with a Workers build gets that build. A file the program imports but you didn't pass fails the load with `Cannot find module`. [Modules](/reference/modules#resolution) has the full rules.
 
-A program has at most 1,000 files and 32 MiB by default. The example above is 138 files and about 1 MB. Raise [`limits.modules` and `limits.moduleBytes`](/reference/limits) for larger programs, up to 64 MiB, or bundle them.
+A program has at most 1,000 files and 32 MiB by default. The example above is 138 files and about 1 MB. Raise [`limits.modules` and `limits.moduleBytes`](/reference/limits) for larger programs, up to 64 MiB less 64 KiB, or bundle them.
 
 ## Use TypeScript
 

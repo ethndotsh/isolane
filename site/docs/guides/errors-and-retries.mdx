@@ -3,8 +3,8 @@ title: Handle errors and retries
 description: Tell the tenant's failures from your own with err.kind, retry only what err.retryable allows, and show guest errors safely.
 ---
 
-This guide sorts isolane's failures into those caused by the tenant's code,
-by a budget, by your code, and by the host, and retries only the ones where
+isolane's failures come from the tenant's code, from a budget, from your
+code, or from the host. Sort them by `kind`, and retry only the ones where
 running again can succeed.
 
 ## Branch on `kind`, then `code`
@@ -117,10 +117,10 @@ code, in their logs or dashboard, and escape it like any other untrusted
 string. Do not show it to that tenant's own end users, who should get a
 generic message and a request ID.
 
-Errors thrown by your host functions reach the guest with their `name`,
-`message`, and `code`, never their stack. A database driver's message can
-contain a connection string or part of a query, so catch errors inside host
-functions that wrap such libraries and throw a message the tenant may see.
+Errors thrown by your host functions reach the guest without their stack,
+but with their message, which can contain a connection string or part of a
+query. [Expose host functions](/guides/host-functions#keep-errors-safe)
+shows how to replace it with one the tenant may see.
 
 ## Map errors to HTTP statuses
 

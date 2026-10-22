@@ -48,17 +48,17 @@ A development build is one linked against rusty_v8's prebuilt V8, which isn't bu
 | seccomp | `full` |
 | Landlock | `partial` or `full` |
 
-Landlock reports `full` when the kernel supports Landlock ABI 5 (Linux 6.10), and `partial` on older kernels from 5.13, which enforce its filesystem rules but not all of its newer rights; kernels before 6.7 don't enforce its TCP rules. Strict mode accepts `partial` because seccomp already refuses every file open and `socket()` call, so Landlock is the second barrier. Landlock must also be enabled in the kernel's list of security modules.
+Landlock reports `full` when the kernel supports Landlock ABI 5 (Linux 6.10), and `partial` on older kernels from 5.13, which enforce its filesystem rules but not all of its newer rights; kernels before 6.7 don't enforce its TCP rules. The [security model](/concepts/security-model#process-lockdown-linux) gives the reason strict mode accepts `partial`. Landlock must also be enabled in the kernel's list of security modules.
 
 A refused worker fails with `ERR_ISOLATION_UNAVAILABLE`. `runtime.isolationReport()` starts a probe worker and reports what the host provides, whatever `strict` is set to:
 
 ```js
 const report = await runtime.isolationReport();
-// { v8: '15.2.124.1-rusty', sandboxSecure: true,
+// { v8: '15.2.124.45', sandboxSecure: true,
 //   lockdown: { landlock: 'full', seccomp: 'full' }, meetsStrict: true }
 ```
 
-The worker installs its filters without privileges and doesn't use namespaces. Inside a container, its seccomp profile must let the worker add its own filter and make Landlock's system calls; CI runs on GitHub's Linux VMs, and container and Kubernetes profiles are not tested yet, so run `isolationReport()` in the container before relying on it. [Deploying on Linux](/guides/deploy-on-linux) covers kernels and containers.
+The worker installs its filters without privileges and doesn't use namespaces. Inside a container, its seccomp profile must let the worker add its own filter and make Landlock's system calls; CI runs on GitHub's Linux VMs, and container and Kubernetes profiles are not tested yet. [Deploy on Linux](/guides/deploy-on-linux) covers kernels and containers.
 
 ## macOS
 

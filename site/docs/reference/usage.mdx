@@ -10,7 +10,7 @@ description: "The fields of tenant.usage() and program.usage(), their units, and
 | Field | Unit | Source | Description |
 |---|---|---|---|
 | `evals` | count | worker | Evals and calls, including program calls and instance loads. |
-| `failures` | count | worker | Evals and calls that failed, for any reason. |
+| `failures` | count | worker | Evals and calls that failed in the worker, for any reason. A call a hook denied or the pool refused never reaches the worker and is not counted. |
 | `cpuMs` | ms | worker | CPU time on the tenant's isolate threads: evals, calls, and work between them. 0 on macOS. |
 | `workerCpuMs` | ms | kernel | CPU time of the tenant's worker processes, every thread, user and system. Linux only; absent elsewhere. |
 | `hostCalls` | count | worker | Host calls, including those isolane's own `fetch`, `connect`, and `fs` make. |
@@ -30,4 +30,4 @@ The supervisor reads `workerCpuMs` from the kernel, in `/proc/<pid>/stat`, in st
 
 ## Trust
 
-Every figure marked "worker" is reported by the tenant's worker process. The figures are accurate unless guest code has compromised the worker, which could then report anything. They suit metrics, dashboards, and quotas. For billing that must hold against a hostile tenant, use `workerCpuMs`, which the worker cannot understate. [Bill tenants for usage](/guides/usage-and-billing) shows both.
+Every figure marked "worker" is reported by the tenant's worker process. The figures are accurate unless guest code has compromised the worker, which could then report anything. They suit metrics, dashboards, and quotas. For billing that must hold against a hostile tenant, use `workerCpuMs`, which the worker cannot understate. [Meter usage per tenant](/guides/usage-and-billing) shows both.

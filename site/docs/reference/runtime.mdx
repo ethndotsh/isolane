@@ -45,10 +45,10 @@ A `Runtime` is the supervisor in the host process. It starts one worker process 
 
 | Field | Type | Description |
 |---|---|---|
-| `v8` | `string` | The worker's V8 version, such as `15.2.124.1-rusty`. |
+| `v8` | `string` | The worker's V8 version, such as `15.2.124.45`. |
 | `sandboxSecure` | `boolean` | The V8 sandbox is enabled and securely configured. False for development builds. |
 | `lockdown.seccomp` | `LockdownLevel` | `'full'`, `'partial'`, or `'none'`. |
-| `lockdown.landlock` | `LockdownLevel` | `'full'`, `'partial'`, or `'none'`. `'partial'` on kernels older than 6.7. |
+| `lockdown.landlock` | `LockdownLevel` | `'full'`, `'partial'`, or `'none'`. `'full'` needs Landlock ABI 5 (Linux 6.10); `'partial'` on kernels from 5.13. |
 | `meetsStrict` | `boolean` | Strict mode accepts this host: a secure sandbox, full seccomp, and Landlock at `'partial'` or better. |
 
 macOS has no seccomp or Landlock, so `meetsStrict` is always false there. See [Platforms](/reference/platforms).
@@ -153,8 +153,4 @@ In a program, `host` functions are mounted in `env` instead of on the global. Se
 
 `Uint8Array` arguments arrive in the handler as `Buffer`s. A `Buffer` or any typed array in a result arrives in the guest as a `Uint8Array`. Other values cross as JSON.
 
-When a handler throws, the guest's promise rejects with an error of the same class if it is `TypeError`, `RangeError`, or `SyntaxError`, and `Error` otherwise. The error carries the handler error's `message` and its `code` if that is a string, but never its stack. Error messages from host functions are cut to 64 KiB.
-
-:::warning
-A library's error message can contain a connection string, a file path, or part of a query. Catch errors inside handlers that wrap such libraries, and throw a message the tenant may see.
-:::
+When a handler throws, the guest's promise rejects with an error of the same class if it is `TypeError`, `RangeError`, or `SyntaxError`, and `Error` otherwise. The error carries the handler error's `message` and its `code` if that is a string, but never its stack. Error messages from host functions are cut to 64 KiB. The message reaches the guest unchanged, so a library's message that contains a connection string or a file path reaches it too; [Expose host functions](/guides/host-functions#keep-errors-safe) shows how to replace it.

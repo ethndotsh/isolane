@@ -114,7 +114,7 @@ around all tenants together.
 
 ## When to choose something else
 
-isolane is the wrong tool in several cases. If you need many inexpensive
+If you need many inexpensive
 sandboxes inside one process and can accept in-process risk, isolated-vm
 or quickjs-wasi costs less per sandbox. If you need to snapshot and
 restore a running VM, quickjs-wasi can and isolane cannot. If the guest
@@ -125,8 +125,5 @@ code is not JavaScript or WebAssembly, or needs Node.js APIs, a container
 or microVM fits. And if the threat includes kernel bugs, put a VM
 boundary around isolane or use microVMs.
 
-isolane fits when an application needs to run JavaScript from many
-customers who may be hostile, on V8's performance and APIs, with
-per-tenant limits and policies, from Node.js, on ordinary Linux hosts.
-It is not yet cleared for untrusted code in production; see the
+isolane is not yet cleared for untrusted code in production; see the
 [security model](/concepts/security-model).

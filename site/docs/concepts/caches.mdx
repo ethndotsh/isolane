@@ -65,17 +65,17 @@ cache has a fixed budget of 64 MiB.
 Creating a web isolate, mostly deserializing the web platform's startup
 snapshot, takes about 1.5 ms on a development build. The runtime's
 `spareIsolates` option (0 to 8, off by default) has each tenant's worker
-make that many isolates and their contexts ahead of need. A new VM takes a
+make that many isolates and their contexts ahead of need. A new isolate takes a
 spare when a spare could have been made for it: it uses the web platform
 and has no `random.seed`, because V8 draws an isolate's entropy as it
 creates it, before the seed is known.
 
-Spares are kept by shape, and the shape is the VM's `limits.heapBytes`,
+Spares are kept by shape, and the shape is the isolate's `limits.heapBytes`,
 since a heap limit is fixed when an isolate is created. The worker keeps
-up to `spareIsolates` spares for each of the four shapes its web VMs used
-most recently, makes spares of a shape after its first VM of that shape,
+up to `spareIsolates` spares for each of the four shapes its web isolates
+used most recently, makes spares of a shape after its first isolate of that shape,
 and drops the least recently used shape's spares when a fifth shape comes.
-The count is per shape rather than a total shared between shapes because
+The count is per shape, not a total shared between shapes, because
 a shared total, refilled for whichever shape was just used, would take
 the other shapes' spares, and a tenant alternating between two heap
 limits would gain nothing. A worker therefore holds at most
@@ -105,8 +105,8 @@ budgets together with that limit, and one with tight workers can lower
 them. A budget of 0 keeps nothing of that kind: with `fileBytes: 0` every
 load sends the files, with `codeBytes: 0` no code caches are made, and
 with `wasmBytes: 0` each isolate compiles its WebAssembly again unless
-another isolate still holds the module. The budgets are runtime-wide
-rather than per tenant, because a worker receives its code and WebAssembly
+another isolate still holds the module. The budgets are runtime-wide,
+not per tenant, because a worker receives its code and WebAssembly
 budgets when it starts, before any tenant configuration is resolved;
 `workerMemoryBytes` is the per-tenant control.
 

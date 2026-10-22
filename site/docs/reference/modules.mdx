@@ -158,9 +158,4 @@ A program that sets `Error.prepareStackTrace` receives V8's call sites with thei
 
 ## Limits
 
-| Limit | Default | Maximum | Counts |
-|---|---|---|---|
-| [`modules`](/reference/limits) | 1,000 | | Files in a program |
-| [`moduleBytes`](/reference/limits) | 32 MiB | 64 MiB − 64 KiB | The files' contents and paths together |
-
-A program past either limit fails to load with `ERR_LIMIT`. Parsing, resolving, and transforming happen in the worker, on the instance's thread, so they count against `startupCpuMs` during setup and against a call's `cpuMs` for a later `import()`. The worker keeps transformed modules by content hash, so a program's later instances don't transform its files again; [caches](/concepts/caches) describes what else a worker keeps.
+A program has at most [`limits.modules`](/reference/limits#isolate-limits) files (1,000 by default) and [`limits.moduleBytes`](/reference/limits#isolate-limits) of contents and paths together (32 MiB by default, at most 64 MiB − 64 KiB). A program past either limit fails to load with `ERR_LIMIT`. Parsing, resolving, and transforming happen in the worker, on the instance's thread, so they count against `startupCpuMs` during setup and against a call's `cpuMs` for a later `import()`. The worker keeps transformed modules by content hash, so a program's later instances don't transform its files again; [caches](/concepts/caches) describes what else a worker keeps.

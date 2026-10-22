@@ -53,7 +53,8 @@ Linux (see [usage](/reference/usage)).
 Each tenant has its own worker by default. The worker holds one V8 isolate
 for each stateful isolate (`tenant.isolate()`), each program instance, and
 each one-shot `run`, and runs each isolate on its own thread with its own
-watchdog thread. Isolates are never reused for another VM.
+watchdog thread. A V8 isolate is never reused once the isolate, instance,
+or `run` it was made for has ended.
 
 The tenant, not the isolate, is the security boundary. A tenant's isolates
 share one process, so guest code that compromised the worker could reach
@@ -62,14 +63,10 @@ them. Two pieces of code that must not see each other's data belong to
 two tenants. The [security model](/concepts/security-model) explains what
 each layer is expected to stop.
 
-A worker locks itself down before it reads any guest code. It starts with
-an empty environment and only its three standard descriptors, closes
-anything else it inherited, applies Landlock while it still has one
-thread, initializes V8, and then installs a seccomp filter on every
-thread. From then on it cannot open a file, create a socket, or start a
-process. That ordering matters: Landlock restricts only the calling thread
-and the threads it later creates, so it has to be in place before V8
-starts its own threads.
+A worker locks itself down with Landlock and seccomp before it reads any
+guest code, and from then on it cannot open a file, create a socket, or
+start a process. The [security model](/concepts/security-model#process-lockdown-linux)
+gives the steps and their order.
 
 Workers can be started ahead of need. The runtime's `spares` option keeps
 that many workers started, locked down, and ready, so a tenant without a
@@ -83,7 +80,7 @@ output. Each message is a frame: a 32-bit little-endian length, then the
 body. A body is UTF-8 JSON, or JSON followed by raw bytes, marked by a
 leading zero byte and the JSON's length, so that byte arrays in host-call
 arguments, results, and broker traffic cross without base64. Both sides
-refuse a frame larger than 64 MiB rather than allocate for it.
+refuse a frame larger than 64 MiB without allocating for it.
 
 JSON was chosen over V8's own serializer on purpose. The supervisor would
 otherwise parse a possibly compromised worker's output with a deserializer

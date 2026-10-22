@@ -3,10 +3,10 @@ title: Deploy on Linux
 description: Run isolane in strict mode on a Linux host or container, check the host's isolation before serving, and size memory for its workers.
 ---
 
-This guide prepares a Linux host, VM, or container for isolane in strict
-mode, the only configuration meant for untrusted code (see the
-[security model](/concepts/security-model)), and checks it before
-your service accepts traffic.
+Prepare a Linux host, VM, or container for isolane in strict mode, the
+only configuration meant for untrusted code (see the
+[security model](/concepts/security-model)), and check it before your
+service accepts traffic.
 
 ## Check the host at startup
 
@@ -46,6 +46,8 @@ strict mode, so it is safe to call before anything else.
 for the platform npm runs on: `@isolane/worker-linux-x64-gnu` or
 `@isolane/worker-linux-arm64-gnu`. Linux workers need glibc; there is no
 musl build, so Alpine images are not supported.
+[Platforms](/reference/platforms) lists every platform and what each one
+enforces.
 
 Run `npm install` (or `npm ci`) inside the image or on the target machine,
 not on a Mac whose `node_modules` you then copy, since that installs the
@@ -70,10 +72,8 @@ snapshot is embedded.
 
 Landlock must also be enabled at boot. `cat /sys/kernel/security/lsm`
 lists the active security modules; if `landlock` is absent, add it to the
-`lsm=` kernel parameter. Strict mode accepts `partial` because seccomp
-already refuses every file open and `socket()` call, so Landlock is a
-second layer, and requiring its newest ABI would refuse most long-term
-support kernels.
+`lsm=` kernel parameter. The [security model](/concepts/security-model#process-lockdown-linux)
+explains why strict mode accepts `partial`.
 
 The worker needs no privileges, capabilities, or user namespaces. It sets
 `PR_SET_NO_NEW_PRIVS` and installs its own seccomp filter and Landlock
@@ -119,15 +119,6 @@ Do not set `ulimit -v` (`RLIMIT_AS`) on the process. The V8 sandbox
 reserves a large range of virtual address space for each worker, which
 uses no memory until it is touched, and an address-space limit makes
 workers fail to start.
-
-## Platforms
-
-| Platform | Status |
-|---|---|
-| Linux x64, glibc | Supported; CI runs every test and conformance gate in strict mode |
-| Linux arm64, glibc | Supported; built against glibc 2.31 and tested on native arm64 runners |
-| macOS | Development only: no seccomp, Landlock, or memory cap, so strict mode refuses it |
-| Linux musl, Windows | Not supported |
 
 ## If the report shows `sandboxSecure: false`
 

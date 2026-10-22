@@ -169,14 +169,12 @@ const port = Number(process.env.PORT ?? 3000);
 server.listen(port, () => console.log(`listening on http://localhost:${port}`));
 ```
 
-The parts that matter:
-
 `tenant.load({ main, files })` loads the app. It resolves once the app's
 first instance has evaluated its modules, so an app that does not compile,
 or throws at the top level, fails here and not on its first request.
 
 `host: { kv: ... }` gives the app its store. In a program, host functions
-appear in the handler's `env` argument rather than as globals. The store
+appear in the handler's `env` argument, not as globals. The store
 lives in the platform's process, so it outlives every instance and every
 version of the app. It is a demonstration: with several requests in flight,
 two can read the same count before either writes it back.
@@ -306,8 +304,6 @@ was served by it. The visit count survived because it lives in the
 platform, not in the instance.
 
 ## Next steps
-
-Where to go from here:
 
 - [Load a program](/guides/load-programs) covers npm packages, bundles,
   JSX, and the TypeScript options.

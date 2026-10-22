@@ -10,9 +10,7 @@ state in an isolate between evaluations. It takes about 15 minutes once the
 build has finished.
 
 You need Node.js 22 or later, a Rust toolchain from
-[rustup](https://rustup.rs), Git, and Linux x64 or macOS. The examples use
-`using`, which needs Node.js 24; on Node.js 22, call `close()` instead, as
-shown.
+[rustup](https://rustup.rs), Git, and Linux x64 or macOS.
 
 ## Build isolane
 
@@ -235,8 +233,7 @@ apple, pear
 ```
 
 `call` compiles nothing, so it is the cheap way to invoke code that an
-earlier `eval` loaded. With Node.js 24, `using vm = ...` closes the isolate
-when the block ends.
+earlier `eval` loaded. `vm.close()` frees the isolate in the worker.
 
 ## See what a limit does to state
 

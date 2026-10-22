@@ -3,8 +3,8 @@ title: Log and monitor tenants
 description: Forward guest logs, record limits and policy denials, alert on security events, and refuse operations with hooks.
 ---
 
-This guide connects isolane's hooks to your logging, metrics, and alerting,
-and uses interceptors to refuse operations a tenant's quota does not cover.
+Connect isolane's hooks to your logging, metrics, and alerting, and use
+interceptors to refuse operations a tenant's quota does not cover.
 
 ## Forward guest output
 
@@ -43,14 +43,9 @@ const runtime = new Runtime({
 });
 ```
 
-| Hook | Fires when |
-|---|---|
-| `onLimit` | Any limit is reached, including those that only cut output or fail one guest operation |
-| `onGuestError` | A timer or task threw, or a promise was rejected with no handler; neither fails an eval |
-| `onPolicyDenial` | A `fetch`, `connect`, or `fs` request was refused by its policy |
-| `onProgramLoad` | A program instance finished loading, or failed to |
-| `onWorker` | A tenant's worker started, began recycling, or exited |
-| `onSecurityEvent` | A worker crashed, broke the protocol, or stopped responding |
+`onLimit` fires for every limit, including those that only cut output or
+fail one guest operation. `onGuestError` reports errors that do not fail an
+eval. [Hooks](/reference/hooks#events) lists every event and its payload.
 
 `onPolicyDenial` reports refused targets, such as a host not on the list,
 a private address, or a path outside the root. Running out of a policy's
@@ -73,8 +68,8 @@ A crash can be an exploit attempt that failed, such as a V8 sandbox
 violation or a seccomp kill, so treat each one as worth a look. The tenant
 is quarantined until `quarantinedUntil`, and `detail` has the signal or exit
 code and the end of the worker's stderr. `onSecurityEvent` and `onWorker`
-can be set on the runtime, in `defaults`, and in `tenants(name)`, but not
-per call.
+fire only when set on the runtime, in `defaults`, or in `tenants(name)`;
+set per call, they never fire.
 
 ## Measure every call
 
@@ -111,18 +106,15 @@ const runtime = new Runtime({
 });
 ```
 
-| Interceptor | A `deny()` means |
-|---|---|
-| `beforeHostCall` | The guest's call rejects with an `Error` whose `code` is `ERR_DENIED`; the eval continues |
-| `beforeEval` | The eval rejects with `ERR_DENIED` and `err.reason` |
-| `beforeCall` | The call rejects with `ERR_DENIED` and `err.reason` |
+A denied `beforeHostCall` rejects only the guest's call, with an `Error`
+whose `code` is `ERR_DENIED`, and the eval continues. A denied `beforeEval`
+or `beforeCall` fails the eval or call with `ERR_DENIED`, and `err.reason`
+holds the reason. The guest sees the reason in the error's message, so
+write it for the tenant to read. Interceptors may be async; the operation
+waits for them.
 
-The guest sees the reason in the error's message, so write it for the
-tenant to read. Interceptors may be async; the operation waits for them.
-
-Hooks at every level run: the runtime's, `defaults`', the tenant's, and the
-call's. `before*` hooks run from the outermost level in, and `after*` hooks
-from the innermost level out.
+Hooks at every level run, in the order given in
+[Hooks](/reference/hooks#order).
 
 ## If a hook seems not to fire
 

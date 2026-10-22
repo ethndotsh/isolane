@@ -62,7 +62,7 @@ Evaluating the main module and its imports is the instance's setup. It runs once
 | No I/O | `fetch`, `connect()`, `fs`, and host functions throw an error with `code: 'ERR_SETUP_IO'`. If setup then fails, `load` rejects with `ERR_SETUP_IO`, kind `guest`. |
 | Clock | Advances when setup starts. |
 
-Timers work during setup. A client that connects on its first query, rather than at construction, works, and keeps its connection between calls. [Programs](/concepts/programs) explains the reasons for these rules.
+Timers work during setup. A client that connects on its first query, not at construction, works, and keeps its connection between calls. [Programs](/concepts/programs) explains the reasons for these rules.
 
 ## Program
 
@@ -109,7 +109,7 @@ Calls the program's handler as Cloudflare Workers does: `fetch(request, env, ctx
 
 Both the request body and the response body are buffered whole, at most `limits.bodyBytes` each (default 16 MiB). A larger body fails the call with `ERR_LIMIT`, `err.limit` `'bodyBytes'`, and leaves the instance in service. The request's `signal` stops the call as an eval's signal does. A handler that throws, or returns anything but a `Response`, fails with `ERR_GUEST_EXCEPTION`.
 
-`fetch` needs the web platform. With `web: false` it throws `ERR_INVALID_CONFIG`.
+`fetch` needs the web platform. With `web: false` it rejects with `ERR_INVALID_CONFIG`.
 
 The call hooks see a fetch as a call named `fetch` whose one argument is the `Request` and whose result is the `Response`. A `beforeCall` hook may replace the request with another `Request`, and an `afterCall` hook may replace the response with another `Response`.
 
@@ -131,7 +131,7 @@ With `instances.concurrency` above 1, an instance runs several calls at once on 
 | A call stopped part-way | Stops every call in the instance and retires it. The calls that hit the limit fail with it. The others fail with `ERR_ISOLATE_RETIRED`, with `retryable` false, because they may have done part of their work. |
 | A call that blocks the event loop | Holds up every call in the instance, including calls whose work is done. Those reach their own `timeoutMs`, so one stuck call can fail every call in its instance with `timeoutMs`, and the ones not yet at their deadline with `ERR_ISOLATE_RETIRED`. |
 
-The last row is defined behaviour. Use `concurrency: 1` for handlers that may compute for long.
+The last row is defined behaviour. With `concurrency: 1`, a call's timeout fails only that call; [Programs](/concepts/programs#concurrency) explains the trade-off.
 
 ### usage
 

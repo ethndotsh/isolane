@@ -93,14 +93,14 @@ These options exist only on `new Runtime(options)`. An unknown option throws `ER
 | Option | Type | Default | Description |
 |---|---|---|---|
 | `workerPath` | `string` | see below | Path to the `isolane-worker` binary. A relative path is resolved against the current directory. |
-| `strict` | `boolean` | `true` | Refuse to run guest code unless the worker reports a secure V8 sandbox, full seccomp, and Landlock. A refused host fails with `ERR_ISOLATION_UNAVAILABLE`. |
+| `strict` | `boolean` | `true` | Refuse to run guest code unless the worker reports a secure V8 sandbox, full seccomp, and Landlock at `'partial'` or better. A refused host fails with `ERR_ISOLATION_UNAVAILABLE`. |
 | `defaults` | `IsolateConfig` | `{}` | The configuration every isolate starts from. |
 | `tenants` | `(name) => IsolateConfig \| undefined` | none | Each tenant's configuration, over `defaults`. |
 | `hooks` | `Hooks` | none | Hooks for every tenant and isolate, outside `defaults`. |
 | `limits` | `{ tenants }` | `{ tenants: 1000 }` | Runtime-wide limits. See [Limits](/reference/limits#runtime-limits). |
 | `quarantineMs` | integer or `null` | 60,000 | After a security event, refuse the tenant for this long. New isolates throw `ERR_TENANT_QUARANTINED`. `null` turns quarantine off. |
 | `spares` | integer, at least 0 | 0 | Worker processes kept started and ready, so a tenant without a worker does not wait for V8 to start. Each spare is a process of about 15 MB when idle. |
-| `spareIsolates` | 0 to 8 | 0 | Web isolates each worker makes ahead of their VMs, for each of up to four heap shapes. See [spareIsolates](#spareisolates). |
+| `spareIsolates` | 0 to 8 | 0 | Web isolates each worker makes before they are needed, for each of up to four heap shapes. See [spareIsolates](#spareisolates). |
 | `caches` | object | see below | What each tenant's worker keeps for programs' later instances. See [caches](#caches). |
 
 Spare workers start with the `workerMemoryBytes` of `defaults`, and a tenant gets a spare only if its own `workerMemoryBytes` is the same. After three spares in a row exit before they are used, the runtime stops starting them.
@@ -111,7 +111,7 @@ Without `workerPath`, the runtime uses `$ISOLANE_WORKER`, then the binary in the
 
 ### spareIsolates
 
-A spare isolate is a web isolate and its context, made from the web platform's snapshot before a VM asks for it. A VM takes a spare when it uses the web platform and has no `random.seed`, and the spare's shape, its `limits.heapBytes`, matches. The worker keeps up to `spareIsolates` spares for each of the four heap limits its web VMs used most recently, and drops the spares of the least recently used shape when a fifth appears. A worker therefore holds at most `spareIsolates` × 4 spares, each about 3 MB of memory while idle on a development build.
+A spare isolate is a web isolate and its context, made from the web platform's snapshot before an isolate is asked for. A new isolate takes a spare when it uses the web platform and has no `random.seed`, and the spare's shape, its `limits.heapBytes`, matches. The worker keeps up to `spareIsolates` spares for each of the four heap limits its web isolates used most recently, and drops the spares of the least recently used shape when a fifth appears. A worker therefore holds at most `spareIsolates` × 4 spares, each about 3 MB of memory while idle on a development build.
 
 ### caches
 
