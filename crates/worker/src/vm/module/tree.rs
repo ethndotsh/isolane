@@ -10,8 +10,13 @@ use std::io;
 use std::path::{Component, Path, PathBuf};
 use std::sync::{Arc, OnceLock};
 
-use oxc_resolver::{FileMetadata, FileSystem, ResolveError, ResolveOptions, ResolverGeneric};
+use oxc_resolver::{
+    FileMetadata, FileSystem, ResolveError, ResolveOptions, ResolverGeneric, TsconfigDiscovery,
+    TsconfigOptions, TsconfigReferences,
+};
 use sha2::Digest;
+
+use crate::proto::Tsconfig;
 
 /// A file's contents.
 pub(crate) enum Source {
@@ -92,6 +97,49 @@ impl Tree {
     pub(crate) fn contains(&self, path: &str) -> bool {
         self.files.contains_key(path)
     }
+
+    /// Whether `path` is a directory of the tree (`""` is its root).
+    pub(crate) fn is_dir(&self, path: &str) -> bool {
+        self.dirs.contains(path)
+    }
+
+    /// The names of directory `dir`'s files and directories, sorted. None
+    /// if it isn't a directory.
+    pub(crate) fn list(&self, dir: &str) -> Option<Vec<String>> {
+        if !self.is_dir(dir) {
+            return None;
+        }
+        let prefix = if dir.is_empty() {
+            String::new()
+        } else {
+            format!("{dir}/")
+        };
+        let child = |path: &String| {
+            let rest = path.strip_prefix(&prefix)?;
+            (!rest.is_empty() && !rest.contains('/')).then(|| rest.to_string())
+        };
+        let mut names: Vec<String> = self.files.keys().filter_map(child).collect();
+        names.extend(self.dirs.iter().filter_map(child));
+        names.sort_unstable();
+        Some(names)
+    }
+}
+
+/// `path` (`/src/a.json`, `src/a.json`, `./src/../a.json`) as a tree path:
+/// relative to the root, `.` and `..` resolved (as at a file system's
+/// root, `..` above it stays there).
+pub(crate) fn normalize(path: &str) -> String {
+    let mut parts: Vec<&str> = Vec::new();
+    for segment in path.split('/') {
+        match segment {
+            "" | "." => {}
+            ".." => {
+                parts.pop();
+            }
+            part => parts.push(part),
+        }
+    }
+    parts.join("/")
 }
 
 /// `a/b.js`: no leading `/`, no empty, `.`, or `..` segments, no `\`.
@@ -197,7 +245,15 @@ pub(crate) struct Resolver(ResolverGeneric<TreeFs>);
 const CONDITIONS: [&str; 5] = ["workerd", "worker", "browser", "import", "default"];
 
 impl Resolver {
-    pub(crate) fn new(tree: Arc<Tree>) -> Self {
+    pub(crate) fn new(tree: Arc<Tree>, tsconfig: &Tsconfig) -> Self {
+        let tsconfig = match tsconfig {
+            Tsconfig::Auto => Some(TsconfigDiscovery::Auto),
+            Tsconfig::File(path) => Some(TsconfigDiscovery::Manual(TsconfigOptions {
+                config_file: PathBuf::from(format!("/{path}")),
+                references: TsconfigReferences::Auto,
+            })),
+            Tsconfig::Off => None,
+        };
         let strings = |list: &[&str]| list.iter().map(|s| s.to_string()).collect::<Vec<_>>();
         let options = ResolveOptions {
             cwd: Some(PathBuf::from("/")),
@@ -213,23 +269,34 @@ impl Resolver {
             symlinks: false,
             node_path: false,
             builtin_modules: false,
+            tsconfig,
             ..ResolveOptions::default()
         };
         Self(ResolverGeneric::new_with_file_system(TreeFs(tree), options))
     }
 
     /// The file `specifier` names, imported from the file `from` (or from
-    /// the tree's root, for `None`).
+    /// the tree's root, for `None`), with the tsconfig.json that applies to
+    /// `from`.
     pub(crate) fn resolve(&self, from: Option<&str>, specifier: &str) -> Result<String, String> {
-        let dir = match from.and_then(|path| path.rfind('/').map(|i| &path[..i])) {
-            Some(dir) => format!("/{dir}"),
-            None => "/".to_string(),
+        let found = match from {
+            Some(path) => self.0.resolve_file(format!("/{path}"), specifier),
+            None => self.0.resolve("/", specifier),
         };
-        match self.0.resolve(&dir, specifier) {
+        match found {
             Ok(found) => tree_path(found.path())
                 .ok_or_else(|| format!("{specifier:?} resolved outside the program")),
             Err(ResolveError::Ignored(_)) => Err(format!(
                 "{specifier:?} is disabled by its package's \"browser\" field"
+            )),
+            Err(why @ ResolveError::Json(_)) => Err(format!("Cannot resolve {specifier:?}: {why}")),
+            Err(
+                why @ (ResolveError::TsconfigNotFound(_)
+                | ResolveError::TsconfigSelfReference(_)
+                | ResolveError::TsconfigCircularExtend(_)
+                | ResolveError::TsconfigLoadFailed { .. }),
+            ) => Err(format!(
+                "Cannot resolve {specifier:?} with tsconfig.json: {why}"
             )),
             Err(_) => Err(format!("Cannot find module {specifier:?}")),
         }

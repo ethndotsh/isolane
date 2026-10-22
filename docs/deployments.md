@@ -740,8 +740,8 @@ caches, already on the worker.
    tests (run as programs with their fixtures). Host modules may use any
    specifier, not only `isolane:` ones, so a program can be given
    `node:events` or a package by name. The source maps apply to what the
-   worker reports (`err.guest`, logged errors, syntax-error locations); the
-   guest's own `error.stack` keeps V8's positions. Phases 2 and 5 left
+   worker reports (`err.guest`, logged errors, syntax-error locations),
+   and later to the guest's own `error.stack` as V8 makes it. Phases 2 and 5 left
    phase 4 a seam: `module::compile` is where a code cache is consumed and
    made.
 6. Later: streaming bodies both ways, `ctx.props`, deploy-time

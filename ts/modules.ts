@@ -1,7 +1,7 @@
 // A program's source and the options that shape its modules: which files
 // it has, what TypeScript and JSX become, compile-time constants, and the
 // specifiers it resolves differently (aliases, overrides, and host
-// modules). Checked here; resolving and transforming happen in the worker.
+// modules), and the tsconfig.json it resolves with. Checked here; resolving and transforming happen in the worker.
 
 import { invalidConfig } from './errors.js';
 import { flattenHost, type HostEntry, type HostTree } from './host.js';
@@ -59,6 +59,14 @@ export interface ModuleLoadOptions {
    * JSON (`'"production"'`) or an identifier or member expression.
    */
   define?: Record<string, string>;
+  /**
+   * The tsconfig.json whose `compilerOptions.paths` and `baseUrl` imports
+   * resolve with: by default, the nearest one above each importing file,
+   * as TypeScript finds it (none applies to files in `node_modules`); a
+   * path names one of the program's files for every import; `false`
+   * ignores tsconfig files.
+   */
+  tsconfig?: string | false;
 }
 
 /** What `load` sends for the program, and the host modules' functions. */
@@ -120,7 +128,7 @@ export function resolveModules(source: unknown, filename: string | undefined, op
     for (const [specifier, target] of Object.entries(options.modules)) {
       const where = `modules[${JSON.stringify(specifier)}]`;
       if (specifier === '' || specifier.length > PATH_MAX) throw invalidConfig(where, `must name a specifier of 1 to ${PATH_MAX} characters`);
-      if (specifier === 'isolane:env' || specifier.startsWith('isolane:runtime/')) throw invalidConfig(where, "is isolane's own module");
+      if (specifier === 'isolane:env' || specifier === 'isolane:files' || specifier.startsWith('isolane:runtime/')) throw invalidConfig(where, "is isolane's own module");
       if (/^\.{0,2}\//.test(specifier)) throw invalidConfig(where, 'must be a bare specifier or a scheme (pg, node:fs, isolane:kv), not a path');
       if (typeof target === 'string') {
         if (/^\.{0,2}\//.test(target)) {
@@ -172,6 +180,15 @@ export function resolveModules(source: unknown, filename: string | undefined, op
       }
       return [key, value];
     });
+  }
+  if (options.tsconfig !== undefined) {
+    if (options.tsconfig === false) {
+      wire.tsconfig = 'off';
+    } else {
+      const path = programPath(options.tsconfig, 'tsconfig');
+      if (!(path in files)) throw invalidConfig('tsconfig', `names ${JSON.stringify(path)}, which isn't one of the program's files`);
+      wire.tsconfig = { file: path };
+    }
   }
   return { main, files: Object.freeze(files), options: wire, hostModules };
 }

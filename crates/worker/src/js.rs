@@ -92,6 +92,18 @@ pub enum Class<'a> {
 /// Throw `class` with `message` (clipped), and these string properties set
 /// on it (like `code`).
 pub fn throw_with(scope: &mut v8::PinScope, class: Class, message: &str, props: &[(&str, &str)]) {
+    let error = error_with(scope, class, message, props);
+    scope.throw_exception(error);
+}
+
+/// An exception of `class` with `message` (clipped), and these string
+/// properties set on it, to throw or reject a promise with.
+pub fn error_with<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    class: Class,
+    message: &str,
+    props: &[(&str, &str)],
+) -> v8::Local<'s, v8::Value> {
     let msg = v8::String::new(scope, prefix(message, MESSAGE_MAX))
         .unwrap_or_else(|| v8::String::empty(scope));
     let error = match class {
@@ -118,7 +130,7 @@ pub fn throw_with(scope: &mut v8::PinScope, class: Class, message: &str, props: 
             }
         }
     }
-    scope.throw_exception(error);
+    error
 }
 
 pub fn throw(scope: &mut v8::PinScope, class: Class, message: &str) {

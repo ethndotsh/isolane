@@ -412,8 +412,8 @@ export class Runtime {
   /** @internal Load a program for `tenant`: its first instance is evaluated before this resolves. */
   async [LOAD_PROGRAM](tenant: string, source: string | ProgramSource, options: LoadOptions): Promise<Program> {
     if (options === null || typeof options !== 'object') throw invalidConfig('', 'load() options must be an object');
-    const { filename, env, instances, modules, ts, jsx, define, ...config } = options;
-    const program = resolveModules(source, checkFilename(filename), { modules, ts, jsx, define });
+    const { filename, env, instances, modules, ts, jsx, define, tsconfig, ...config } = options;
+    const program = resolveModules(source, checkFilename(filename), { modules, ts, jsx, define, tsconfig });
     const pool = resolveInstances(instances);
     const spec: ProgramSpec = { id: this.#nextProgram++, env: checkEnv(env), hostModules: program.hostModules, concurrency: pool.concurrency };
     validateConfig(config, '', 'call');

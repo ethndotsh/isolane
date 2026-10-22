@@ -1,7 +1,8 @@
 //! Source maps for a program's modules: from a transform (TypeScript, JSX,
 //! `define`), and a bundle's own (`//# sourceMappingURL=`, or a `.map`
-//! file beside it). Stacks the worker reports have their frames mapped
-//! back to the original files; the guest's own `error.stack` keeps V8's.
+//! file beside it). Stacks have their frames mapped back to the original
+//! files when V8 makes them, so the guest's own `error.stack` and the
+//! stacks the worker reports agree.
 
 use std::sync::Arc;
 

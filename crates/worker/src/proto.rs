@@ -7,7 +7,7 @@ use serde_json::value::RawValue;
 
 /// The protocol version. The worker reports it in `ready`; a supervisor
 /// that speaks another version refuses the worker.
-pub const PROTOCOL_VERSION: u32 = 10;
+pub const PROTOCOL_VERSION: u32 = 11;
 
 /// Supervisor → worker.
 #[derive(Deserialize)]
@@ -165,6 +165,23 @@ pub struct ModuleOptions {
     /// Specifiers resolved to something other than what they name.
     #[serde(default)]
     pub aliases: std::collections::BTreeMap<String, Alias>,
+    /// Which tsconfig.json's `paths` and `baseUrl` imports resolve with.
+    #[serde(default)]
+    pub tsconfig: Tsconfig,
+}
+
+/// Which tsconfig.json a program's imports resolve with.
+#[derive(Deserialize, Serialize, Default, Clone, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum Tsconfig {
+    /// The nearest one above the importing file, as TypeScript finds it
+    /// (none for files in `node_modules`).
+    #[default]
+    Auto,
+    /// This file of the program, for every import.
+    File(String),
+    /// None.
+    Off,
 }
 
 #[derive(Deserialize, Serialize, Default, Clone, Copy, PartialEq, Eq)]

@@ -1,7 +1,8 @@
 //! A program's ES modules: the file tree a `load` sends, resolved,
 //! transformed, compiled, instantiated, and evaluated in the VM's context;
-//! the built-in modules (`isolane:env`, `cloudflare:sockets`, host modules,
-//! the transform's helpers); `import()` and `import.meta`; the handlers
+//! the built-in modules (`isolane:env`, `isolane:files`,
+//! `cloudflare:sockets`, host modules, the transform's helpers); `import()`
+//! and `import.meta`; guests' own stacks, mapped; the handlers
 //! calls find among the program's exports; and its fetch handler, called
 //! through runtime/serve.js for `program.fetch`.
 //!
@@ -10,10 +11,12 @@
 //!
 //! - `tree`: the files, and `oxc_resolver` over them
 //! - `transform`: TypeScript, JSX, and `define`, with oxc
-//! - `source_map`: maps back to the original files, for reported stacks
+//! - `source_map`: maps back to the original files, for stacks
 //! - `code_cache`: V8 code caches of the compiled modules, per worker
+//! - `files`: `isolane:files`, the program's files read as `node:fs` reads
 
 pub(crate) mod code_cache;
+mod files;
 mod source_map;
 mod transform;
 mod tree;
@@ -113,6 +116,7 @@ pub(super) fn install(isolate: &mut v8::Isolate) {
     isolate.set_slot(Rc::new(Program::default()));
     isolate.set_host_import_module_dynamically_callback(dynamic_import);
     isolate.set_host_initialize_import_meta_object_callback(import_meta);
+    isolate.set_prepare_stack_trace_callback(prepare_stack_trace);
 }
 
 /// The program's `env` (what `isolane:env` exports).
@@ -243,7 +247,7 @@ pub(super) fn load<'s>(
     }
     let transforms = Transforms::new(options).map_err(internal)?;
     *program.files.borrow_mut() = Some(Rc::new(Files {
-        resolver: Resolver::new(Arc::clone(&tree)),
+        resolver: Resolver::new(Arc::clone(&tree), &options.tsconfig),
         tree,
         transforms,
         aliases: options.aliases.clone(),
@@ -391,6 +395,100 @@ fn attribute(scope: &mut v8::PinScope, attributes: v8::Local<v8::FixedArray>, at
         .unwrap_or_default()
 }
 
+/// What a specifier names.
+enum Target {
+    /// A file of the program, by its path.
+    File(String),
+    Env,
+    Files,
+    Sockets,
+    /// A host module, by its specifier.
+    Host(String),
+    /// One of the transform's helpers, by its name, with its code.
+    Helper(String, &'static str),
+}
+
+impl Target {
+    /// Its URL, as `import.meta.resolve` gives it: a file's `file:` URL,
+    /// or a built-in module's specifier.
+    fn url(&self) -> String {
+        match self {
+            Target::File(path) => file_url(path),
+            Target::Env => ENV_SPECIFIER.into(),
+            Target::Files => files::SPECIFIER.into(),
+            Target::Sockets => SOCKETS_SPECIFIER.into(),
+            Target::Host(specifier) => specifier.clone(),
+            Target::Helper(name, _) => format!("{}{name}", transform::HELPERS),
+        }
+    }
+}
+
+/// The `file:` URL of the program's file `path` (`src/a.js` is
+/// `file:///src/a.js`).
+fn file_url(path: &str) -> String {
+    url::Url::from_file_path(format!("/{path}"))
+        .map(String::from)
+        .unwrap_or_else(|()| format!("file:///{path}"))
+}
+
+/// What `specifier` names, imported from the file `from` (None: the
+/// program's root): an alias's target, a built-in module, a file by its
+/// `file:` URL, or what the resolver finds.
+fn locate(files: &Files, specifier: &str, from: Option<&str>) -> Result<Target, Miss> {
+    let mut specifier = specifier;
+    match files.aliases.get(specifier) {
+        Some(Alias::File(path)) => return Ok(Target::File(path.clone())),
+        Some(Alias::Specifier(other)) => specifier = other,
+        Some(Alias::Host) => return Ok(Target::Host(specifier.to_string())),
+        None => {}
+    }
+    let importer = from.unwrap_or("the program");
+    if let Some(name) = specifier.strip_prefix(transform::HELPERS) {
+        if let Some(code) = helper_code(name) {
+            return Ok(Target::Helper(name.to_string(), code));
+        }
+    }
+    match specifier {
+        ENV_SPECIFIER => return Ok(Target::Env),
+        files::SPECIFIER => return Ok(Target::Files),
+        SOCKETS_SPECIFIER => return Ok(Target::Sockets),
+        _ => {}
+    }
+    if specifier.starts_with("file:") {
+        let path = url::Url::parse(specifier)
+            .ok()
+            .and_then(|url| url.to_file_path().ok())
+            .and_then(|path| tree::tree_path(&path))
+            .filter(|path| files.tree.contains(path));
+        return path.map(Target::File).ok_or_else(|| {
+            Miss::Message(format!(
+                "Cannot find module {specifier:?} imported from {importer}"
+            ))
+        });
+    }
+    if let Some((scheme, _)) = specifier.split_once(':') {
+        let is_scheme = !scheme.is_empty()
+            && scheme
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || "+-.".contains(c));
+        if is_scheme {
+            let hint = if scheme == "node" {
+                "isolane has no Node.js built-in modules; give the program one with the modules option ({ 'node:x': './x.js' }), or read its files with isolane:files"
+            } else {
+                "only the program's files, isolane:env, isolane:files, cloudflare:sockets, and the modules option's specifiers can be imported"
+            };
+            return Err(Miss::Message(format!(
+                "Cannot import {specifier:?} from {importer}: {hint}"
+            )));
+        }
+    }
+    files
+        .resolver
+        .resolve(from, specifier)
+        .map(Target::File)
+        .map_err(|why| Miss::Message(format!("{why} imported from {importer}")))
+}
+
 /// The module `specifier` names, imported from the file `from` (None: the
 /// program's root), made as `kind` (or by its extension).
 fn find<'s>(
@@ -402,45 +500,14 @@ fn find<'s>(
     let Some(files) = program(scope).files.borrow().clone() else {
         return Err(Miss::Message("Cannot import outside a program".into()));
     };
-    let mut specifier = specifier;
-    match files.aliases.get(specifier) {
-        Some(Alias::File(path)) => return file_module(scope, path, kind_of(path, kind)),
-        Some(Alias::Specifier(other)) => specifier = other,
-        Some(Alias::Host) => return Ok(host_module(scope, specifier)),
-        None => {}
+    match locate(&files, specifier, from)? {
+        Target::File(path) => file_module(scope, &path, kind_of(&path, kind)),
+        Target::Env => Ok(env_module(scope)),
+        Target::Files => Ok(files_module(scope)),
+        Target::Sockets => Ok(sockets_module(scope)),
+        Target::Host(specifier) => Ok(host_module(scope, &specifier)),
+        Target::Helper(name, code) => helper_module(scope, &name, code),
     }
-    let importer = from.unwrap_or("the program");
-    if let Some(name) = specifier.strip_prefix(transform::HELPERS) {
-        if let Some(module) = helper_module(scope, name)? {
-            return Ok(module);
-        }
-    }
-    match specifier {
-        ENV_SPECIFIER => return Ok(env_module(scope)),
-        SOCKETS_SPECIFIER => return Ok(sockets_module(scope)),
-        _ => {}
-    }
-    if let Some((scheme, _)) = specifier.split_once(':') {
-        let is_scheme = !scheme.is_empty()
-            && scheme
-                .chars()
-                .all(|c| c.is_ascii_alphanumeric() || "+-.".contains(c));
-        if is_scheme {
-            let hint = if scheme == "node" {
-                "isolane has no Node.js built-in modules; give the program one with the modules option ({ 'node:x': './x.js' })"
-            } else {
-                "only the program's files, isolane:env, cloudflare:sockets, and the modules option's specifiers can be imported"
-            };
-            return Err(Miss::Message(format!(
-                "Cannot import {specifier:?} from {importer}: {hint}"
-            )));
-        }
-    }
-    let path = files
-        .resolver
-        .resolve(from, specifier)
-        .map_err(|why| Miss::Message(format!("{why} imported from {importer}")))?;
-    file_module(scope, &path, kind_of(&path, kind))
 }
 
 fn kind_of(path: &str, asked: Option<Kind>) -> Kind {
@@ -674,9 +741,104 @@ pub(super) fn original_location(
     ))
 }
 
+// ---- stacks ----
+
+/// `error.stack`, made when it's first read: as V8 writes it, with the
+/// frames in transformed modules (and bundles with maps) pointing at the
+/// original files, as Deno does, so the guest's own stacks and the ones
+/// isolane reports agree. A program that sets `Error.prepareStackTrace`
+/// gets V8's call sites, with generated positions, as V8 gives them when
+/// it formats stacks itself; one that throws falls back to the default
+/// form (an exception can't leave this callback).
+fn prepare_stack_trace<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    error: v8::Local<'s, v8::Value>,
+    sites: v8::Local<'s, v8::Array>,
+) -> v8::Local<'s, v8::Value> {
+    v8::tc_scope!(let tc, scope);
+    if let Some(prepare) = user_prepare_stack_trace(tc) {
+        let this = v8::undefined(tc).into();
+        if let Some(stack) = prepare.call(tc, this, &[error, sites.into()]) {
+            return stack;
+        }
+        if tc.has_terminated() {
+            return v8::undefined(tc).into();
+        }
+        tc.reset();
+    }
+    let mut stack = stack_header(tc, error);
+    if tc.has_terminated() {
+        return v8::undefined(tc).into();
+    }
+    tc.reset();
+    let to_string = js::short_string(tc, "toString");
+    for i in 0..sites.length() {
+        let frame = sites
+            .get_index(tc, i)
+            .and_then(|site| v8::Local::<v8::Object>::try_from(site).ok())
+            .and_then(|site| {
+                let method = site.get(tc, to_string.into())?;
+                let method = v8::Local::<v8::Function>::try_from(method).ok()?;
+                method.call(tc, site.into(), &[])
+            })
+            .map(|frame| js::string(tc, frame, FRAME_MAX));
+        if tc.has_terminated() {
+            return v8::undefined(tc).into();
+        }
+        tc.reset();
+        stack.push_str("\n    at ");
+        stack.push_str(frame.as_deref().unwrap_or("<error>"));
+    }
+    let stack = map_stack(tc, stack);
+    match v8::String::new(tc, &stack) {
+        Some(stack) => stack.into(),
+        None => v8::undefined(tc).into(),
+    }
+}
+
+/// Longest frame line kept.
+const FRAME_MAX: usize = 4096;
+
+/// `Error.prepareStackTrace`, if the program set it to a function.
+fn user_prepare_stack_trace<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+) -> Option<v8::Local<'s, v8::Function>> {
+    let global = scope.get_current_context().global(scope);
+    let key = js::short_string(scope, "Error");
+    let error = global.get(scope, key.into())?;
+    let error = v8::Local::<v8::Object>::try_from(error).ok()?;
+    let key = js::short_string(scope, "prepareStackTrace");
+    let prepare = error.get(scope, key.into())?;
+    v8::Local::<v8::Function>::try_from(prepare).ok()
+}
+
+/// A stack's first line, as V8 writes it: `name: message`, either alone
+/// if the other is empty (`Error` and `""` for ones that are undefined).
+fn stack_header(scope: &mut v8::PinScope, error: v8::Local<v8::Value>) -> String {
+    let Ok(object) = v8::Local::<v8::Object>::try_from(error) else {
+        return js::string(scope, error, FRAME_MAX);
+    };
+    let mut read = |key: &str, default: &str| {
+        let key = js::short_string(scope, key);
+        match object.get(scope, key.into()) {
+            Some(value) if value.is_undefined() => Some(default.to_string()),
+            Some(value) => Some(js::string(scope, value, FRAME_MAX)),
+            None => None,
+        }
+    };
+    let (Some(name), Some(message)) = (read("name", "Error"), read("message", "")) else {
+        return "<error>".into();
+    };
+    match (name.is_empty(), message.is_empty()) {
+        (true, _) => message,
+        (false, true) => name,
+        (false, false) => format!("{name}: {message}"),
+    }
+}
+
 /// `stack` with its frames in transformed modules (and bundles with maps)
 /// pointing at the original files.
-pub(super) fn map_stack(scope: &mut v8::PinScope, stack: String) -> String {
+fn map_stack(scope: &mut v8::PinScope, stack: String) -> String {
     let program = program(scope);
     let maps = program.maps.borrow();
     if maps.is_empty() {
@@ -792,6 +954,14 @@ fn env_module<'s>(scope: &mut v8::PinScope<'s, '_>) -> v8::Local<'s, v8::Module>
     })
 }
 
+/// `isolane:files`: the program's files, read-only (see `files`).
+fn files_module<'s>(scope: &mut v8::PinScope<'s, '_>) -> v8::Local<'s, v8::Module> {
+    built_in(scope, files::SPECIFIER, |scope| {
+        let exports = files::exports(scope);
+        synthetic_module(scope, files::SPECIFIER, exports)
+    })
+}
+
 /// `cloudflare:sockets`: `connect`, the Sockets API's (one that throws
 /// for a program loaded without a `connect` policy).
 fn sockets_module<'s>(scope: &mut v8::PinScope<'s, '_>) -> v8::Local<'s, v8::Module> {
@@ -848,29 +1018,34 @@ fn host_module<'s>(scope: &mut v8::PinScope<'s, '_>, specifier: &str) -> v8::Loc
     })
 }
 
-/// The helpers the transform imports for legacy decorators (as tslib's
-/// `__decorate`, `__metadata`, and `__param`). None for a name that isn't
-/// one.
+/// The code of the helper the transform imports for legacy decorators
+/// (as tslib's `__decorate`, `__metadata`, and `__param`) by `name`. None
+/// for a name that isn't one.
+fn helper_code(name: &str) -> Option<&'static str> {
+    match name {
+        "/helpers/decorate" => Some(DECORATE),
+        "/helpers/decorateMetadata" => Some(DECORATE_METADATA),
+        "/helpers/decorateParam" => Some(DECORATE_PARAM),
+        _ => None,
+    }
+}
+
+/// The helper module `name`, made once.
 fn helper_module<'s>(
     scope: &mut v8::PinScope<'s, '_>,
     name: &str,
-) -> Result<Option<v8::Local<'s, v8::Module>>, Miss> {
-    let code = match name {
-        "/helpers/decorate" => DECORATE,
-        "/helpers/decorateMetadata" => DECORATE_METADATA,
-        "/helpers/decorateParam" => DECORATE_PARAM,
-        _ => return Ok(None),
-    };
+    code: &str,
+) -> Result<v8::Local<'s, v8::Module>, Miss> {
     let specifier = format!("{}{name}", transform::HELPERS);
     let key = (specifier.clone(), Kind::Code);
     if let Some(module) = program(scope).modules.borrow().get(&key) {
-        return Ok(Some(v8::Local::new(scope, module)));
+        return Ok(v8::Local::new(scope, module));
     }
     let cache_key = code_cache::key(&[specifier.as_bytes(), code.as_bytes()]);
     let module = compile(scope, &specifier, code, cache_key)?;
     let global = v8::Global::new(scope, module);
     program(scope).modules.borrow_mut().insert(key, global);
-    Ok(Some(module))
+    Ok(module)
 }
 
 const DECORATE: &str = r#"export default function decorate(decorators, target, key, desc) {
@@ -893,8 +1068,11 @@ const DECORATE_PARAM: &str = r#"export default function decorateParam(index, dec
 
 // ---- import.meta and import() ----
 
-/// `import.meta.url`: the module's path as a `file:` URL
-/// (`src/index.js` is `file:///src/index.js`).
+/// `import.meta`, as Node.js has it for a module at its path under `/`:
+/// `url` (`src/index.js` is `file:///src/index.js`), `filename`
+/// (`/src/index.js`), `dirname` (`/src`), `main` (whether it's the
+/// program's main module), and `resolve(specifier)`, the URL an import of
+/// `specifier` from the module would load.
 unsafe extern "C" fn import_meta(
     context: v8::Local<v8::Context>,
     module: v8::Local<v8::Module>,
@@ -906,13 +1084,70 @@ unsafe extern "C" fn import_meta(
     let Some(path) = path_of(scope, module) else {
         return;
     };
-    let root = url::Url::parse("file:///").expect("a valid URL");
-    let Ok(url) = root.join(&path) else {
+    let dirname = match path.rfind('/') {
+        Some(i) => format!("/{}", &path[..i]),
+        None => "/".to_string(),
+    };
+    let is_main = program(scope)
+        .main
+        .borrow()
+        .as_ref()
+        .is_some_and(|main| v8::Local::new(scope, main) == module);
+    for (name, value) in [
+        ("url", file_url(&path)),
+        ("filename", format!("/{path}")),
+        ("dirname", dirname),
+    ] {
+        let Some(value) = js::guest_string(scope, &value) else {
+            return;
+        };
+        let key = js::short_string(scope, name);
+        meta.create_data_property(scope, key.into(), value.into());
+    }
+    let key = js::short_string(scope, "main");
+    let value = v8::Boolean::new(scope, is_main);
+    meta.create_data_property(scope, key.into(), value.into());
+    let Some(from) = js::guest_string(scope, &path) else {
         return;
     };
-    let key = js::short_string(scope, "url");
-    let value = js::short_string(scope, url.as_str());
-    meta.create_data_property(scope, key.into(), value.into());
+    let Some(resolve) = v8::Function::builder(meta_resolve)
+        .data(from.into())
+        .length(1)
+        .build(scope)
+    else {
+        return;
+    };
+    let key = js::short_string(scope, "resolve");
+    resolve.set_name(key);
+    meta.create_data_property(scope, key.into(), resolve.into());
+}
+
+/// `import.meta.resolve(specifier)`: the URL an import of `specifier`
+/// from the module (its path is the data) would load, without loading it.
+/// Throws a TypeError for one that names nothing, as the import would.
+fn meta_resolve(
+    scope: &mut v8::PinScope,
+    args: v8::FunctionCallbackArguments,
+    mut rv: v8::ReturnValue<v8::Value>,
+) {
+    let Some(specifier) = js::text(scope, args.get(0), SPECIFIER_MAX) else {
+        return;
+    };
+    let from = js::string(scope, args.data(), SPECIFIER_MAX);
+    let Some(files) = program(scope).files.borrow().clone() else {
+        return;
+    };
+    match locate(&files, &specifier, Some(&from)) {
+        Ok(target) => {
+            if let Some(url) = js::guest_string(scope, &target.url()) {
+                rv.set(url.into());
+            }
+        }
+        Err(Miss::Message(message) | Miss::Syntax(message)) => {
+            js::throw_type(scope, &js::clip(message, SPECIFIER_MAX * 2));
+        }
+        Err(Miss::Thrown) => {}
+    }
 }
 
 /// `import()`: a module of the program (resolved from the importing

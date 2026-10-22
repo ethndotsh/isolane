@@ -131,8 +131,8 @@ fn node<'s>(
     let message = string_prop(scope, obj, "message", max)
         .or_else(|| js::text(scope, value, max))
         .unwrap_or_default();
-    let stack =
-        string_prop(scope, obj, "stack", max).map(|stack| super::module::map_stack(scope, stack));
+    // Mapped to the original files when V8 made it (module::prepare_stack_trace).
+    let stack = string_prop(scope, obj, "stack", max);
     let mut cause = None;
     if depth + 1 < MAX_DEPTH && *nodes > 0 && has_own(scope, obj, "cause") {
         if let Some(c) = get(scope, obj, "cause") {

@@ -96,10 +96,12 @@ export interface ModuleOptionsWire {
   define?: [string, string][];
   /** What a specifier resolves to instead: a file of the program, another specifier, or the program's host module of that name. */
   aliases?: Record<string, { file: string } | { specifier: string } | 'host'>;
+  /** The tsconfig.json imports resolve with: the nearest to each importing file (the default), one file, or none. */
+  tsconfig?: 'auto' | { file: string } | 'off';
 }
 
 /** The protocol version this library speaks; a worker reporting another is refused. */
-export const PROTOCOL_VERSION = 10;
+export const PROTOCOL_VERSION = 11;
 
 /**
  * Input queued for a worker that it hasn't read. A worker reads its input

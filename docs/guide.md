@@ -230,11 +230,24 @@ their extension (`./routes` finds `routes.ts`, and `./routes.js` names
 conditions `workerd`, `worker`, `browser`, `import`, and `default` in that
 order (as bundlers for Workers do), then its `browser`, `module`, and
 `main` fields. Packages must be ES modules; CommonJS needs bundling first.
-An import that resolves to nothing, a Node.js built-in (`node:fs`), or a
-URL fails the load with a TypeError that names the importing file.
-`import()` works for the program's files and the built-in modules, during
-setup and in calls; scripts run with `run` and `eval` still can't import.
-`import.meta.url` is the module's path as a `file:` URL.
+A `tsconfig.json` among the files applies its `compilerOptions.paths` and
+`baseUrl`, with `extends` and project references: the nearest one above
+the importing file applies, as TypeScript finds it, and none applies to
+files in `node_modules`. The `tsconfig` option names one file to use for
+every import instead, and `tsconfig: false` ignores them. An import that
+resolves to nothing, a Node.js built-in (`node:fs`), or a URL other than a
+`file:` URL of one of the program's files fails the load with a TypeError
+that names the importing file. `import()` works for the program's files
+and the built-in modules, during setup and in calls; scripts run with
+`run` and `eval` still can't import.
+
+Each module's `import.meta` is as Node.js gives it, for the module's path
+under `/`: `url` is the path as a `file:` URL (`file:///src/index.ts`),
+`filename` and `dirname` are the path and its directory
+(`/src/index.ts`, `/src`), `main` is true in the main module only, and
+`resolve(specifier)` returns the URL an import of `specifier` from the
+module would load (a built-in module's specifier for one), without
+loading it, or throws the TypeError the import would fail with.
 
 Files that aren't JavaScript import as data: a `.json` file (or any file
 `with { type: 'json' }`) as its parsed value, any file
@@ -261,7 +274,11 @@ map, and so does a bundle that has one, from a `//# sourceMappingURL=`
 comment (a `data:` URL or a path in the program) or a `.map` file beside
 it: stacks in `err.guest`, `onGuestError`, and logs, and the locations of
 syntax errors, are mapped back to the sources before the worker reports
-them. (The guest's own `error.stack` keeps V8's positions.)
+them. The guest's own `error.stack` is mapped the same way when V8 makes
+it, as Deno maps it, so the stacks a program logs agree with the ones
+isolane reports. A program that sets `Error.prepareStackTrace` gets V8's
+call sites with their generated positions, as V8 gives them; if that
+function throws, the stack takes the default form.
 
 The `modules` option resolves specifiers to something else. A path
 (`'node:fs': './shims/fs.js'`) aliases a specifier to one of the
@@ -280,10 +297,26 @@ await tenant.load(source, {
 ```
 
 Host modules' functions are host functions in every other way (hooks,
-schemas, limits, and the setup rule against I/O). Two modules are built
-in: `isolane:env`, and `cloudflare:sockets`, which exports the Sockets
-API's `connect` (one that throws without a `connect` policy), so
-libraries written for Workers, postgres.js among them, run unchanged.
+schemas, limits, and the setup rule against I/O). Three modules are built
+in: `isolane:env`; `cloudflare:sockets`, which exports the Sockets API's
+`connect` (one that throws without a `connect` policy), so libraries
+written for Workers, postgres.js among them, run unchanged; and
+`isolane:files`, which reads the program's own files.
+
+`isolane:files` has the names and shapes of `node:fs` for reading:
+`readFileSync(path, encoding)`, `existsSync`, `readdirSync`, `statSync`
+(`size`, `isFile()`, `isDirectory()`), and `promises.readFile`,
+`promises.readdir`, and `promises.stat`. A path is one of the program's
+(`/src/data.json`, or `src/data.json` from the root) or a `file:` URL,
+so `readFileSync(new URL('./data.json', import.meta.url), 'utf8')` reads a
+file beside the module. Without an encoding a file reads as a
+`Uint8Array`; `utf8` is the only encoding. Errors are Node.js's
+(`ENOENT`, `EISDIR`, `ENOTDIR`, with `code`, `syscall`, and `path`). The
+files are read-only, and they are the worker's own memory, sent with the
+load, so reading them is not I/O and works during setup, unlike `fs`,
+which reaches the host's disk through a host call. A program written for
+Node.js that reads its assets with `node:fs` can be given this module
+under that name: `modules: { 'node:fs': 'isolane:files' }`.
 
 A prebuilt bundle is a one-file program, with its map beside it. To
 bundle for isolane, target ES modules and the worker conditions, as for
@@ -1006,7 +1039,9 @@ try {
   the web platform's scripts (`ext:...`, Deno's code) and isolane's
   (`isolane:...`). Guest code's own `error.stack` keeps them (as Deno's
   does), and `Error.prepareStackTrace` and `Error.captureStackTrace` work
-  as in V8: a custom `prepareStackTrace` string is reported as is.
+  as in V8: a custom `prepareStackTrace` string is reported as is. In a
+  program, `error.stack` is mapped to the original files (see
+  [Modules](#modules)).
 - **Everything is bounded**: each text 64 KiB (8 KiB inside causes and
   errors), 32 errors described in all. Reading the error runs guest code
   (getters, Proxy traps) under the eval's limits; one that throws is

@@ -258,3 +258,121 @@ test('limits.modules and limits.moduleBytes bound a program\'s files', async () 
   await assert.rejects(tenant.load({ main: 'm0.js', files }, { limits: { moduleBytes: 50 } }), limit('moduleBytes'));
   await assert.rejects(tenant.load('1', { limits: { moduleBytes: 1 << 30 } }), code('ERR_INVALID_CONFIG'));
 });
+
+test('the guest\'s own error.stack points at the original files, unless it formats stacks itself', async (t) => {
+  const program = await load(t, {
+    main: 'src/index.ts',
+    files: {
+      'src/index.ts': 'type T = number;\n\n\nexport function stack(): string {\n  const n: T = 1;\n  return new Error(`at ${n}`).stack!;\n}\nexport function custom(): unknown {\n  (Error as any).prepareStackTrace = (err: Error, sites: any[]) => [err.message, sites[0].getFunctionName()];\n  try { return new Error("custom").stack; } finally { delete (Error as any).prepareStackTrace; }\n}\nexport function throwing(): string {\n  (Error as any).prepareStackTrace = () => { throw new Error("no"); };\n  try { return new Error("fallback").stack!; } finally { delete (Error as any).prepareStackTrace; }\n}\nexport function named(): string {\n  const e = new TypeError("m"); e.name = "";\n  return e.stack!.split("\\n")[0];\n}\nexport function fail(): never {\n  throw new Error("reported");\n}\n',
+    },
+  });
+  const stack = await program.call('stack');
+  assert.match(stack, /^Error: at 1\n {4}at stack \(src\/index\.ts:6:10\)/);
+  assert.deepEqual(await program.call('custom'), ['custom', 'custom']);
+  assert.match(await program.call('throwing'), /^Error: fallback\n {4}at throwing \(src\/index\.ts:14:/);
+  assert.equal(await program.call('named'), 'm');
+  // The reported stack is mapped once, not again.
+  await assert.rejects(program.call('fail'), (err) => {
+    assert.deepEqual([err.guest.frames[0].file, err.guest.frames[0].line], ['src/index.ts', 21]);
+    assert.match(err.guest.stack, /src\/index\.ts:21:9/);
+    return true;
+  });
+});
+
+test('tsconfig.json paths and baseUrl resolve imports: the nearest one, a named one, or none', async (t) => {
+  const files = {
+    'tsconfig.json': '{\n  // comments are allowed\n  "compilerOptions": { "baseUrl": ".", "paths": { "@lib/*": ["src/lib/*"], "~config": ["src/config.ts"] } }\n}',
+    'src/index.ts': 'import { two } from "@lib/two";\nimport config from "~config";\nimport { three } from "src/lib/three";\nexport const all = () => [two, config, three];',
+    'src/lib/two.ts': 'export const two = 2;',
+    'src/lib/three.ts': 'export const three = 3;',
+    'src/config.ts': 'export default "config";',
+    'other.json': '{ "compilerOptions": { "paths": { "@lib/*": ["src/lib/*"], "~config": ["src/config.ts"], "src/*": ["src/*"] } } }',
+  };
+  const program = await load(t, { main: 'src/index.ts', files });
+  assert.deepEqual(await program.call('all'), [2, 'config', 3]);
+
+  const named = await load(t, { main: 'src/index.ts', files: { ...files, 'tsconfig.json': '{}' } }, { tsconfig: 'other.json' });
+  assert.deepEqual(await named.call('all'), [2, 'config', 3]);
+
+  await assert.rejects(tenant.load({ main: 'src/index.ts', files }, { tsconfig: false }), guest('TypeError', /Cannot find module "@lib\/two"/));
+  await assert.rejects(tenant.load({ main: 'src/index.ts', files }, { tsconfig: 'nope.json' }), code('ERR_INVALID_CONFIG'));
+  await assert.rejects(
+    tenant.load({ main: 'a.ts', files: { 'a.ts': 'import "@x/y";', 'tsconfig.json': '{ "extends": "./missing.json" }' } }),
+    guest('TypeError', /tsconfig\.json/),
+  );
+});
+
+test('import.meta has url, filename, dirname, main, and resolve, and file: URLs import', async (t) => {
+  const program = await load(t, {
+    main: 'src/index.js',
+    files: {
+      'src/index.js': `
+        import { meta as libMeta } from './lib/a.js';
+        export const meta = () => [import.meta.url, import.meta.filename, import.meta.dirname, import.meta.main, libMeta.main, libMeta.dirname];
+        export const resolved = () => [import.meta.resolve('./lib/a.js'), import.meta.resolve('pkg'), import.meta.resolve('isolane:env'), import.meta.resolve('isolane:files'), import.meta.resolve('kv')];
+        export const missing = () => import.meta.resolve('./nope.js');
+        export const byUrl = async () => (await import(new URL('./lib/a.js', import.meta.url).href)).value;
+        export const encoded = async () => [import.meta.resolve('./a b#c.js'), (await import(import.meta.resolve('./a b#c.js'))).default];
+      `,
+      'src/lib/a.js': 'export const meta = import.meta; export const value = "a";',
+      'src/a b#c.js': 'export default "odd";',
+      'node_modules/pkg/package.json': '{ "exports": "./main.js" }',
+      'node_modules/pkg/main.js': '',
+    },
+  }, { modules: { kv: { get: () => 1 } } });
+  assert.deepEqual(await program.call('meta'), ['file:///src/index.js', '/src/index.js', '/src', true, false, '/src/lib']);
+  assert.deepEqual(await program.call('resolved'), ['file:///src/lib/a.js', 'file:///node_modules/pkg/main.js', 'isolane:env', 'isolane:files', 'kv']);
+  await assert.rejects(program.call('missing'), guest('TypeError', /Cannot find module "\.\/nope\.js" imported from src\/index\.js/));
+  assert.equal(await program.call('byUrl'), 'a');
+  assert.deepEqual(await program.call('encoded'), ['file:///src/a%20b%23c.js', 'odd']);
+});
+
+test('isolane:files reads the program\'s own files, during setup too, as node:fs reads files', async (t) => {
+  const program = await load(t, {
+    main: 'src/index.js',
+    files: {
+      'src/index.js': `
+        import { readFileSync, existsSync, readdirSync, statSync, promises } from 'isolane:files';
+        import fs from 'node:fs';
+        // Setup reads its data: the files are the worker's memory, not I/O.
+        const data = JSON.parse(readFileSync(new URL('./data.json', import.meta.url), 'utf8'));
+        export const setup = () => data;
+        export const bytes = () => [...readFileSync('/src/bin.dat')];
+        export const asText = () => [readFileSync('src/../src/data.json', { encoding: 'utf-8' }).length, fs.readFileSync(import.meta.dirname + '/bin.dat', 'utf8').length];
+        export const listing = () => [readdirSync('/'), readdirSync(new URL('.', import.meta.url)), existsSync('/src'), existsSync('/nope'), existsSync(42)];
+        export const stats = () => { const f = statSync('/src/bin.dat'); const d = statSync('/src'); return [f.size, f.isFile(), f.isDirectory(), d.isDirectory()]; };
+        export const later = async () => [JSON.parse(await promises.readFile('src/data.json', 'utf8')).n, (await promises.readdir('src')).length, (await promises.stat('src')).isDirectory()];
+        const fails = (f) => { try { f(); } catch (e) { return [e.code, e.message]; } };
+        export const errors = async () => [
+          fails(() => readFileSync('/missing.txt')),
+          fails(() => readFileSync('/src')),
+          fails(() => readdirSync('/src/data.json')),
+          fails(() => readFileSync('https://example.com/x')),
+          fails(() => readFileSync(new URL('https://example.com/x'))),
+          fails(() => readFileSync('/src/data.json', 'latin1')),
+          fails(() => readFileSync(1)),
+          await promises.readFile('/missing.txt').then(() => null, (e) => e.code),
+        ];
+      `,
+      'src/data.json': '{ "n": 7 }',
+      'src/bin.dat': new Uint8Array([104, 105, 255]),
+    },
+  }, { modules: { 'node:fs': 'isolane:files' } });
+  assert.deepEqual(await program.call('setup'), { n: 7 });
+  assert.deepEqual(await program.call('bytes'), [104, 105, 255]);
+  assert.deepEqual(await program.call('asText'), [10, 3]);
+  assert.deepEqual(await program.call('listing'), [['src'], ['bin.dat', 'data.json', 'index.js'], true, false, false]);
+  assert.deepEqual(await program.call('stats'), [3, true, false, true]);
+  assert.deepEqual(await program.call('later'), [7, 3, true]);
+  assert.deepEqual(await program.call('errors'), [
+    ['ENOENT', "ENOENT: no such file or directory, open '/missing.txt'"],
+    ['EISDIR', "EISDIR: illegal operation on a directory, open '/src'"],
+    ['ENOTDIR', "ENOTDIR: not a directory, scandir '/src/data.json'"],
+    ['ENOENT', "ENOENT: no such file or directory, open '/https:/example.com/x'"],
+    ['ERR_INVALID_URL_SCHEME', 'The URL "https://example.com/x" must be a file: URL with an absolute path'],
+    ['ERR_INVALID_ARG_VALUE', 'The encoding "latin1" is not supported: isolane:files reads bytes, or utf8 text'],
+    ['ERR_INVALID_ARG_TYPE', 'The "path" argument must be of type string or an instance of URL'],
+    'ENOENT',
+  ]);
+  await assert.rejects(tenant.load('1', { modules: { 'isolane:files': './x.js' } }), code('ERR_INVALID_CONFIG'));
+});
