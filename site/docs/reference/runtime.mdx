@@ -1,0 +1,160 @@
+---
+title: Runtime, Tenant, and Isolate
+description: "The classes and functions isolane exports: Runtime, Tenant, Isolate, hostFunction, deny, and IsolaneError."
+---
+
+## Exports
+
+`isolane` exports these values. Everything else it exports is a TypeScript type.
+
+| Export | Kind | Page |
+|---|---|---|
+| `Runtime` | class | [below](#runtime) |
+| `Tenant` | class | [below](#tenant) |
+| `Isolate` | class | [below](#isolate) |
+| `Program` | class | [Program](/reference/program) |
+| `hostFunction` | function | [below](#hostfunction) |
+| `deny` | function | [Hooks](/reference/hooks#deny) |
+| `IsolaneError` | class | [Errors](/reference/errors) |
+| `DEFAULT_LIMITS` | frozen object | [Limits](/reference/limits) |
+| `DEFAULT_POLICY_LIMITS` | frozen object | [Capabilities](/reference/capabilities) |
+
+The exported types are `RuntimeOptions`, `RunConfig`, `EvalOptions`, `CallOptions`, `LoadOptions`, `IsolationReport`, `IsolationInfo`, `LockdownLevel`, `LogLevel`, `IsolateConfig`, `Limits`, `IsolateLimits`, `TenantLimits`, `RuntimeLimits`, `TimeConfig`, `WebConfig`, `Shim`, `ShimsConfig`, `ProgramSource`, `ProgramFiles`, `ProgramUsage`, `InstancesOptions`, `ModuleLoadOptions`, `TsOptions`, `JsxOptions`, `HostContext`, `HostFunction`, `HostFunctionDefinition`, `HostTree`, `Hooks` and the event types listed on the [Hooks](/reference/hooks) page, `IsolaneErrorCode`, `IsolaneErrorKind`, `GuestErrorInfo`, `GuestErrorLocation`, `GuestStackFrame`, `SchemaIssue`, `ShimErrorInfo`, `FetchPolicy`, `ConnectPolicy`, `FsPolicy`, `StandardSchemaV1`, and `TenantUsage`.
+
+## Runtime
+
+```ts
+new Runtime(options?: RuntimeOptions)
+```
+
+A `Runtime` is the supervisor in the host process. It starts one worker process per tenant, on demand, and stops them when they are idle. The constructor validates every option and throws `ERR_INVALID_CONFIG` synchronously, naming the field. It also throws when it cannot find a worker binary. The options are listed on the [Configuration](/reference/configuration#runtime-options) page.
+
+| Member | Returns | Description |
+|---|---|---|
+| `tenant(name)` | `Tenant` | The handle for the tenant called `name`, a non-empty string. Handles are cheap; calling `tenant` twice with one name gives two handles to the same tenant. |
+| `run(code, config)` | `Promise` | Evaluates `code` in a fresh isolate on the tenant's worker and closes the isolate. `config` is an `IsolateConfig` plus `tenant` (required) and the [eval options](#eval-options). |
+| `on(event, listener)` | `() => void` | Subscribes to an event from every tenant and isolate. Returns a function that unsubscribes. Event names and payloads are on the [Hooks](/reference/hooks#runtimeon) page. |
+| `isolationReport()` | `Promise<IsolationReport>` | Starts a probe worker and reports what isolation this host provides. It ignores `strict`, so it works on hosts that strict mode refuses. |
+| `close()` | `void` | Stops every worker process. Evals and calls in flight reject with `ERR_RUNTIME_CLOSED`, and later ones fail with it. |
+| `[Symbol.dispose]()` | `void` | Calls `close()`, for `using runtime = new Runtime()`. |
+| `diagnostics.workerPid(tenant)` | `number \| undefined` | The process id of the tenant's worker. For tests and diagnostics; it may change between releases. |
+
+`tenant.run(code, config)` is the same as `runtime.run(code, { ...config, tenant })`.
+
+### IsolationReport
+
+| Field | Type | Description |
+|---|---|---|
+| `v8` | `string` | The worker's V8 version, such as `15.2.124.1-rusty`. |
+| `sandboxSecure` | `boolean` | The V8 sandbox is enabled and securely configured. False for development builds. |
+| `lockdown.seccomp` | `LockdownLevel` | `'full'`, `'partial'`, or `'none'`. |
+| `lockdown.landlock` | `LockdownLevel` | `'full'`, `'partial'`, or `'none'`. `'partial'` on kernels older than 6.7. |
+| `meetsStrict` | `boolean` | Strict mode accepts this host: a secure sandbox, full seccomp, and Landlock at `'partial'` or better. |
+
+macOS has no seccomp or Landlock, so `meetsStrict` is always false there. See [Platforms](/reference/platforms).
+
+## Tenant
+
+A `Tenant` is a handle to one tenant. It holds no resources of its own, and the tenant's worker starts on its first isolate, not when the handle is made.
+
+| Member | Returns | Description |
+|---|---|---|
+| `name` | `string` | The tenant's name. |
+| `run(code, config?)` | `Promise` | Evaluates `code` in a fresh isolate, then closes it. `config` is an `IsolateConfig` plus the [eval options](#eval-options). |
+| `isolate(config?)` | `Isolate` | Creates a stateful isolate, which keeps its globals between evals. Throws synchronously on an invalid config, a closed runtime, a quarantined tenant, or a tenant at its `isolates` limit. |
+| `load(source, options?)` | `Promise<Program>` | Loads a program. Resolves once the first instance has evaluated its modules. See [Program](/reference/program). |
+| `usage()` | `TenantUsage` | A copy of what the tenant has used since its first isolate or its last `resetUsage()`. See [Usage](/reference/usage). |
+| `resetUsage()` | `void` | Sets the tenant's usage to zero. Live workers keep counting into the reset figures. |
+| `release()` | `void` | Lifts the tenant's quarantine before `quarantineMs` has passed. |
+| `stop()` | `void` | Stops the tenant's worker now. Its isolates close, and their evals reject with `ERR_ISOLATE_CLOSED`. The next isolate starts a fresh worker. |
+
+The runtime keeps each tenant name's usage until `resetUsage()` is called for an idle tenant, at a few hundred bytes per name. Tenant names should come from your own records, not from requests.
+
+## Isolate
+
+An `Isolate` is one V8 isolate in the tenant's worker. `tenant.isolate()` creates one; programs create their own instances.
+
+| Member | Returns | Description |
+|---|---|---|
+| `tenant` | `string` | The tenant's name. |
+| `id` | `number` | The isolate's id, unique within the runtime. Events carry it as `isolate`. |
+| `eval(code, options?)` | `Promise` | Evaluates `code` as a classic script and resolves to its completion value. Globals persist between evals. `options` are the [eval options](#eval-options). |
+| `call(name, args?, options?)` | `Promise` | Calls a function the isolate's code defined, with `args` as data. Nothing is compiled. See [Calls](#calls). |
+| `close()` | `void` | Frees the isolate. Idempotent. Evals in flight reject with `ERR_ISOLATE_CLOSED`, and the `ctx.signal` of its host calls aborts. |
+| `[Symbol.dispose]()` | `void` | Calls `close()`. |
+
+An eval stopped part-way retires the isolate: by `timeoutMs`, `cpuMs`, `heapBytes`, `backgroundMs`, or its `signal`. Its later evals and calls fail with `ERR_ISOLATE_RETIRED`. An eval whose code throws leaves the isolate usable. [Resource limits](/concepts/resource-limits) explains why.
+
+### Eval options
+
+`run` and `eval` take these options. `call` takes `returns` and `signal`.
+
+| Option | Type | Description |
+|---|---|---|
+| `returns` | Standard Schema | The completion value must match it, or the eval fails with `ERR_INVALID_RETURN` and `err.issues`. In TypeScript, the result is typed by the schema's output. |
+| `filename` | `string` | The code's name in stack traces and compile errors. Default `<tenant>/eval-<n>.js`, where `n` counts the isolate's evals from 1 and characters other than letters, digits, `_`, `.`, `@`, and `-` in the tenant's name become `_`. At most 1,024 characters, no control characters, and not starting with `ext:` or `isolane:`. |
+| `signal` | `AbortSignal` | Aborting it stops the eval. A running eval is terminated and its isolate retired. One that has not started never runs. Either way it rejects with `ERR_ABORTED`, with the signal's reason in `err.reason`, and the `ctx.signal` of its host calls aborts. |
+
+### Results
+
+An eval's completion value crosses as JSON. `undefined` becomes `null`, typed arrays become objects, and a value `JSON.stringify` cannot encode, such as a `BigInt`, fails with `ERR_NOT_SERIALIZABLE`. A promise is awaited first. A promise that can never settle, because nothing is left that could settle it, fails with `ERR_UNSETTLED`.
+
+### Calls
+
+```ts
+isolate.call(name: string, args?: unknown[], options?: CallOptions): Promise<unknown>
+```
+
+| Parameter | Description |
+|---|---|
+| `name` | A function declared by a classic script, or a function set on `globalThis`. `let` and `const` bindings and inherited properties are not found. A non-empty string of at most 1,024 characters, not starting with `__isolane_`. |
+| `args` | An array. Each element is a JSON value, or bytes (an `ArrayBuffer` or a view of one), which arrive as a `Uint8Array`. Bytes nested inside other values cross as JSON. `undefined` arrives as `null`. |
+| `options` | `returns` and `signal`, as for an eval. |
+
+The result crosses the same way as the arguments: a function that returns bytes resolves to a `Uint8Array`. A name the isolate does not define fails with `ERR_HANDLER_NOT_FOUND`, and a function that throws fails with `ERR_GUEST_EXCEPTION`. Neither retires the isolate.
+
+A call is an eval in every other respect. The clock advances when it starts. `timeoutMs`, `cpuMs`, `hostCalls`, and `logBytes` apply to each call. `before` and `after` shims run around it, and it counts in `usage().evals` and toward `workerEvals`. It settles when the function's return value, or the promise it returns, settles. Timers and other work it leaves running continue between evals under `backgroundMs`.
+
+## hostFunction
+
+```ts
+hostFunction(definition: HostFunctionDefinition): HostFunctionDefinition
+```
+
+Defines a host function with schemas. Put the result in a `host` tree. `hostFunction` throws `ERR_INVALID_CONFIG` for an unknown field or a value of the wrong type.
+
+| Field | Type | Description |
+|---|---|---|
+| `handler` | function | Does the work. With an array of `args` schemas, it receives exactly that many validated arguments, then the [call context](#hostcontext). Otherwise it receives the guest's arguments, or the output of the whole-list schema. The context is also `this`. |
+| `args` | Standard Schema, or an array of them | One schema per positional argument, or one schema for the whole argument list, which must produce an array. Extra arguments fail validation. |
+| `returns` | Standard Schema | The handler's result must match it before the guest sees it. |
+| `sync` | `boolean` | The guest gets the result directly instead of a promise. The isolate waits for the reply, within `timeoutMs`. Default false. |
+
+Arguments that fail `args` reach the guest as a `TypeError` with `code: 'ERR_INVALID_ARGUMENTS'` and a message listing the issues, and the handler does not run. A result that fails `returns` reaches the guest as an `Error` with `code: 'ERR_INVALID_RETURN'`. The handler receives each schema's output, so defaults and transforms apply.
+
+A plain function in a `host` tree is a host function without schemas: asynchronous in the guest, with unchecked arguments, and with the context as `this`.
+
+### Host trees
+
+A `host` tree maps names to functions. A nested plain object becomes a frozen namespace in the guest: `{ db: { getUser } }` is `db.getUser(1)`. Names must match `[A-Za-z_$][\w$]*`, must not start with `__isolane_`, and nest at most 8 levels deep. A name cannot be both a function and a namespace across configuration levels.
+
+In a program, `host` functions are mounted in `env` instead of on the global. See [Program](/reference/program#env).
+
+### HostContext
+
+| Member | Type | Description |
+|---|---|---|
+| `tenant` | `string` | The calling tenant. |
+| `isolate` | `number` | The calling isolate's id. |
+| `signal` | `AbortSignal` | Aborts when nobody waits for the result any more: the eval hit its time or CPU limit or was aborted, the isolate closed, or the worker exited. |
+| `log(level, ...args)` | `void` | Logs through the hooks, as an `onLog` event with `source: 'host'`. `level` is `'log'`, `'info'`, `'debug'`, `'warn'`, or `'error'`. |
+
+### Values across the boundary
+
+`Uint8Array` arguments arrive in the handler as `Buffer`s. A `Buffer` or any typed array in a result arrives in the guest as a `Uint8Array`. Other values cross as JSON.
+
+When a handler throws, the guest's promise rejects with an error of the same class if it is `TypeError`, `RangeError`, or `SyntaxError`, and `Error` otherwise. The error carries the handler error's `message` and its `code` if that is a string, but never its stack. Error messages from host functions are cut to 64 KiB.
+
+:::warning
+A library's error message can contain a connection string, a file path, or part of a query. Catch errors inside handlers that wrap such libraries, and throw a message the tenant may see.
+:::

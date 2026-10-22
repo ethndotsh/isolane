@@ -1,0 +1,65 @@
+---
+title: Platforms
+description: Which operating systems, architectures, and Node.js versions isolane runs on, and which protections and limits each one enforces.
+---
+
+## Support
+
+| Platform | Worker package | Status |
+|---|---|---|
+| Linux x64, glibc | `@isolane/worker-linux-x64-gnu` | Production |
+| Linux arm64, glibc | `@isolane/worker-linux-arm64-gnu` | Production |
+| macOS arm64 | `@isolane/worker-darwin-arm64` | Development only |
+| macOS x64 | `@isolane/worker-darwin-x64` | Development only |
+| Linux with musl, Windows | none | Not supported |
+
+The worker packages are optional dependencies of `isolane`, and npm installs the one that matches the machine. `ISOLANE_WORKER=/path/to/isolane-worker`, or the runtime's `workerPath` option, uses another binary instead. On a platform with no package, `new Runtime()` fails with a message that lists the supported platforms.
+
+:::warning
+No version has been published to npm yet, and the macOS release builds are not in CI yet. Until then, [build the worker from source](/guides/build-from-source).
+:::
+
+isolane needs Node.js 22 or later. CI runs the tests on Node.js 22, on Ubuntu 24.04 for x64 and arm64. The `using` and `await using` declarations in the examples need Node.js 24 or TypeScript 5.2; on Node.js 22, call `close()` instead.
+
+## Protections by platform
+
+| Protection | Linux release build | macOS | Development build |
+|---|---|---|---|
+| One worker process per tenant | Yes | Yes | Yes |
+| V8 sandbox | Yes | Yes, in a release build | No |
+| seccomp syscall filter | Yes | No | Linux only |
+| Landlock | Yes, kernel 5.13 or later | No | Linux only |
+| `workerMemoryBytes` (RLIMIT_DATA) | Yes | No | Linux only |
+| `cpuMs`, `startupCpuMs` | Yes | No | Linux only |
+| `backgroundMs`, `workerBackgroundMs` | CPU time | Wall time | As on that system |
+| `fs` paths walked from held descriptors | Yes | No: resolved, then used | As on that system |
+| Frozen and fixed clocks | Yes | Yes, in a release build | No: the real clock |
+| Strict mode accepts it | Yes | No | No |
+
+A development build is one linked against rusty_v8's prebuilt V8, which isn't built with the V8 sandbox (`scripts/build-worker.sh fast --no-default-features --features dev-prebuilt`). The runtime refuses it unless `strict: false` is set and `ISOLANE_DEV_INSECURE=1` is in the environment.
+
+## Strict mode
+
+`strict` defaults to `true`. In strict mode the runtime refuses to start a worker unless all of these hold:
+
+| Layer | Required level |
+|---|---|
+| V8 sandbox | enabled and securely configured |
+| seccomp | `full` |
+| Landlock | `partial` or `full` |
+
+Landlock reports `full` when the kernel supports Landlock ABI 5 (Linux 6.10), and `partial` on older kernels from 5.13, which enforce its filesystem rules but not all of its newer rights; kernels before 6.7 don't enforce its TCP rules. Strict mode accepts `partial` because seccomp already refuses every file open and `socket()` call, so Landlock is the second barrier. Landlock must also be enabled in the kernel's list of security modules.
+
+A refused worker fails with `ERR_ISOLATION_UNAVAILABLE`. `runtime.isolationReport()` starts a probe worker and reports what the host provides, whatever `strict` is set to:
+
+```js
+const report = await runtime.isolationReport();
+// { v8: '15.2.124.1-rusty', sandboxSecure: true,
+//   lockdown: { landlock: 'full', seccomp: 'full' }, meetsStrict: true }
+```
+
+The worker installs its filters without privileges and doesn't use namespaces. Inside a container, its seccomp profile must let the worker add its own filter and make Landlock's system calls; CI runs on GitHub's Linux VMs, and container and Kubernetes profiles are not tested yet, so run `isolationReport()` in the container before relying on it. [Deploying on Linux](/guides/deploy-on-linux) covers kernels and containers.
+
+## macOS
+
+macOS is for development. It has no seccomp or Landlock, ignores the worker memory limit, and doesn't measure CPU budgets, and its `fs` broker resolves a path before using it, which a process creating symlinks inside the root at the same moment can race. Strict mode refuses it by design. Run untrusted code on Linux.

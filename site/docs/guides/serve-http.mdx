@@ -1,0 +1,157 @@
+---
+title: Serve HTTP with a program
+description: Route HTTP requests from a Node.js server to a tenant's fetch handler with program.fetch.
+---
+
+This guide puts a tenant's Workers-style fetch handler behind a Node.js HTTP
+server, so that each incoming request runs in one of the
+[program's](/concepts/programs) warm instances.
+
+## Write the handler
+
+The guest module exports a `fetch(request, env, ctx)` handler, as Cloudflare
+Workers and Deno Deploy expect. It may be a named export or a method of the
+default export.
+
+```js
+export default {
+  async fetch(request, env, ctx) {
+    const url = new URL(request.url);
+    ctx.waitUntil(env.audit.record(url.pathname));
+    if (request.method === 'POST') {
+      return Response.json({ received: await request.json(), region: env.region });
+    }
+    return new Response(`hello from ${env.region} at ${url.pathname}`);
+  },
+};
+```
+
+`request` is a standard `Request`. `env` is the program's `env` option with
+its host functions mounted in it, the same object the module can import as
+`import { env } from 'isolane:env'`. `ctx.waitUntil(promise)` keeps work
+running after the response has been returned.
+
+## Load it and connect a server
+
+```js
+import { readFile } from 'node:fs/promises';
+import { createServer } from 'node:http';
+import { Readable } from 'node:stream';
+import { Runtime, IsolaneError } from 'isolane';
+
+const source = await readFile('handler.js', 'utf8'); // the module above
+const auditLog = [];
+
+const runtime = new Runtime();
+let program = await runtime.tenant('acme').load(source, {
+  env: { region: 'eu-west' },
+  host: { audit: { record: async (path) => auditLog.push(path) } },
+  limits: { bodyBytes: 1 << 20 },
+});
+
+function toRequest(req) {
+  const url = new URL(req.url, `http://${req.headers.host}`);
+  const headers = new Headers();
+  for (const [name, value] of Object.entries(req.headers)) {
+    for (const v of [value].flat()) if (v !== undefined) headers.append(name, v);
+  }
+  const hasBody = req.method !== 'GET' && req.method !== 'HEAD';
+  return new Request(url, {
+    method: req.method,
+    headers,
+    body: hasBody ? Readable.toWeb(req) : null,
+    duplex: 'half',
+  });
+}
+
+const server = createServer(async (req, res) => {
+  try {
+    const response = await program.fetch(toRequest(req));
+    res.writeHead(response.status, [...response.headers].flat());
+    res.end(Buffer.from(await response.arrayBuffer()));
+  } catch (err) {
+    if (!(err instanceof IsolaneError)) throw err;
+    const status = err.limit === 'bodyBytes' ? 413 : err.kind === 'guest' ? 500 : 503;
+    res.writeHead(status, { 'content-type': 'text/plain' }).end(err.code);
+  }
+});
+server.listen(8080);
+```
+
+`program.fetch` takes what the global `fetch` takes: a `Request`, or a URL
+and a `RequestInit`. It resolves to the `Response` the handler returned. A
+request with a streamed body needs `duplex: 'half'`, as it does for the
+global `fetch`.
+
+Requests to the server above produce:
+
+```text
+GET /hi                → 200 hello from eu-west at /hi
+POST /orders {"id":7}  → 200 {"received":{"id":7},"region":"eu-west"}
+POST /big (2 MiB)      → 413 ERR_LIMIT
+```
+
+## Bodies are buffered
+
+isolane reads the request body whole before the call starts, and the
+worker sends the response body whole when the handler's `Response` is
+complete. Each is limited to `limits.bodyBytes` (default 16 MiB, at most
+63 MiB). A larger body fails the call with `ERR_LIMIT` and `err.limit ===
+'bodyBytes'`, and the instance stays in service. Streaming responses, such
+as server-sent events, are not supported yet.
+
+## Background work after the response
+
+A promise passed to `ctx.waitUntil` keeps running in the instance after
+`program.fetch` has resolved. It runs under the isolate's
+[`backgroundMs`](/reference/limits#backgroundms) budget, and a rejection is
+reported through `onGuestError`. When an instance closes, because of
+`program.close()`, `instances.idleMs`, or `instances.reuse: false`, isolane
+waits for its `waitUntil` work, up to `timeoutMs`.
+
+To stop serving a program, for example when a new version is deployed,
+load the new version first, switch requests to it, and then close the old
+one:
+
+```js
+const next = await runtime.tenant('acme').load(newSource, options);
+const previous = program;
+program = next;
+await previous.close();
+```
+
+`close()` refuses new calls with `ERR_PROGRAM_CLOSED`, waits for the calls
+in progress and their `waitUntil` work, and then closes the instances. If
+`load` rejects, because the new code has a syntax error or throws during
+setup, the old version keeps serving.
+
+## Cancelled requests
+
+The request's `signal` stops the call in the same way as an eval's signal:
+the call rejects with `ERR_ABORTED`, and if the handler was running, its
+instance is retired and replaced. To stop a call when the client
+disconnects, pass an `AbortController`'s signal in the `RequestInit` and
+abort it on the response's `close` event.
+
+## Status codes for failures
+
+`program.fetch` rejects rather than returning a `Response` when the call
+fails. The error's `kind` separates the tenant's faults from yours:
+
+| `err.kind` | Typical codes | Suggested status |
+|---|---|---|
+| `guest` | `ERR_GUEST_EXCEPTION` (the handler threw, or returned something other than a `Response`), `ERR_HANDLER_NOT_FOUND` | 500 |
+| `limit` | `ERR_LIMIT` (`timeoutMs`, `instances.queueMs`, ...), `ERR_ISOLATE_RETIRED` | 503, or 413 for `bodyBytes` |
+| `usage`, `security`, `infrastructure` | `ERR_PROGRAM_CLOSED`, `ERR_TENANT_QUARANTINED`, `ERR_WORKER_CRASHED` | 502 or 503 |
+
+[Handle errors and retries](/guides/errors-and-retries) covers which of
+these to retry. Do not send `err.guest.stack` to end users unless the tenant
+is the one making the request.
+
+## If every request fails
+
+A module without a fetch handler fails every call with
+`ERR_HANDLER_NOT_FOUND` and the message `the program has no fetch handler`.
+The handler must be named `fetch`, as an export or as a method of the
+default export. `program.fetch` also needs the web platform, so a program
+loaded with `web: false` fails with `ERR_INVALID_CONFIG`.

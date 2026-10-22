@@ -1,0 +1,148 @@
+---
+title: Keep state in an isolate
+description: Create a stateful isolate that keeps its globals between evals and calls, and replace it when it is retired.
+---
+
+This guide creates one [isolate](/concepts/architecture) that keeps its state across many evals and
+calls, which suits a session, a REPL, or a long-lived script that is not an
+ES module. For module code served to many requests, use a
+[program](/guides/call-exports) instead: it keeps a pool of instances and
+replaces them for you.
+
+## Create the isolate and define functions
+
+```js
+import { Runtime } from 'isolane';
+
+const runtime = new Runtime();
+const vm = runtime.tenant('acme').isolate({ limits: { timeoutMs: 1_000 } });
+
+await vm.eval(`
+  const sessions = new Map();
+  function join(user) {
+    sessions.set(user, (sessions.get(user) ?? 0) + 1);
+    return sessions.get(user);
+  }
+  globalThis.count = () => sessions.size;
+`);
+
+await vm.call('join', ['ada']); // 1
+await vm.call('join', ['ada']); // 2
+await vm.call('count'); // 1
+await vm.eval('sessions.size'); // 1
+```
+
+Every `eval` runs as a classic script in the same global scope, so a
+`const` declared by one eval is visible to the next. `tenant.isolate()`
+takes the same configuration as `tenant.run()`: capabilities, host
+functions, limits, and hooks.
+
+## Call functions instead of evaluating code
+
+`vm.call(name, args)` runs a function the isolate already defined, with
+`args` copied in as JSON. Nothing is compiled, so it is cheaper than an
+eval and arguments cannot be interpreted as code.
+
+`call` finds function declarations of a classic script and functions set
+on `globalThis`. It does not find `let` or `const` bindings, which are
+not properties of the global object: above, `vm.call('sessions')` fails
+with `ERR_HANDLER_NOT_FOUND`, and the isolate stays usable.
+
+## Errors that keep the state
+
+A guest exception does not affect the isolate. After
+`await vm.eval('throw new Error("x")')` rejects with `ERR_GUEST_EXCEPTION`,
+`vm.call('count')` still returns `1`.
+
+## Errors that retire the isolate
+
+An eval or call stopped part-way retires its isolate. This happens when
+`timeoutMs`, `cpuMs`, `heapBytes`, or `backgroundMs` is exceeded, when the
+eval's `signal` aborts it while it runs, or when the tenant's worker is
+recycled. The guest might have been stopped in the middle of updating its
+state, so isolane does not run anything in it again.
+
+```js
+try {
+  await vm.eval('for (;;) {}');
+} catch (err) {
+  err.code; // 'ERR_LIMIT'
+  err.limit; // 'timeoutMs'
+}
+
+try {
+  await vm.call('count');
+} catch (err) {
+  err.code; // 'ERR_ISOLATE_RETIRED'
+  err.retryable; // true
+}
+```
+
+`ERR_ISOLATE_RETIRED` is retryable on a new isolate, not on this one. Keep
+the code that builds an isolate's state in one function, so that you can
+rebuild it:
+
+```js
+async function createSessionVm(tenant) {
+  const vm = tenant.isolate({ limits: { timeoutMs: 1_000 } });
+  await vm.eval(sessionCode);
+  return vm;
+}
+
+let vm = await createSessionVm(runtime.tenant('acme'));
+
+async function callSession(name, args) {
+  try {
+    return await vm.call(name, args);
+  } catch (err) {
+    if (err.code !== 'ERR_ISOLATE_RETIRED') throw err;
+    vm.close();
+    vm = await createSessionVm(runtime.tenant('acme'));
+    return vm.call(name, args);
+  }
+}
+```
+
+The state the old isolate held is lost. If it must survive, keep it in
+your process and give the guest host functions to read and write it.
+
+## Work between evals
+
+A stateful isolate keeps the timers and unawaited promises an eval leaves
+behind, and runs them between evals. That work is limited by
+[`backgroundMs`](/reference/limits#backgroundms), 1 second per minute by
+default. An isolate that uses up its budget is retired, `onLimit` fires
+with `limit: 'backgroundMs'`, and its next eval fails with `ERR_LIMIT`.
+A one-shot `tenant.run()` drops pending timers when it returns, so this
+applies only to isolates you create.
+
+## Close the isolate
+
+```js
+vm.close();
+```
+
+Closing rejects evals in progress with `ERR_ISOLATE_CLOSED` and frees the
+isolate in the worker. An isolate also supports `using`, which closes it at
+the end of the block (TypeScript 5.2 or later, or Node.js 24):
+
+```js
+{
+  using scratch = runtime.tenant('acme').isolate();
+  await scratch.eval('1 + 1'); // 2
+}
+```
+
+Each open isolate counts toward the tenant's
+[`isolates`](/reference/limits#isolates) limit, 100 by default, and keeps
+the tenant's worker running. An isolate you forget to close is freed only
+when the worker is recycled or stopped.
+
+## If an isolate fails after about an hour
+
+Workers are recycled after `workerLifetimeMs` (1 hour) or `workerEvals`
+(100,000 evals). A stateful isolate on a recycled worker keeps working for
+up to a minute and is then retired, so its evals fail with
+`ERR_ISOLATE_RETIRED`. Code that keeps an isolate for long must handle this
+the same way as any other retirement, by creating a new isolate as shown
+above.

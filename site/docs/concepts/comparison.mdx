@@ -1,0 +1,132 @@
+---
+title: Comparison with other sandboxes
+description: How isolane differs from isolated-vm, quickjs-wasi, workerd, Deno, node:vm, and containers or microVMs, and when one of those fits better.
+---
+
+## What isolane is
+
+isolane runs JavaScript from many tenants on V8, from a Node.js
+application, with each tenant in its own locked-down worker process. Most
+of its differences from the alternatives follow from two choices: guest
+code never runs in the application's process, and isolane ships its own
+V8 build with the V8 sandbox enabled. The first costs a process per
+tenant, about 15 MB idle, and an IPC round trip per call. The second
+costs a large native binary and a build pipeline that tracks V8's
+security releases.
+
+## isolated-vm
+
+[isolated-vm](https://github.com/laverdet/isolated-vm) is a native addon
+that creates V8 isolates inside the Node.js process. That makes it cheap:
+a new isolate needs no process, and calling between host and guest is a
+function call, not a pipe round trip. It can also share objects with the
+guest by reference, which isolane cannot do across a process boundary.
+
+The cost is that the guest and the host share an address space. A V8
+vulnerability, or a leaked `Reference`, gives guest code the host
+process, and isolated-vm's own documentation recommends running it in a
+separate process for that reason. It uses the V8 of the Node.js release
+it runs on (12.4 in Node.js 22, 14.6 in Node.js 26), which Node.js builds
+without the V8 sandbox and without pointer compression, and it receives
+V8 fixes only through Node.js upgrades. Its `memoryLimit` is documented as
+a guideline that hostile code can exceed by two to three times. As a
+native addon it needs rebuilding for each Node.js release, and the project
+is in maintenance mode.
+
+isolane gives up the in-process speed to get a process boundary, the V8
+sandbox, seccomp and Landlock, a memory limit that includes ArrayBuffer
+and WebAssembly memory, and V8 patch releases on its own schedule.
+
+## quickjs-wasi
+
+[quickjs-wasi](https://github.com/vercel-labs/quickjs-wasi) runs the
+QuickJS-NG interpreter compiled to WebAssembly, inside the Node.js
+process. WebAssembly's bounds checks keep the guest's memory separate from
+the host's, and the engine is small. It can snapshot a running VM and
+restore it, which V8 cannot do; V8 snapshots only at startup, and a
+snapshot is tied to the exact V8 build.
+
+QuickJS is an interpreter, so compute-bound code is much slower than on
+V8's JIT: on `fib(26)` on an Apple M4 Pro, isolane takes 0.69 ms and
+quickjs-wasi 10.5 ms. It still runs in the host process, on the host's
+WebAssembly engine, so a bug in that engine is a bug in the host. isolane
+runs guest code on the engine that Chrome, Node.js, Deno, and Cloudflare
+Workers use, with `Intl`, WebAssembly, and the WinterTC web APIs, where
+quickjs-wasi provides part of the web platform.
+
+## workerd
+
+[workerd](https://github.com/cloudflare/workerd) is the open-source
+runtime behind Cloudflare Workers. It runs many Workers in one process,
+each in its own isolate, and its API surface is the one isolane's
+programs imitate: `export default { fetch(request, env, ctx) }`, bindings
+in `env`, `ctx.waitUntil`, and `cloudflare:sockets`.
+
+Its README warns that workerd is not a hardened sandbox: on its own it
+lacks defence in depth against implementation bugs, and running
+possibly-malicious code requires an additional sandbox such as a virtual
+machine. Cloudflare's production service adds layers that are not part of
+workerd. isolane is meant to carry its own layers, the process per tenant
+and the seccomp and Landlock lockdown, so that it can run hostile code on
+an ordinary Linux host. workerd is also a standalone server configured by
+its own files, where isolane is a library that a Node.js application
+calls.
+
+## Deno
+
+Deno's permission flags (`--allow-net`, `--allow-read`, and the rest)
+decide what one Deno process may reach, and they suit scripts the operator
+chose to run. They are not a multi-tenant design: every module in the
+process shares the permissions and the address space. Platforms that run
+many customers on Deno, such as Supabase's Edge Runtime and Deno Deploy,
+build their own isolation around it. isolane's policies are per isolate
+and are checked in the host process, and its tenants never share a
+process. Deno offers the Node.js and Deno APIs, which isolane does not;
+isolane's guests get the web platform and whatever host functions the
+application provides.
+
+## node:vm and worker_threads
+
+Node.js's documentation states that `node:vm` is not a security
+mechanism and must not be used to run untrusted code. A `vm` context
+shares the process, the heap, and the event loop with the host, and many
+known escapes reach the host's objects through it. `worker_threads` gives
+a separate isolate and event loop, but in the same process and with
+access to Node's APIs. Both are fine for trusted code and neither is a
+sandbox.
+
+## Containers and microVMs
+
+A container per tenant, or a microVM such as Firecracker, isolates at the
+kernel level, which isolane does not. A microVM has its own kernel, so a
+kernel bug in the guest does not reach the host's; with isolane, a kernel
+bug reachable through the system calls seccomp allows is the remaining
+way out. Containers and microVMs also run any language and any binary.
+
+The cost is startup time, memory, and operations. A microVM boots in tens
+to hundreds of milliseconds and holds its own kernel and memory, and both
+need infrastructure an `npm install` does not provide. isolane starts a
+new web isolate on a running worker in about 1.5 ms, a new tenant's
+worker in tens of milliseconds (or at once with `spares`), and needs no
+root, daemon, or container runtime. The two combine well: running the
+application that uses isolane inside a microVM puts a kernel boundary
+around all tenants together.
+
+## When to choose something else
+
+isolane is the wrong tool in several cases. If you need many inexpensive
+sandboxes inside one process and can accept in-process risk, isolated-vm
+or quickjs-wasi costs less per sandbox. If you need to snapshot and
+restore a running VM, quickjs-wasi can and isolane cannot. If the guest
+needs to hold host objects by reference, isolated-vm offers that, and
+isolane passes values as JSON and bytes. If you need Windows, isolane
+does not support it, and macOS is for development only. If the guest
+code is not JavaScript or WebAssembly, or needs Node.js APIs, a container
+or microVM fits. And if the threat includes kernel bugs, put a VM
+boundary around isolane or use microVMs.
+
+isolane fits when an application needs to run JavaScript from many
+customers who may be hostile, on V8's performance and APIs, with
+per-tenant limits and policies, from Node.js, on ordinary Linux hosts.
+It is not yet cleared for untrusted code in production; see the
+[security model](/concepts/security-model).

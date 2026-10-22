@@ -1,0 +1,117 @@
+---
+title: Modules
+description: How a program's files are named, resolved, compiled, and limited, and which file types and options tenant.load accepts.
+---
+
+## Sources
+
+`tenant.load(source, options)` takes one of two sources.
+
+| Source | Main module | Notes |
+|---|---|---|
+| A string | The string, named by `options.filename` | `filename` defaults to `main.js` |
+| `{ main, files }` | `files[main]` | `filename` is refused; `main` must be one of the files |
+
+`files` maps paths to contents. A content is a string or a `Uint8Array`; `load` copies the bytes, so changing the array afterwards doesn't change the program.
+
+Paths are relative, such as `src/index.ts` or `node_modules/hono/package.json`. A leading `./` is removed. A path must not start with `/`, contain empty, `.`, or `..` segments, contain backslashes or control characters, be longer than 1,024 characters, or start with `ext:` or `isolane:`. Two paths that name the same file are refused. Paths become the modules' names in stack traces, and `import.meta.url` is the path as a `file:` URL (`file:///src/index.ts`).
+
+## Resolution
+
+The worker resolves every import over the program's files and nothing else, with [oxc_resolver](https://github.com/oxc-project/oxc-resolver). It never reads the host's filesystem.
+
+| Specifier | Resolves to |
+|---|---|
+| A relative path, `./routes` | A file of the program. Without an extension, the resolver tries `.ts`, `.tsx`, `.mts`, `.js`, `.jsx`, `.mjs`, and `.json`, then the directory's `index` file. |
+| A relative path ending in `.js` or `.mjs` | The `.ts`, `.tsx`, `.js`, or `.jsx` file (for `.js`) or the `.mts` or `.mjs` file (for `.mjs`) of that name, as TypeScript's convention has it |
+| A bare specifier, `hono` or `hono/jsx` | A package under `node_modules`, by its `package.json` |
+| A key of the [`modules` option](/reference/capabilities#modules) | What that option says, before any other rule |
+| `isolane:env`, `cloudflare:sockets` | The [built-in modules](/reference/guest-environment#built-in-modules) |
+
+A package's `exports` and `imports` fields are matched with these conditions, in this order: `workerd`, `worker`, `browser`, `import`, `default`. This is the order bundlers for Cloudflare Workers use, so a package with a Workers build gets it. A package without `exports` is entered by its `browser`, `module`, or `main` field, in that order, and its `browser` field's aliases apply.
+
+An import that resolves to nothing fails the load with a `TypeError` that names the importing file:
+
+| Import | Error message |
+|---|---|
+| A missing file | `Cannot find module "./missing.js" imported from a.js` |
+| A Node.js built-in, `node:fs` | `Cannot import "node:fs" from a.js: isolane has no Node.js built-in modules; give the program one with the modules option ({ 'node:x': './x.js' })` |
+| A URL | `Cannot import "https://esm.sh/x" from a.js: only the program's files, isolane:env, cloudflare:sockets, and the modules option's specifiers can be imported` |
+
+Packages must be ES modules. A CommonJS package needs bundling first, as [loading programs](/guides/load-programs#bundles) shows.
+
+## Dynamic import
+
+`import()` works for the program's files and the built-in modules, during setup and in calls. A module imported in a call is compiled then, under the call's `cpuMs`. Classic scripts run with `run`, `isolate.eval`, and `isolate.call` can't import; `import()` there rejects with a `TypeError`.
+
+## File types
+
+A file's type comes from its extension, or from an import attribute.
+
+| File | Imports as |
+|---|---|
+| `.js`, `.mjs` | JavaScript module |
+| `.ts`, `.mts` | TypeScript, compiled as described below |
+| `.jsx` | JavaScript with JSX |
+| `.tsx` | TypeScript with JSX |
+| `.json`, or any file `with { type: 'json' }` | The parsed value, as the default export |
+| Any file `with { type: 'text' }` | A string, as the default export |
+| Any file `with { type: 'bytes' }` | A `Uint8Array`, as the default export |
+
+```ts
+import messages from './messages.json';
+import readme from './README.md' with { type: 'text' };
+import logo from './logo.png' with { type: 'bytes' };
+```
+
+The same file imported as two types is two modules.
+
+## TypeScript
+
+The worker compiles TypeScript with [oxc](https://oxc.rs). It doesn't check types.
+
+| `ts` field | Values | Default | Meaning |
+|---|---|---|---|
+| `mode` | `'strip'`, `'transform'` | `'strip'` | `strip` removes types and changes nothing else, as Node.js's type stripping does. `transform` also compiles TypeScript syntax that has runtime behaviour. |
+| `experimentalDecorators` | `boolean` | `false` | Legacy decorators. Needs `mode: 'transform'`. |
+| `emitDecoratorMetadata` | `boolean` | `false` | TypeScript's decorator metadata. Needs `mode: 'transform'`. |
+
+In `strip` mode, syntax with runtime behaviour fails the load with a `SyntaxError` at that line: enums, namespaces with values, parameter properties, `import x = require()`, and `export =`. The message names `ts: { mode: 'transform' }` as the alternative. Stripping keeps every line and column where it was, so stack positions match the source.
+
+## JSX
+
+JSX in `.jsx` and `.tsx` files is compiled with these `jsx` fields:
+
+| Field | Values | Default | Meaning |
+|---|---|---|---|
+| `runtime` | `'automatic'`, `'classic'` | `'automatic'` | `automatic` imports its functions from `<importSource>/jsx-runtime`. `classic` calls `factory` and `fragment`, which must be in scope. |
+| `importSource` | package name | `react` | The automatic runtime's package, resolved in the program's files |
+| `factory` | identifier or member expression | `React.createElement` | The classic runtime's element factory |
+| `fragment` | identifier or member expression | `React.Fragment` | The classic runtime's fragment |
+| `development` | `boolean` | `false` | Use `jsx-dev-runtime` |
+
+## Compile-time constants
+
+`define` replaces expressions in every module at compile time, as esbuild's `define` does. Each key is an identifier or member expression; each value is a string that holds JSON or an identifier or member expression.
+
+```js
+await tenant.load(source, { define: { 'process.env.NODE_ENV': '"production"', __DEV__: 'false' } });
+```
+
+## Source maps
+
+Stack traces in errors isolane reports point at the original files. This covers `err.guest` on a rejected call or load, `onGuestError`, and the locations of syntax errors. The worker maps positions through:
+
+- the source map of each module it transformed itself;
+- a bundle's own map, named by a `//# sourceMappingURL=` comment as a `data:` URL or a path in the program, or a `.map` file beside the bundle with the same name.
+
+Mapping happens in the worker before the error is sent. The guest's own `error.stack`, read by guest code, keeps V8's positions in the compiled code.
+
+## Limits
+
+| Limit | Default | Maximum | Counts |
+|---|---|---|---|
+| [`modules`](/reference/limits) | 1,000 | | Files in a program |
+| [`moduleBytes`](/reference/limits) | 32 MiB | 64 MiB − 64 KiB | The files' contents and paths together |
+
+A program past either limit fails to load with `ERR_LIMIT`. Parsing, resolving, and transforming happen in the worker, on the instance's thread, so they count against `startupCpuMs` during setup and against a call's `cpuMs` for a later `import()`. The worker keeps transformed modules by content hash, so a program's later instances don't transform its files again; [caches](/concepts/caches) describes what else a worker keeps.

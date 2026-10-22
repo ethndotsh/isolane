@@ -1,0 +1,113 @@
+---
+title: Give tenants different plans
+description: Set limits and capabilities per tenant with the runtime's tenants function, over shared defaults, with per-call overrides.
+---
+
+This guide gives each [tenant](/concepts/architecture) the limits and capabilities of its plan, such
+as a free plan with small budgets and a paid plan with more, from one
+`Runtime`.
+
+## Map tenants to plans
+
+```js
+import { Runtime } from 'isolane';
+
+const plans = {
+  free: {
+    limits: { timeoutMs: 1_000, heapBytes: 32 << 20, isolates: 5, workerMemoryBytes: 256 << 20 },
+  },
+  pro: {
+    limits: { timeoutMs: 10_000, heapBytes: 256 << 20, isolates: 100 },
+    fetch: { hosts: ['api.example.com'] },
+    wasm: true,
+  },
+};
+
+const runtime = new Runtime({
+  defaults: { limits: { timeoutMs: 5_000, cpuMs: 2_000 } },
+  tenants: (name) => plans[accounts.planOf(name)] ?? plans.free,
+});
+```
+
+`tenants(name)` returns any part of an isolate's configuration for that
+tenant, or `undefined` for none. isolane calls it when the tenant's worker
+starts and again for every new isolate, so a plan change applies to the
+tenant's next isolate, and a change to tenant limits such as
+`workerMemoryBytes` applies when its next worker starts. Keep the function
+fast and synchronous: look the plan up in memory.
+
+## How the levels combine
+
+Configuration is resolved from three levels, and later levels win:
+
+1. the runtime's `defaults`,
+2. the result of `tenants(name)`,
+3. the options of the call: `tenant.run(code, options)`,
+   `tenant.isolate(options)`, or `tenant.load(source, options)`.
+
+Fields merge one by one, not whole objects. In the example, a pro tenant
+gets `timeoutMs: 10_000` from its plan and `cpuMs: 2_000` from the
+defaults. `limits` merge by field, `host` and `globals` by name, and
+`hooks` and `shims` from every level all run.
+
+## Override for one call
+
+Your own code can tighten or loosen an isolate limit for one call:
+
+```js
+await runtime.tenant('bob').run(previewCode, { limits: { timeoutMs: 50 } });
+```
+
+Per-call options are yours, not the guest's, so isolane accepts a value
+higher than the plan's. If your call options are built from anything a
+tenant controls, clamp them first.
+
+Tenant limits apply to the tenant's worker as a whole, so they can be set
+only in `defaults` and `tenants(name)`. Setting one per call throws:
+
+```text
+ERR_INVALID_CONFIG: isolane: limits.isolates is a tenant limit; set it in defaults.limits or tenants(name).limits
+```
+
+The tenant limits are `isolates`, `pendingEvals`, `workerMemoryBytes`,
+`idleMs`, `workerBackgroundMs`, `workerLifetimeMs`, and `workerEvals`. The
+[limits reference](/reference/limits) lists every limit and the levels it
+can be set at.
+
+## Plan-specific hooks
+
+Hooks returned by `tenants(name)` run only for that tenant, in addition to
+the runtime's hooks. A plan can refuse some host functions with a
+`beforeHostCall` interceptor:
+
+```js
+import { deny } from 'isolane';
+
+const free = {
+  limits: { timeoutMs: 1_000 },
+  hooks: {
+    beforeHostCall: ({ name }) => (name.startsWith('ai.') ? deny('AI functions need the pro plan') : undefined),
+  },
+};
+```
+
+The guest's call rejects with an `Error` whose `code` is `ERR_DENIED`, and
+the eval continues.
+
+## Keep tenant names under your control
+
+isolane keeps usage figures for each tenant name it has seen, until
+`resetUsage()`, at a few hundred bytes each. Choose names from your own
+account records, not from request input, and check a name against your
+list before calling `runtime.tenant(name)`.
+
+## When a plan does not seem to apply
+
+A plan returned by `tenants(name)` is read when an isolate is created, not
+while it runs. A stateful isolate keeps the configuration it was created
+with, and so does each instance of a program, although instances the
+program starts later get the new plan. Tenant limits stay as they were
+until the tenant's worker restarts. To move a tenant to a new plan at once,
+call `tenant.stop()`. It stops the tenant's worker and closes its isolates
+and program instances. Each program then starts new instances, with the
+new plan, on its next call; stateful isolates must be created again.

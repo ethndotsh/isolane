@@ -1,0 +1,189 @@
+---
+title: Hooks
+description: "Interceptors and events: when each runs, its payload, what it may return, and the order levels run in."
+---
+
+## Kinds
+
+Interceptors (`before*` and `after*`) run in the path of an operation and may refuse or change it. They may be async; the operation waits for them. Events (`on*`) observe and cannot change anything. Both are fields of a `Hooks` object, which can be set at every configuration level: the runtime's `hooks` option, `defaults.hooks`, the `hooks` of `tenants(name)`, and a call's `hooks`.
+
+An unknown hook name, or a value that is not a function, throws `ERR_INVALID_CONFIG`.
+
+## Order
+
+Every level's hooks run. With levels ordered runtime, defaults, tenant, call:
+
+| Hooks | Order |
+|---|---|
+| `before*` | Outermost level first: runtime, defaults, tenant, call. Each sees the arguments or code as the previous one left them. The first `deny()` stops the chain. |
+| `after*` | Innermost level first: call, tenant, defaults, runtime. Each sees the result as the previous one left it. |
+| `on*` | Every level, outermost first, then the `runtime.on()` listeners. |
+
+An eval or call interceptor that throws fails the eval or call with the thrown error. A host-call interceptor that throws rejects the guest's call with the error's message, and the eval continues. An event hook or listener that throws is reported with `process.emitWarning` and does not affect the operation.
+
+## Interceptors
+
+| Hook | Payload | May return | Effect |
+|---|---|---|---|
+| `beforeHostCall` | `HostCallEvent` | `deny(reason)`, or `{ args }` | A denial rejects the guest's call with an `Error` with `code: 'ERR_DENIED'`; the eval continues. `{ args }` replaces the arguments. |
+| `afterHostCall` | `HostCallOutcome` | `{ result }` | Replaces what the guest receives, when the function did not throw. |
+| `beforeEval` | `EvalEvent` | `deny(reason)`, or `{ code }` | A denial fails the eval with `ERR_DENIED`, and `err.reason` is the reason. `{ code }` replaces the code. |
+| `afterEval` | `EvalOutcome` | `{ result }` | Replaces the result, when the eval succeeded. |
+| `beforeCall` | `CallEvent` | `deny(reason)`, or `{ args }` | A denial fails the call with `ERR_DENIED`. `{ args }` replaces the arguments. For `program.fetch`, `args` is `[request]`, and a replacement must be a `Request`. |
+| `afterCall` | `CallOutcome` | `{ result }` | Replaces the result, when the call succeeded. For `program.fetch`, the result is the `Response`, and a replacement must be a `Response`. |
+
+Returning `undefined` changes nothing. Host-call hooks do not see isolane's own `fetch`, `connect`, and `fs` operations; those have their policies and `onPolicyDenial`.
+
+### deny
+
+```ts
+deny(reason: string): Denial
+```
+
+Returns the value an interceptor returns to refuse an operation. `reason` is converted to a string.
+
+## Events
+
+| Hook | `runtime.on` name | Payload | Fires when |
+|---|---|---|---|
+| (after `afterHostCall`) | `hostCall` | `HostCallOutcome` | A host function finished. |
+| (after `afterEval`) | `eval` | `EvalOutcome` | An eval finished. |
+| (after `afterCall`) | `call` | `CallOutcome` | A call finished. |
+| `onLog` | `log` | `LogEvent` | The guest's console wrote a line, or a host function called `ctx.log`. |
+| `onGuestError` | `guestError` | `GuestErrorEvent` | Guest code had an uncaught exception or an unhandled rejection outside an eval's result. |
+| `onLimit` | `limit` | `LimitEvent` | A limit was reached. |
+| `onPolicyDenial` | `policyDenial` | `PolicyDenialEvent` | A `fetch`, `connect`, or `fs` operation was refused by its policy. |
+| `onProgramLoad` | `programLoad` | `ProgramLoadEvent` | A program instance loaded, or failed to. |
+| `onSecurityEvent` | `securityEvent` | `SecurityEvent` | A worker crashed, broke the protocol, or stopped responding. |
+| `onWorker` | `worker` | `WorkerEvent` | A tenant's worker started, is being recycled, or exited. |
+
+The `hostCall`, `eval`, and `call` events have no hook of their own; use the `after*` interceptor at a configuration level, or `runtime.on()`. Their payload carries the result after every `after*` interceptor has run.
+
+`onSecurityEvent` and `onWorker` concern a whole worker, so they fire only for hooks at the runtime, `defaults`, and tenant levels. Set at the call level, they never fire.
+
+### runtime.on
+
+```ts
+runtime.on(event: keyof RuntimeEvents, listener: (event) => void): () => void
+```
+
+Subscribes to an event from every tenant and isolate, and returns a function that unsubscribes. `listener` must be a function. When nothing intercepts or listens for `hostCall`, `eval`, or `call`, isolane skips building those payloads.
+
+## Payloads
+
+Every payload is a plain object. Fields marked optional are absent when they do not apply.
+
+### HostCallEvent and HostCallOutcome
+
+| Field | Type | Description |
+|---|---|---|
+| `tenant` | `string` | |
+| `isolate` | `number` | The calling isolate's id. |
+| `name` | `string` | The function's name, dotted for namespaces: `db.getUser`. |
+| `args` | `unknown[]` | The arguments. |
+| `result` | `unknown`, optional | Outcome only: what the function returned, when it did not throw. |
+| `error` | `unknown`, optional | Outcome only: what the function threw, unchanged, including its stack. |
+| `durationMs` | `number` | Outcome only. |
+
+### EvalEvent and EvalOutcome
+
+| Field | Type | Description |
+|---|---|---|
+| `tenant` | `string` | |
+| `isolate` | `number` | |
+| `code` | `string` | The code, as earlier `beforeEval` hooks left it. |
+| `filename` | `string` | The code's name in stack traces. |
+| `result` | `unknown`, optional | Outcome only, on success. |
+| `error` | `IsolaneError`, optional | Outcome only, on failure. |
+| `durationMs` | `number` | Outcome only. |
+
+### CallEvent and CallOutcome
+
+| Field | Type | Description |
+|---|---|---|
+| `tenant` | `string` | |
+| `isolate` | `number` | |
+| `program` | `number`, optional | The program, for a call to one of its instances. |
+| `name` | `string` | The function or handler called. `fetch` for `program.fetch`. |
+| `args` | `unknown[]` | |
+| `result` | `unknown`, optional | Outcome only, on success. |
+| `error` | `IsolaneError`, optional | Outcome only, on failure. |
+| `durationMs` | `number` | Outcome only. |
+
+### LogEvent
+
+| Field | Type | Description |
+|---|---|---|
+| `tenant` | `string` | |
+| `isolate` | `number`, optional | |
+| `program` | `number`, optional | |
+| `level` | `'log'`, `'info'`, `'debug'`, `'warn'`, or `'error'` | |
+| `message` | `string` | The formatted line, cut to `limits.logLineBytes`. |
+| `source` | `'guest'` or `'host'` | `guest` for the guest's console, `host` for `ctx.log` in a host function. |
+
+### GuestErrorEvent
+
+| Field | Type | Description |
+|---|---|---|
+| `tenant` | `string` | |
+| `isolate` | `number` | |
+| `program` | `number`, optional | |
+| `kind` | `'exception'` or `'rejection'` | An exception in a timer or task callback, or a promise rejected with no handler by the time its task's microtasks ran. |
+| `error` | `GuestErrorInfo` | Shaped like `err.guest`. See [Errors](/reference/errors#guesterrorinfo). |
+
+These errors do not fail an eval. They are also written to the guest's console as `Uncaught …` or `Uncaught (in promise) …`, and count against `logBytes`.
+
+### LimitEvent
+
+| Field | Type | Description |
+|---|---|---|
+| `tenant` | `string` | |
+| `isolate` | `number`, optional | |
+| `program` | `number`, optional | |
+| `limit` | `string` | The limit's name: a `limits` key such as `timeoutMs`, `instances.queue`, or a policy limit's path such as `fetch.limits.requests`. |
+| `message` | `string` | |
+
+### PolicyDenialEvent
+
+| Field | Type | Description |
+|---|---|---|
+| `tenant` | `string` | |
+| `isolate` | `number` | |
+| `program` | `number`, optional | |
+| `api` | `'fetch'`, `'connect'`, or `'fs'` | |
+| `target` | `string` | A URL without its `user:password@`, a `host:port`, or a guest path. |
+| `reason` | `string` | |
+
+Limits of a policy emit `onLimit`, not `onPolicyDenial`.
+
+### ProgramLoadEvent
+
+| Field | Type | Description |
+|---|---|---|
+| `tenant` | `string` | |
+| `program` | `number` | |
+| `isolate` | `number` | The instance's isolate. |
+| `filename` | `string` | The main module's path. |
+| `durationMs` | `number` | From creating the instance to the end of its setup. |
+| `modules` | `{ compiled, cached, rejected }`, optional | For a load that succeeded: how many code modules were compiled, how many of those came from the worker's code cache, and how many caches V8 rejected and compiled from source instead. |
+| `error` | `IsolaneError`, optional | Why the load failed. |
+
+### SecurityEvent
+
+| Field | Type | Description |
+|---|---|---|
+| `kind` | `'crash'`, `'protocol'`, or `'unresponsive'` | The worker died unexpectedly, sent a message that broke the protocol, or stopped answering and was killed. |
+| `tenant` | `string` | |
+| `quarantinedUntil` | `number`, optional | When the tenant's quarantine ends, in milliseconds since the epoch. Absent with `quarantineMs: null`. |
+| `detail` | `string` | The signal or exit code, and the end of the worker's stderr. |
+
+A worker that exits by itself, even with code 0, is treated as a crash, because the supervisor never lets a worker exit without killing it. Exits isolane caused, workers refused at start (by strict mode or a protocol version mismatch), and a worker running out of `workerMemoryBytes` are not security events.
+
+### WorkerEvent
+
+| Field | Type | Description |
+|---|---|---|
+| `tenant` | `string` | |
+| `kind` | `'start'`, `'recycle'`, or `'exit'` | `recycle`: the worker reached `workerLifetimeMs` or `workerEvals`. New isolates start on a fresh worker, and this one exits once it has drained. |
+| `pid` | `number`, optional | |
+| `reason` | `string`, optional | For `recycle` and `exit`: why, such as `idle`, `stopped`, `crashed`, or `out of memory`. |

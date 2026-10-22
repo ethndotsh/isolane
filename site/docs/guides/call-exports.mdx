@@ -1,0 +1,123 @@
+---
+title: Call a program's exports
+description: Invoke a loaded program's exported functions with data, validate what they return, and cancel slow calls.
+---
+
+This guide calls functions that a tenant's [program](/concepts/programs) exports, with arguments
+passed as data, and checks the results with a schema.
+
+## Load the program and call an export
+
+```js
+import { Runtime } from 'isolane';
+
+const runtime = new Runtime();
+const pricing = await runtime.tenant('acme').load(
+  `
+  import { env } from 'isolane:env';
+  const prices = new Map(Object.entries(env.prices));
+
+  export function quote(items) {
+    return { total: items.reduce((sum, i) => sum + prices.get(i.sku) * i.qty, 0) };
+  }
+
+  export default {
+    describe() {
+      return 'pricing v2, ' + prices.size + ' skus';
+    },
+  };
+  `,
+  { env: { prices: { apple: 3, pear: 5 } } },
+);
+
+await pricing.call('quote', [[{ sku: 'apple', qty: 2 }, { sku: 'pear', qty: 1 }]]);
+// { total: 11 }
+await pricing.call('describe');
+// 'pricing v2, 2 skus'
+```
+
+The module's top-level code, which builds `prices` here, runs once per
+instance. Each call then runs only the function. `call(name, args)` looks
+for a named export called `name` first, then for a method of that name on
+the default export, which it calls with the default export as `this`.
+Methods that every object inherits, such as `toString`, are not handlers.
+
+## Pass arguments as data
+
+`args` is an array, and each element is copied into the guest as JSON.
+Nothing you pass is compiled, so a value taken from a request cannot
+become code.
+
+- Objects, arrays, strings, numbers, booleans, and `null` arrive unchanged.
+- `undefined` arrives as `null`, and a `Date` arrives as its ISO string.
+- An `ArrayBuffer` or typed array at the top level of `args` arrives as a
+  `Uint8Array`. Nested inside an object, it is converted to JSON like any
+  other object.
+
+Results come back the same way. A handler that returns bytes resolves to a
+`Uint8Array`:
+
+```js
+const head = await images.call('thumbnail', [new Uint8Array(fileBytes)]);
+head instanceof Uint8Array; // true
+```
+
+## Check the result with a schema
+
+`returns` takes any [Standard Schema](https://standardschema.dev), such as a
+Zod, Valibot, or ArkType schema. The result is typed by it, and a value
+that does not match fails the call with `ERR_INVALID_RETURN`:
+
+```js
+import { z } from 'zod';
+
+const Quote = z.object({ total: z.number().int() });
+
+const { total } = await pricing.call('quote', [[{ sku: 'apple', qty: 1 }]], { returns: Quote });
+
+try {
+  await pricing.call('quote', [[{ sku: 'kiwi', qty: 1 }]], { returns: Quote });
+} catch (err) {
+  err.code; // 'ERR_INVALID_RETURN'
+  err.issues[0].message; // 'Invalid input: expected number, received null'
+}
+```
+
+The unknown SKU makes the total `NaN`, which JSON turns into `null`, and the
+schema refuses it. Validate every result whose shape your code relies on:
+the guest decides what its functions return.
+
+## Cancel a call
+
+`signal` takes an `AbortSignal`. A call aborted while it runs rejects with
+`ERR_ABORTED`, and its instance is retired and replaced, because the
+handler was stopped part-way. A call aborted while it waits for an instance
+is removed from the queue and nothing is retired.
+
+```js
+await pricing.call('rebuildIndex', [], { signal: AbortSignal.timeout(500) });
+```
+
+Prefer `limits.timeoutMs` for a bound that applies to every call. Use
+`signal` when the caller stops waiting, for example when an HTTP client
+disconnects.
+
+## What a failed call means
+
+| Code | Cause | Instance afterwards |
+|---|---|---|
+| `ERR_GUEST_EXCEPTION` | The function threw or its promise rejected; `err.guest` has the name, message, and stack | Stays in service, state kept |
+| `ERR_HANDLER_NOT_FOUND` | No export or default-export method has that name | Stays in service |
+| `ERR_INVALID_RETURN` | The result does not match `returns`; see `err.issues` | Stays in service |
+| `ERR_NOT_SERIALIZABLE` | The result cannot be converted to JSON, such as a `BigInt` (a function becomes `null`, as in `JSON.stringify`) | Stays in service |
+| `ERR_LIMIT` with `timeoutMs`, `cpuMs`, or `heapBytes` | The call was stopped part-way | Retired and replaced |
+| `ERR_ABORTED` | Your `signal` aborted it | Retired if it was running |
+| `ERR_LIMIT` with `instances.queueMs` or `instances.queue` | Every instance was busy for too long, or too many calls were waiting | Not affected |
+
+## When `call` reports `ERR_HANDLER_NOT_FOUND` for a function that exists
+
+Only exports are handlers. A function declared in the module but not
+exported, or exported under another name, is not found. For a module that
+exports a class, export an instance, `export default new Api()`, since the
+class's methods are on its prototype and the class itself has only static
+methods.

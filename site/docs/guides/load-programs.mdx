@@ -1,0 +1,151 @@
+---
+title: Load multi-file programs
+description: Load a tenant's TypeScript, JSX, and npm packages as a program, from its files or from a bundle, with errors that point at the original sources.
+---
+
+`tenant.load` takes a program as its files, and the worker resolves and compiles them. Use the files directly when a tenant uploads source, and a bundle when you build it first. Both give the same `Program`.
+
+## Load files from a directory
+
+Pass every file the program needs, by path relative to the program's root. This helper reads a tenant's sources and the packages it imports, keeping only files the worker can load:
+
+```js
+import { readdir, readFile } from 'node:fs/promises';
+import { join, relative } from 'node:path';
+
+const LOADABLE = /\.(js|mjs|ts|mts|tsx|jsx|json)$/;
+const TYPES_OR_COMMONJS = /\.d\.[cm]?ts$|\.cjs$/;
+
+async function readTree(root, dir = root, files = {}) {
+  for (const entry of await readdir(dir, { withFileTypes: true })) {
+    const path = join(dir, entry.name);
+    if (entry.isDirectory()) await readTree(root, path, files);
+    else if (LOADABLE.test(entry.name) && !TYPES_OR_COMMONJS.test(entry.name)) {
+      files[relative(root, path)] = await readFile(path, 'utf8');
+    }
+  }
+  return files;
+}
+
+const root = '/srv/apps/acme';
+const files = {
+  ...(await readTree(root, join(root, 'src'))),
+  ...(await readTree(root, join(root, 'node_modules/zod'))),
+};
+
+const program = await runtime.tenant('acme').load({ main: 'src/index.ts', files });
+```
+
+```ts src/index.ts
+import { z } from 'zod';
+
+const Order = z.object({ id: z.string(), total: z.number().nonnegative() });
+
+export function check(input: unknown) {
+  return Order.parse(input);
+}
+```
+
+```js
+await program.call('check', [{ id: 'A-1', total: 12 }]); // { id: 'A-1', total: 12 }
+```
+
+Imports resolve over these files only. `zod` resolves to `node_modules/zod` by its `package.json`, with the export conditions `workerd`, `worker`, `browser`, `import`, and `default`, so a package with a Workers build gets that build. A file the program imports but you didn't pass fails the load with `Cannot find module`. [Modules](/reference/modules#resolution) has the full rules.
+
+A program has at most 1,000 files and 32 MiB by default. The example above is 138 files and about 1 MB. Raise [`limits.modules` and `limits.moduleBytes`](/reference/limits) for larger programs, up to 64 MiB, or bundle them.
+
+## Use TypeScript
+
+`.ts`, `.mts`, and `.tsx` files are compiled in the worker. By default only types are removed, as Node.js does it, and nothing is type-checked. TypeScript syntax with runtime behaviour, such as an `enum`, fails the load:
+
+```
+SyntaxError: An enum is not erasable TypeScript: it has runtime behaviour, which type stripping can't keep. Load the program with ts: { mode: 'transform' } to compile it
+```
+
+Load such programs with `ts: { mode: 'transform' }`. Legacy decorators also need `experimentalDecorators: true`:
+
+```js
+await tenant.load({ main: 'src/index.ts', files }, { ts: { mode: 'transform', experimentalDecorators: true } });
+```
+
+Run `tsc --noEmit` in your build pipeline if you want type errors to stop a deployment; isolane doesn't check them.
+
+## Use JSX
+
+`.jsx` and `.tsx` files compile with the automatic runtime from `react/jsx-runtime`, which must be among the program's files. For another library, name its package:
+
+```js
+await tenant.load({ main: 'src/index.tsx', files }, { jsx: { importSource: 'hono/jsx' } });
+```
+
+`jsx: { runtime: 'classic', factory: 'h', fragment: 'Fragment' }` calls a factory in scope instead.
+
+## Replace Node.js modules
+
+Programs have no Node.js built-in modules. An import of one fails the load:
+
+```
+TypeError: Cannot import "node:events" from src/bus.js: isolane has no Node.js built-in modules; give the program one with the modules option ({ 'node:x': './x.js' })
+```
+
+Point the specifier at a file of the program, or at a package in its files:
+
+```js
+await tenant.load({ main: 'src/index.js', files }, {
+  modules: {
+    'node:events': './shims/events.js',
+    'node:path': 'pathe', // an ES module package, under node_modules/pathe
+  },
+});
+```
+
+A package named this way must be an ES module. Many Node.js polyfills, such as npm's `buffer`, are CommonJS; bundle those.
+
+## Load a bundle
+
+Bundling suits CommonJS dependencies, programs past the module limits, and build pipelines that already produce one file. Target ES modules and the Workers conditions, as for Cloudflare Workers:
+
+```sh
+npx esbuild src/index.ts --bundle --format=esm --platform=neutral \
+  --conditions=workerd,worker,browser --main-fields=browser,module,main \
+  --external:isolane:env --external:cloudflare:sockets \
+  --sourcemap --outfile=dist/index.js
+```
+
+```js
+await tenant.load({
+  main: 'dist/index.js',
+  files: {
+    'dist/index.js': await readFile('dist/index.js', 'utf8'),
+    'dist/index.js.map': await readFile('dist/index.js.map', 'utf8'),
+  },
+});
+```
+
+Keep `isolane:env`, `cloudflare:sockets`, and any host modules external, since the worker provides them. Rolldown takes the same settings, as `platform: 'neutral'` and `resolve.conditionNames`. [Connecting to databases](/guides/sockets#run-postgresjs-in-a-program) bundles postgres.js this way.
+
+## Read errors
+
+Errors from the program point at its original files. A load that fails at setup, and a call whose handler throws, carry the location in `err.guest`:
+
+```js
+try {
+  await program.call('check', [{ id: 'A-1', total: -1 }]);
+} catch (err) {
+  err.code;             // 'ERR_GUEST_EXCEPTION'
+  err.guest.name;       // 'ZodError'
+  err.guest.frames[0];  // { function: 'check', file: 'src/index.ts', line: 6, column: 16 }
+}
+```
+
+The worker maps positions through the source maps of files it transformed, and through a bundle's map, found by its `//# sourceMappingURL=` comment or as a `.map` file beside it. Pass the map in `files` for bundles.
+
+## Common failures
+
+| Error | Cause |
+|---|---|
+| `The requested module 'x' does not provide an export named 'default'` | The package is CommonJS. Bundle it. |
+| `Cannot find module "./routes" imported from src/index.ts` | The file wasn't passed in `files`, or its extension isn't one the resolver tries |
+| `ERR_LIMIT` with `err.limit` `modules` or `moduleBytes` | Too many files, or too large. Raise the limit or bundle. |
+| `ERR_SETUP_IO` | Top-level code called `fetch`, `connect()`, `fs`, or a host function. Move the call into a handler. |
+| `ERR_INVALID_CONFIG`, `source.main must be one of source.files` | `main` doesn't name a file in `files` |

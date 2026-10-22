@@ -1,0 +1,14 @@
+{
+  "name": "isolane-docs",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "blume dev",
+    "build": "blume build",
+    "doctor": "blume doctor",
+    "validate": "blume validate"
+  },
+  "devDependencies": {
+    "blume": "2.2.3"
+  }
+}

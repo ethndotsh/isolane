@@ -1,0 +1,123 @@
+---
+title: Connect to databases over TCP
+description: Give guest code TCP and TLS sockets with a connect policy, and run a Postgres driver written for Cloudflare Workers.
+---
+
+A `connect` policy gives guest code the Sockets API of Cloudflare Workers: the global `connect()`, and `cloudflare:sockets` in programs. Drivers with a Workers build, such as postgres.js, run on it unchanged. Your process checks every connection against the policy and makes it.
+
+## Allow a host and port
+
+Every pattern names a port, or `*` for any port:
+
+```js
+connect: { hosts: ['db.example.com:5432', '*.redis.example.com:6380'] }
+```
+
+A raw socket, from a script. Scripts have no top-level `await`, so the code is an async function whose promise is the result:
+
+```js
+const reply = await acme.run(
+  `(async () => {
+     const socket = connect('echo.example.com:7');
+     const writer = socket.writable.getWriter();
+     await writer.write(new TextEncoder().encode('ping'));
+     await writer.close();
+     let text = '';
+     for await (const chunk of socket.readable) text += new TextDecoder().decode(chunk);
+     return text;
+   })()`,
+  { connect: { hosts: ['echo.example.com:7'] } },
+);
+```
+
+[Guest environment](/reference/guest-environment#sockets) describes `Socket` and its options.
+
+## Run postgres.js in a program
+
+postgres.js's Workers build imports `connect` from `cloudflare:sockets`, which programs have built in, and `node:buffer` and `node:events`, which they don't. Bundle it with esbuild, with the npm `buffer` and `events` packages in place of the Node.js modules:
+
+```sh
+npm install postgres buffer events
+echo 'export default {};' > stream-stub.js
+npx esbuild src/index.js --bundle --format=esm --platform=neutral \
+  --conditions=workerd,worker,browser --main-fields=browser,module,main \
+  --external:cloudflare:sockets --external:isolane:env \
+  --alias:node:buffer=buffer --alias:node:events=events --alias:node:stream=./stream-stub.js \
+  --sourcemap --outfile=dist/index.js
+```
+
+`node:stream` is used only for `COPY` and large objects, so a stub is enough for queries.
+
+```js src/index.js
+import postgres from 'postgres';
+import { env } from 'isolane:env';
+
+const sql = postgres(env.DATABASE_URL, { max: 1 });
+
+export default {
+  async fetch(request) {
+    const [{ now }] = await sql`select now()::text as now`;
+    return Response.json({ now });
+  },
+};
+```
+
+Creating the client at the top level is allowed, because postgres.js connects lazily, on its first query. The connection then stays open across calls to the same instance.
+
+```js
+import { readFile } from 'node:fs/promises';
+
+const program = await runtime.tenant('acme').load(
+  {
+    main: 'dist/index.js',
+    files: {
+      'dist/index.js': await readFile('dist/index.js', 'utf8'),
+      'dist/index.js.map': await readFile('dist/index.js.map', 'utf8'),
+    },
+  },
+  {
+    env: { DATABASE_URL: process.env.ACME_DATABASE_URL },
+    connect: { hosts: ['db.example.com:5432'] },
+  },
+);
+
+const res = await program.fetch('https://acme.example/');
+await res.json(); // { now: '2026-10-22 10:36:01.66381-07' }
+```
+
+postgres.js authenticates with SCRAM-SHA-256 inside the guest, using `crypto.subtle`. The `env` value is visible to the guest, so give each tenant credentials for its own database or role only.
+
+## Use TLS
+
+Set `ssl` in the driver, or `secureTransport` on a raw socket. The server's certificate is checked against Node.js's default roots and the hostname connected to. A managed database with its own certificate authority needs `ca`:
+
+```js
+connect: {
+  hosts: ['acme.db.example.net:5432'],
+  ca: await readFile('/etc/ssl/db-provider-ca.pem', 'utf8'),
+}
+```
+
+`ca` replaces the default roots for that isolate. Postgres negotiates TLS on the plain connection first, which the driver does with `secureTransport: 'starttls'` and `startTls()`. isolane refuses the upgrade if the server sent bytes the guest hasn't read, since they could have been injected before the handshake.
+
+## Reach a database on your network
+
+Private and loopback addresses are refused unless the policy says otherwise, so a database on `10.0.0.5` or `127.0.0.1` needs:
+
+```js
+connect: { hosts: ['10.0.0.5:5432'], privateNetworks: true }
+```
+
+## Limits
+
+An isolate has at most 8 sockets open at once by default, closes a socket after 60 s without traffic, and transfers at most 1 GiB over its life across all sockets. With a warm program, one instance holds its connections between calls, so `connections` bounds each instance's pool. [Capabilities](/reference/capabilities#connect) lists the limits.
+
+## Common failures
+
+| Error in the guest | Cause |
+|---|---|
+| `connect to db.example.com:5432 is not allowed by the connect policy` | The host and port aren't in `hosts` |
+| `connect to 127.0.0.1:5432 is not allowed: not a public address` | `privateNetworks` is off |
+| `connect: the address must be "hostname:port"` | The address has no port |
+| `TypeError` from `cloudflare:sockets`' `connect`, saying the program has no connect policy | The program was loaded without `connect` |
+| `ERR_SETUP_IO` when loading | The driver connected during setup. Query from a handler. |

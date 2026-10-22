@@ -1,0 +1,157 @@
+---
+title: Programs
+description: How a program's setup differs from its calls, how its instances are pooled, and when an instance is thrown away.
+---
+
+## Load once, call many times
+
+A program is an ES module, or a tree of them, that `tenant.load()` loads
+into isolates and keeps there. Each isolate that has evaluated the module
+is an instance. Calls go to instances that already hold the module's
+state: its imports resolved, its top-level code run, its functions
+compiled and, after a few calls, optimized. That is the difference from
+`tenant.run()`, which parses, compiles, and evaluates its code in a fresh
+isolate every time and then throws the isolate away.
+
+The model follows the platforms that run tenant code at scale. Cloudflare
+Workers, Deno, Bun, and Val Town all accept a module whose default export
+has a `fetch(request, env, ctx)` handler, and isolane's `program.fetch`
+calls that handler the same way. `program.call` invokes any other export
+by name, with JSON arguments. A program's lifetime therefore has two
+phases with different rules: setup, which runs once per instance, and
+calls, which run many times.
+
+## Setup
+
+Setup is the evaluation of the program's modules: everything at their top
+level. It runs once per instance, when the instance is created, and the
+first instance's setup runs before `load` resolves. A syntax error or an
+exception at the top level rejects `load` itself, with the location in
+`err.guest`, so a broken program fails when it is deployed rather than on
+its first request.
+
+Setup has its own CPU budget, `startupCpuMs` (one second by default, Linux
+only), in place of the per-call `cpuMs`, with `timeoutMs` as its wall
+clock. The separate budget exists because setup and calls have different
+costs. Building routing tables, compiling schemas, and parsing
+configuration are legitimately heavier than a typical request, and a
+platform needs to bound them separately. Cloudflare Workers draws the same
+line, with one second of CPU for a Worker's global scope.
+
+Setup cannot do I/O. `fetch`, `connect()`, the `fs` API, and host
+functions throw an error with code `ERR_SETUP_IO` while the modules
+evaluate, and a setup that fails after one of those rejects `load` with
+`ERR_SETUP_IO`. There are three reasons for the rule. Setup runs
+whenever the pool creates an instance, which can be in the middle of
+serving traffic, at times the program does not choose, so I/O there would
+happen at unpredictable moments and multiply with the instance count. A
+setup that waits on the network makes every new instance as slow as that
+network, which defeats the point of keeping instances warm. And setup
+that depends on outside state makes two instances of the same program
+differ, which makes failures hard to reproduce. Timers are allowed, and so
+are clients that connect lazily on their first query: they make their
+connection during the first call and keep it from call to call.
+
+Configuration that setup needs arrives as data instead. The `env` option
+is a JSON object that the program imports from `isolane:env`, and the
+program's host functions are mounted on it, so setup can read
+configuration and capture function references without calling anything.
+
+## Calls
+
+A call is one `program.call` or `program.fetch`. For limits and the clock
+it is an eval: `timeoutMs`, `cpuMs`, `hostCalls`, and `logBytes` apply to
+each call, and the frozen clock advances when the call starts. A call
+finishes when the handler's returned value or promise settles. Work the
+handler leaves running, such as timers or promises passed to
+`ctx.waitUntil`, continues between calls under `backgroundMs`.
+
+The handler is found by name. `program.call('stats')` calls the named
+export `stats` if there is one, and otherwise a method `stats` of the
+default export, with the default export as `this`. That second rule is
+what lets `export default { fetch }`, a class instance, or a framework
+application object work without wrapping. Methods every object inherits,
+such as `toString`, are not handlers. A name the program does not provide
+fails with `ERR_HANDLER_NOT_FOUND` and leaves the instance in service.
+
+## Instances and the pool
+
+Each program has a pool of instances, configured with `instances`. By
+default instances are reused (`reuse: true`): each serves call after call,
+so module state persists between them. That is what makes a warm call
+cheap, and it also means a value one call leaves in a module variable is
+there for the next call on that instance. For guest code that serves end
+users who must not share state, `reuse: false` gives every call a fresh
+instance, which is safer and slower.
+
+The pool starts instances as calls need them, up to `max` (four by
+default), and keeps at least `min` (none by default) loaded even when
+idle. An instance idle for `idleMs` (30 seconds) is closed, down to `min`,
+once its `ctx.waitUntil` work is done. When every instance is busy and the
+pool is at `max`, a call waits, for at most `queueMs` (ten seconds) and
+behind at most `queue` (1,000) other calls; past either, it fails with
+`ERR_LIMIT`. The queue protects the worker: without it a burst of calls
+would create isolates until the tenant's memory ran out.
+
+Instances of one program run in the tenant's worker and share it with the
+tenant's other isolates. A later instance is cheaper than the first,
+because the worker keeps the program's files and V8 code caches of its
+modules; see [caches](/concepts/caches).
+
+## When an instance is retired
+
+An instance stays in service when its handler throws: the call rejects
+with `ERR_GUEST_EXCEPTION`, and the next call gets the same instance. A
+thrown exception unwinds the handler's own stack, so the module's state is
+whatever the program left it in, which is the program's responsibility.
+
+An instance is retired when something outside the program stopped it
+part-way: its call reached `timeoutMs` or `cpuMs`, the call's abort
+signal fired, the isolate ran out of heap, its background work used up
+`backgroundMs`, or its worker was recycled. Termination can land on any
+instruction, including in the middle of an update the module expected to
+finish, so the module's state can no longer be trusted. The pool replaces
+the instance, and calls waiting for one go to the replacement. Stateful
+isolates follow the same rule; their later evals fail with
+`ERR_ISOLATE_RETIRED`, which is `retryable` on a new isolate.
+
+## Concurrency
+
+By default an instance runs one call at a time (`concurrency: 1`). Each
+call then has the instance to itself, and its CPU time, host calls, and
+log output are its own. Handlers that mostly wait on I/O can share an
+instance: with `concurrency` above 1, an instance runs up to that many
+calls at once on its event loop. A call goes to an idle instance first,
+then to the least busy instance with room, and a new instance is loaded
+only when every instance is full.
+
+Calls in one instance share its thread, so isolane cannot tell their CPU
+time apart. The budgets that count, `cpuMs`, `hostCalls`, and `logBytes`,
+become the instance's while it has calls in flight: each grows by its
+amount for every call that starts while others run. Each call keeps its
+own `timeoutMs`, measured from when it started. When one call is stopped
+part-way, by its timeout, the shared CPU budget, its signal, or the heap
+limit, every call in the instance stops and the instance is retired. The
+call that hit the limit fails with it, and the others fail with
+`ERR_ISOLATE_RETIRED`, not `retryable`, because they may have done part
+of their work.
+
+The shared event loop has a consequence that is defined behaviour, not a
+fault. A call that blocks the loop, in a synchronous loop or a long
+computation, holds up every other call in the instance, including calls
+whose own work is finished and only need the loop to send their results.
+Those calls reach their own `timeoutMs` while they wait, so one stuck
+call can make every call in its instance fail with `timeoutMs`, and the
+ones not yet at their deadline with `ERR_ISOLATE_RETIRED`. Concurrency
+suits handlers that wait on I/O. A program whose handlers may compute for
+long should keep `concurrency` at 1, where a call's timeout fails only
+that call.
+
+## Closing
+
+`program.close()` refuses new calls and queued ones with
+`ERR_PROGRAM_CLOSED`, waits for the calls already running and for their
+`ctx.waitUntil` work, and closes the instances. Loaded code is immutable:
+to deploy a new version, load it as a new program, move traffic to it,
+and close the old one. The [serverless tutorial](/tutorials/serverless-platform)
+does exactly that.

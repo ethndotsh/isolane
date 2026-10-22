@@ -1,0 +1,158 @@
+---
+title: Program
+description: "tenant.load(), its options, and the Program it returns: call, fetch, usage, and close."
+---
+
+## tenant.load
+
+```ts
+tenant.load(source: string | ProgramSource, options?: LoadOptions): Promise<Program>
+```
+
+Loads a program and resolves once its first instance has evaluated the main module. A syntax error, an import that does not resolve, or an exception in top-level code rejects `load` itself, with `err.guest` saying where. Invalid options reject with `ERR_INVALID_CONFIG`.
+
+| Parameter | Description |
+|---|---|
+| `source` | An ES module's code, as a string, or `{ main, files }`: `main` is the entry module's path and `files` maps paths to file contents, each a string or a `Uint8Array`. The bytes are copied, so changing them later does not change the program. Path and resolution rules are on the [Modules](/reference/modules) page. |
+| `options` | An `IsolateConfig` for the program's instances, plus the program options below. |
+
+A program is immutable. To deploy a new version, load it and close the old one.
+
+## Load options
+
+`LoadOptions` extends `IsolateConfig`, so `limits`, `web`, `fetch`, `connect`, `fs`, `host`, `hooks`, `shims`, and the rest apply to every instance, layered over the runtime's `defaults` and the tenant's configuration as described on the [Configuration](/reference/configuration) page. These options are the program's own:
+
+| Option | Type | Default | Description |
+|---|---|---|---|
+| `filename` | `string` | `main.js` | For a single-module source: its path, and its name in stack traces. |
+| `env` | object | `{}` | A JSON object the program imports as `import { env } from 'isolane:env'`. See [env](#env). |
+| `instances` | `InstancesOptions` | see below | How instances are kept. |
+| `modules` | object | none | Specifiers resolved to a program file, another specifier, or host functions. See [Modules](/reference/modules). |
+| `ts` | `TsOptions` | `{ mode: 'strip' }` | How TypeScript is compiled. See [Modules](/reference/modules). |
+| `jsx` | `JsxOptions` | automatic runtime from `react` | How JSX is compiled. See [Modules](/reference/modules). |
+| `define` | `Record<string, string>` | none | Compile-time constants, as in esbuild. See [Modules](/reference/modules). |
+
+### env
+
+`env` must be a JSON-serializable object; it is copied when `load` is called. The program's `host` functions are mounted in it instead of on the global, so `host: { db: { getUser } }` is `env.db.getUser(1)` in the program. A key of `env` that is also the first segment of a host function's name is refused with `ERR_INVALID_CONFIG`.
+
+### instances
+
+| Field | Range | Default | Description |
+|---|---|---|---|
+| `reuse` | boolean | `true` | Keep instances warm: each serves call after call, and module state persists between calls. With `false`, every call gets a fresh instance that is used once. |
+| `min` | 0 to 10,000 | 0 | Instances kept loaded and ready, even when idle. At most `max`. |
+| `max` | 1 to 10,000 | 4 | The most instances at once. |
+| `concurrency` | 1 to 1,000 | 1 | Calls one instance runs at once. Above 1 requires `reuse`. See [Concurrency](#concurrency). |
+| `idleMs` | 1 to 2^31 - 1 | 30,000 | Close an instance idle this long, while there are more than `min`. |
+| `queue` | 0 to 1,000,000 | 1,000 | The most calls waiting for an instance at once. Another fails at once with `ERR_LIMIT`, `err.limit` `'instances.queue'`. |
+| `queueMs` | 0 to 2^31 - 1 | 10,000 | The longest a call waits for a free instance. Then it fails with `ERR_LIMIT`, `err.limit` `'instances.queueMs'`. |
+
+A call goes to an idle instance if there is one. With `concurrency` above 1, it goes next to the least busy instance with room. Otherwise the program loads a new instance, up to `max`, and calls that arrive while it loads may share it. When every instance is full, the call waits in the queue.
+
+## Setup
+
+Evaluating the main module and its imports is the instance's setup. It runs once per instance, with these rules:
+
+| Rule | Description |
+|---|---|
+| CPU | `limits.startupCpuMs` (default 1 s, Linux only) applies in place of `cpuMs`. |
+| Wall clock | `limits.timeoutMs`. |
+| No I/O | `fetch`, `connect()`, `fs`, and host functions throw an error with `code: 'ERR_SETUP_IO'`. If setup then fails, `load` rejects with `ERR_SETUP_IO`, kind `guest`. |
+| Clock | Advances when setup starts. |
+
+Timers work during setup. A client that connects on its first query, rather than at construction, works, and keeps its connection between calls. [Programs](/concepts/programs) explains the reasons for these rules.
+
+## Program
+
+| Member | Returns | Description |
+|---|---|---|
+| `tenant` | `string` | The tenant's name. |
+| `id` | `number` | The program's id, unique within the runtime. Events from its instances carry it as `program`. |
+| `call(name, args?, options?)` | `Promise` | Calls a handler. See [call](#call). |
+| `fetch(input, init?)` | `Promise<Response>` | Sends a request to the fetch handler. See [fetch](#fetch). |
+| `usage()` | `ProgramUsage` | What the program has used, and its pool now. See [usage](#usage). |
+| `close()` | `Promise<void>` | See [close](#close). |
+| `[Symbol.asyncDispose]()` | `Promise<void>` | Calls `close()`, for `await using`. |
+
+### Handler resolution
+
+`call(name)` and `fetch` find the handler the same way:
+
+1. A named export called `name`.
+2. Otherwise, a method called `name` of the default export, called with the default export as `this`. This covers `export default { fetch }`, a class instance, and an app object such as Hono's. Methods every object inherits, such as `toString`, are not handlers.
+
+A name that matches neither fails with `ERR_HANDLER_NOT_FOUND`, kind `guest`, and leaves the instance in service.
+
+### call
+
+```ts
+program.call(name: string, args?: unknown[], options?: { returns?, signal? }): Promise<unknown>
+```
+
+Arguments, the result, `returns`, and `signal` work as for [`isolate.call`](/reference/runtime#calls). Each call is budgeted as an eval.
+
+### fetch
+
+```ts
+program.fetch(input: Request | string | URL, init?: RequestInit): Promise<Response>
+```
+
+Calls the program's handler as Cloudflare Workers does: `fetch(request, env, ctx)`. `input` and `init` are what the global `fetch` takes.
+
+| Argument | Description |
+|---|---|
+| `request` | A spec `Request` in the guest, with the URL, method, headers, and body of the one passed in. |
+| `env` | The object `isolane:env` exports. |
+| `ctx.waitUntil(promise)` | Keeps work running after the response. The work runs between calls under `backgroundMs`. A rejection is reported like an unhandled one, through `onGuestError`. Closing the instance, by `close()`, `idleMs`, or `reuse: false`, waits for the work, within `timeoutMs`. |
+
+Both the request body and the response body are buffered whole, at most `limits.bodyBytes` each (default 16 MiB). A larger body fails the call with `ERR_LIMIT`, `err.limit` `'bodyBytes'`, and leaves the instance in service. The request's `signal` stops the call as an eval's signal does. A handler that throws, or returns anything but a `Response`, fails with `ERR_GUEST_EXCEPTION`.
+
+`fetch` needs the web platform. With `web: false` it throws `ERR_INVALID_CONFIG`.
+
+The call hooks see a fetch as a call named `fetch` whose one argument is the `Request` and whose result is the `Response`. A `beforeCall` hook may replace the request with another `Request`, and an `afterCall` hook may replace the response with another `Response`.
+
+### Failures and retirement
+
+A handler that throws fails with `ERR_GUEST_EXCEPTION`, and its instance stays in service. A call stopped part-way, by `timeoutMs`, `cpuMs`, or its signal, retires its instance, as running out of heap, `backgroundMs`, and worker recycling do. The program replaces a retired instance, and waiting calls go to the replacement.
+
+If an instance refuses a call before running it, because it was retired just before, the program sends the call to another instance once. The retry is not counted in `usage().calls`.
+
+### Concurrency
+
+With `instances.concurrency` above 1, an instance runs several calls at once on one event loop.
+
+| Aspect | Behaviour |
+|---|---|
+| Wall clock | Each call has its own `timeoutMs`, from when it starts. |
+| Clock | Advances when each call starts, so one call can see time move when another begins. |
+| `cpuMs`, `hostCalls`, `logBytes` | Shared by the instance while it has calls running. Each budget grows by its amount for every call that starts while others run. Once a count limit is hit, every call that finishes before the instance goes idle fails with it. |
+| A call stopped part-way | Stops every call in the instance and retires it. The calls that hit the limit fail with it. The others fail with `ERR_ISOLATE_RETIRED`, with `retryable` false, because they may have done part of their work. |
+| A call that blocks the event loop | Holds up every call in the instance, including calls whose work is done. Those reach their own `timeoutMs`, so one stuck call can fail every call in its instance with `timeoutMs`, and the ones not yet at their deadline with `ERR_ISOLATE_RETIRED`. |
+
+The last row is defined behaviour. Use `concurrency: 1` for handlers that may compute for long.
+
+### usage
+
+`program.usage()` returns a new object each time.
+
+| Field | Description |
+|---|---|
+| `calls` | Calls made, including fetches, and calls that were refused or stopped. |
+| `failures` | Calls that failed. |
+| `loads` | Instances loaded so far, including failed loads. |
+| `loadFailures` | Loads that failed. |
+| `instances` | Instances live now. |
+| `busy` | Live instances running at least one call. |
+| `queued` | Calls waiting for an instance now. |
+| `cpuMs` | CPU time of the instances: setup, calls, and work between calls. Linux only; 0 elsewhere. |
+
+These figures are reported by the worker, as `tenant.usage()` is. See [Usage](/reference/usage#trust).
+
+### close
+
+`close()` stops taking calls. Calls made after it, and calls still waiting in the queue, fail with `ERR_PROGRAM_CLOSED`. It then waits for running calls to finish and for the instances' `ctx.waitUntil` work, and closes the instances. It is idempotent and returns the same promise each time.
+
+## Events
+
+Events from a program's instances (`call`, `log`, `limit`, `guestError`, `policyDenial`) carry the program's `id` as `program`. `onProgramLoad` reports each instance's load. See [Hooks](/reference/hooks#onprogramload).

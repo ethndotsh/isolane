@@ -1,0 +1,33 @@
+---
+title: Usage
+description: "The fields of tenant.usage() and program.usage(), their units, and which of them a compromised worker could misreport."
+---
+
+## tenant.usage
+
+`tenant.usage()` returns a copy of a `TenantUsage`: what the tenant has used since its first isolate, or since its last `resetUsage()`. It covers every worker the tenant has had in that time, including recycled ones.
+
+| Field | Unit | Source | Description |
+|---|---|---|---|
+| `evals` | count | worker | Evals and calls, including program calls and instance loads. |
+| `failures` | count | worker | Evals and calls that failed, for any reason. |
+| `cpuMs` | ms | worker | CPU time on the tenant's isolate threads: evals, calls, and work between them. 0 on macOS. |
+| `workerCpuMs` | ms | kernel | CPU time of the tenant's worker processes, every thread, user and system. Linux only; absent elsewhere. |
+| `hostCalls` | count | worker | Host calls, including those isolane's own `fetch`, `connect`, and `fs` make. |
+| `logBytes` | bytes | worker | Guest console output delivered to `onLog`, after the log limits cut it. `ctx.log` from host functions is not counted. |
+| `peakMemoryBytes` | bytes | worker | The largest V8 heap, plus external memory, that any of the tenant's isolates reported. |
+| `securityEvents` | count | supervisor | Security events: crashes, protocol violations, and unresponsive workers. |
+
+`tenant.resetUsage()` sets every field to zero. A live worker keeps counting into the reset figures. An idle tenant's entry is removed, so the next `usage()` returns zeros.
+
+### workerCpuMs
+
+The supervisor reads `workerCpuMs` from the kernel, in `/proc/<pid>/stat`, in steps of 10 ms. It includes the worker's own work besides guest code, such as V8's compiler and garbage collector threads and its startup, so it is somewhat more than `cpuMs`. It is read every 5 seconds, when `usage()` is called, and when a worker is stopped. A worker that crashes loses at most its last 5 seconds.
+
+## program.usage
+
+`program.usage()` returns a `ProgramUsage`. Its fields are listed on the [Program](/reference/program#usage) page. Its `cpuMs` is worker-reported, as the tenant's is.
+
+## Trust
+
+Every figure marked "worker" is reported by the tenant's worker process. The figures are accurate unless guest code has compromised the worker, which could then report anything. They suit metrics, dashboards, and quotas. For billing that must hold against a hostile tenant, use `workerCpuMs`, which the worker cannot understate. [Bill tenants for usage](/guides/usage-and-billing) shows both.

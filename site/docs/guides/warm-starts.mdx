@@ -1,0 +1,147 @@
+---
+title: Tune warm starts
+description: Size a program's instance pool, keep instances and spare workers ready, and set what each worker caches, then measure the result.
+---
+
+This guide reduces the time a call waits before it runs: the time to start
+a [worker](/concepts/architecture), create an isolate, and load a program's
+modules. It uses
+`instances` on each program and three runtime options, `spares`,
+`spareIsolates`, and `caches`.
+
+## Measure first
+
+Each program instance's load is reported to `onProgramLoad`:
+
+```js
+const runtime = new Runtime({
+  hooks: {
+    onProgramLoad: ({ tenant, program, durationMs, modules, error }) => {
+      console.log(tenant, program, durationMs.toFixed(1), modules, error?.code);
+    },
+  },
+});
+```
+
+```text
+acme 1 11.2 { compiled: 1, cached: 0, rejected: 0 }
+acme 1 3.5 { compiled: 1, cached: 0, rejected: 0 }
+acme 1 2.7 { compiled: 1, cached: 1, rejected: 0 }
+```
+
+The first line is the program's first instance, which `tenant.load()`
+waits for. Later instances find the program's files already in the
+worker, and once the first instance has finished, they also find V8 code
+caches of its modules: `cached` counts the modules compiled from one.
+`program.usage()` shows the pool as it is now: `instances`, `busy`, and
+`queued`.
+
+## Size the pool
+
+```js
+const program = await tenant.load(source, {
+  instances: { min: 2, max: 8, idleMs: 60_000, queueMs: 2_000, queue: 100 },
+});
+```
+
+| Option | Default | Effect |
+|---|---|---|
+| `min` | 0 | Instances kept loaded even when idle; loaded right after `load` |
+| `max` | 4 | Most instances at once |
+| `idleMs` | 30 s | An idle instance above `min` closes after this long |
+| `queueMs` | 10 s | A call that finds every instance busy at `max` waits this long, then fails with `ERR_LIMIT` (`instances.queueMs`) |
+| `queue` | 1,000 | Most calls waiting at once; one more fails at once with `ERR_LIMIT` (`instances.queue`) |
+| `concurrency` | 1 | Calls one instance runs at once |
+| `reuse` | `true` | `false` gives every call a fresh instance |
+
+Set `min` to the number of calls you expect at once in quiet periods, so
+the first request after a lull does not wait for a load. Each instance is
+an isolate and counts toward the tenant's `isolates` limit (100 by
+default), and its heap counts toward the worker's `workerMemoryBytes`, so
+`max` across a tenant's programs should stay below both.
+
+A short `queueMs` makes callers fail fast with a status they can retry,
+instead of waiting behind a backlog. `reuse: false` loads a new instance
+for every call, which suits code whose end users must not share module
+state; the code cache keeps each of those loads short.
+
+## Run several calls per instance
+
+```js
+await tenant.load(source, { instances: { max: 2, concurrency: 8 } });
+```
+
+Handlers that spend most of their time waiting on host functions or
+`fetch` can share an instance: up to `concurrency` calls run on its event
+loop at once, and new instances are loaded only when every instance is
+full. The calls share the instance's per-eval budgets (`cpuMs`,
+`hostCalls`, `logBytes`) and its event loop.
+
+:::warning
+With `concurrency` above 1, one call stuck in a synchronous loop holds up
+every call in its instance. Those calls reach their own `timeoutMs` while
+they wait, so one stuck call can fail every call in the instance, and the
+instance is retired. This is defined behaviour. Keep `concurrency` at 1
+for handlers that may compute for a long time.
+:::
+
+## Keep workers and isolates ready
+
+A tenant's first eval starts its worker process, which takes tens of
+milliseconds. `spares` keeps that many workers started ahead of time; a new
+tenant claims one whole, and it serves only that tenant from then on.
+
+```js
+const runtime = new Runtime({ spares: 2, spareIsolates: 2 });
+```
+
+`spareIsolates` (0 to 8) has each tenant's worker create that many web
+isolates in advance, which is most of a fresh web isolate's start. Spares
+are kept for each of the four heap sizes (`limits.heapBytes`) the worker
+used most recently, so a worker holds at most `spareIsolates` × 4. An
+isolate with a `random.seed`, or with `web: false`, cannot use a spare.
+
+Measured on a macOS development build, a fresh web run took 0.25 ms with a
+spare ready instead of 1.5 ms, and a later program instance 2.4 ms instead
+of 3.3 ms. Each spare worker uses about 15 MB while idle, and each spare
+isolate about 3 MB, which is why both default to 0.
+
+## Set what each worker caches
+
+Each tenant's worker keeps what later instances of a program need. The
+`caches` option sets the budget for each kind, in bytes:
+
+```js
+const runtime = new Runtime({
+  caches: { fileBytes: 128 << 20, codeBytes: 128 << 20, wasmBytes: 0 },
+});
+```
+
+| Field | Default | Keeps |
+|---|---|---|
+| `fileBytes` | 64 MiB | Programs' files, so later loads do not send them again; least recently loaded go first |
+| `codeBytes` | 64 MiB | V8 code caches of programs' modules, made after the first instance evaluated them; dropped whole when full |
+| `wasmBytes` | 32 MiB | Compiled WebAssembly, by the size of its bytes; its compiled code is a few times larger |
+
+Each budget is an integer from 0 to 1 GiB, and 0 keeps nothing of that
+kind. What a worker keeps counts against its `workerMemoryBytes`, so raise
+that limit with the budgets if your programs are large. The budgets apply
+to every tenant's worker, since they are set when the worker starts.
+Nothing cached crosses to another tenant, and a recycled worker starts
+empty.
+
+Measured on a macOS development build with a 747 KB bundle and
+`reuse: false`, the first instance loaded in about 16 ms and each later one
+in about 3 ms. With neither the files nor the code cache kept, each load
+took about 13 ms.
+
+## If later instances are not faster
+
+Check `modules` in `onProgramLoad`. `cached: 0` on every load after the
+first means the code cache is not used: `codeBytes` may be 0, or the
+program may be loaded again with different files or `ts`, `jsx`, or
+`define` options, which changes the cache key. `rejected` above 0 means V8
+refused a cache, for example after the worker binary changed; isolane
+compiles from source and makes a new one. A worker that is recycled
+(`workerLifetimeMs`, `workerEvals`) or that exits after `idleMs` with
+nothing running also starts with empty caches.

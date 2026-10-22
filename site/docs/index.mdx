@@ -1,0 +1,78 @@
+---
+title: isolane
+description: Run untrusted, multi-tenant JavaScript from Node.js in sandboxed V8 worker processes.
+---
+
+isolane runs untrusted JavaScript from a Node.js process. Each tenant's code
+runs in its own V8 worker process, built with V8's memory sandbox and locked
+down with seccomp and Landlock on Linux, and guest code can reach only the
+functions, hosts, and files you grant it.
+
+:::warning[Early development]
+isolane is not yet suitable for untrusted code. The release gate (external
+review, fuzzing, and threat-model sign-off) is tracked in
+[SECURITY.md](https://github.com/ethndotsh/isolane/blob/main/SECURITY.md).
+No version has been published to npm; to try it, build it from source as
+the [first tutorial](/tutorials/first-sandbox) describes.
+:::
+
+## An example
+
+```js
+import { Runtime } from 'isolane';
+
+const runtime = new Runtime();
+const acme = runtime.tenant('acme');
+
+await acme.run('1 + 2'); // 3
+
+// Guest code can call the functions you pass, and nothing else.
+await acme.run('db.getUser(42).then((user) => user.plan)', {
+  host: { db: { getUser: async (id) => users.get(id) } },
+});
+
+// A program is an ES module loaded once into warm instances.
+const app = await acme.load(`
+  export default {
+    fetch(request) {
+      return new Response('hello from ' + new URL(request.url).pathname);
+    },
+  };
+`);
+const response = await app.fetch('https://acme.example/docs');
+await response.text(); // 'hello from /docs'
+```
+
+## When to use it
+
+isolane fits a Node.js service that runs code its users wrote: plugins,
+user-defined functions, formulas, webhooks, or whole HTTP handlers on a
+serverless platform. Every tenant gets a separate process, and every
+resource has a limit, so one tenant's bug or attack does not reach another
+tenant or the host.
+
+Each tenant costs a worker process (about 15 MB idle) and each call an IPC
+round trip. If you need thousands of cheap sandboxes inside one process,
+objects shared by reference with the host, snapshots of a running VM, or
+Windows support, another tool fits better;
+[the comparison](/concepts/comparison) says which.
+
+## The documentation
+
+<CardGroup cols={2}>
+  <Card title="Tutorials" href="/tutorials/first-sandbox">
+    Build isolane, run guest code, and then build a small multi-tenant HTTP
+    platform.
+  </Card>
+  <Card title="Guides" href="/guides/host-functions">
+    Recipes for specific tasks: granting network or file access, loading
+    TypeScript programs, setting limits per plan, and deploying on Linux.
+  </Card>
+  <Card title="Reference" href="/reference/runtime">
+    Every class, option, limit, hook, and error code, with its default.
+  </Card>
+  <Card title="Concepts" href="/concepts/architecture">
+    How the worker processes, the sandbox, programs, and limits work, and
+    why they work that way.
+  </Card>
+</CardGroup>

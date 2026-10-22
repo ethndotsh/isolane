@@ -1,0 +1,292 @@
+---
+title: Run your first guest code
+description: Build isolane, then run untrusted code with data, host functions, limits, and a stateful isolate.
+---
+
+You will build isolane from source, create a runtime, and run guest code
+in it. Each step adds one idea: passing data in, giving guest
+code a function to call, stopping code that runs too long, and keeping
+state in an isolate between evaluations. It takes about 15 minutes once the
+build has finished.
+
+You need Node.js 22 or later, a Rust toolchain from
+[rustup](https://rustup.rs), Git, and Linux x64 or macOS. The examples use
+`using`, which needs Node.js 24; on Node.js 22, call `close()` instead, as
+shown.
+
+## Build isolane
+
+isolane is not on npm yet, so you build it from its repository. The worker
+links against V8, and the quickest build for development uses rusty_v8's
+prebuilt V8. `fetch-rusty-v8.sh` downloads about 1 GB of rusty_v8 and V8
+sources, which the worker's build needs even when it links the prebuilt
+library:
+
+```sh
+git clone https://github.com/ethndotsh/isolane.git
+cd isolane
+scripts/fetch-rusty-v8.sh
+scripts/build-worker.sh fast --no-default-features --features dev-prebuilt
+npm install && npx tsc
+```
+
+This prints `built target/fast/isolane-worker with the web snapshot
+embedded` when it finishes.
+
+The prebuilt V8 has no memory sandbox, so this worker is for development
+only. isolane refuses to start it unless two things say you know that:
+`strict: false` in the runtime's options, and the `ISOLANE_DEV_INSECURE=1`
+environment variable. A production worker is built with V8's sandbox; the
+[build guide](/guides/build-from-source) covers it.
+
+Create a project next to the clone and install isolane from it:
+
+```sh
+mkdir ../first-sandbox && cd ../first-sandbox
+npm init -y && npm pkg set type=module
+npm install ../isolane
+```
+
+Tell isolane where the worker is. Every command in this tutorial runs in a
+shell with these variables set:
+
+```sh
+export ISOLANE_WORKER=$PWD/../isolane/target/fast/isolane-worker
+export ISOLANE_DEV_INSECURE=1
+```
+
+## Run an expression
+
+A `Runtime` manages worker processes. `runtime.tenant(name)` returns a
+handle for one tenant, and every tenant's code runs in that tenant's own
+worker process. `tenant.run(code)` evaluates code in a fresh isolate and
+resolves to the completion value, the value of the last expression.
+
+```js step1.js
+import { Runtime } from 'isolane';
+
+const runtime = new Runtime({ strict: false });
+const acme = runtime.tenant('acme');
+
+console.log(await acme.run('1 + 2'));
+console.log(await acme.run('[1, 2, 3].map((n) => n * n)'));
+
+runtime.close();
+```
+
+```sh
+node step1.js
+```
+
+```txt
+3
+[ 1, 4, 9 ]
+```
+
+The result crosses from the worker as JSON, so it arrives as an ordinary
+array. The first `run` also started the tenant's worker; the second reused
+it with a new isolate.
+
+`runtime.close()` stops the workers. Without it, the Node.js process would
+keep running.
+
+## Pass data in
+
+Never build guest code by concatenating strings with your data. Pass the
+data as `globals`, JSON values that the isolate sees as global variables:
+
+```js step2.js
+import { Runtime } from 'isolane';
+
+const runtime = new Runtime({ strict: false });
+const acme = runtime.tenant('acme');
+
+const order = { items: [{ sku: 'A1', qty: 2 }, { sku: 'B7', qty: 1 }] };
+const total = await acme.run('order.items.reduce((sum, item) => sum + item.qty, 0)', {
+  globals: { order },
+});
+console.log(total);
+
+runtime.close();
+```
+
+```txt
+3
+```
+
+The guest gets a copy of `order`. Nothing it does to the copy changes the
+object in your process.
+
+## Give guest code a function
+
+Guest code cannot reach anything in your process unless you hand it a
+function. The `host` option names functions the guest can call. They run in
+your process, and the guest sees each one as an async function that returns
+a promise:
+
+```js step3.js
+import { Runtime } from 'isolane';
+
+const runtime = new Runtime({ strict: false });
+const acme = runtime.tenant('acme');
+
+const users = new Map([[42, { name: 'Ada', plan: 'pro' }]]);
+
+const plan = await acme.run('db.getUser(42).then((user) => user.plan)', {
+  host: {
+    db: {
+      getUser: async (id) => users.get(id),
+    },
+  },
+});
+console.log(plan);
+
+runtime.close();
+```
+
+```txt
+pro
+```
+
+The nested object makes a namespace: the guest calls `db.getUser`. The
+arguments and the return value cross as JSON, so your function receives
+plain data, never a guest object. A guest can call `getUser` with any
+argument at all, though, so a real host function validates what it is
+given; [Give guest code host functions](/guides/host-functions) shows how
+with a schema.
+
+## Stop code that runs too long
+
+Every resource the guest uses has a limit. The wall-clock limit per
+evaluation, `limits.timeoutMs`, is 30 seconds by default. Set it lower and
+run a loop that never ends:
+
+```js step4.js
+import { IsolaneError, Runtime } from 'isolane';
+
+const runtime = new Runtime({ strict: false });
+const acme = runtime.tenant('acme');
+
+try {
+  await acme.run('while (true) {}', { limits: { timeoutMs: 100 } });
+} catch (err) {
+  if (!(err instanceof IsolaneError)) throw err;
+  console.log(err.code, err.kind, err.limit);
+  console.log(err.message);
+}
+
+try {
+  await acme.run('JSON.parse("{")');
+} catch (err) {
+  console.log(err.code, err.kind);
+  console.log(err.guest.name, err.guest.message);
+}
+
+runtime.close();
+```
+
+```txt
+ERR_LIMIT limit timeoutMs
+execution timed out after 100ms (limits.timeoutMs)
+ERR_GUEST_EXCEPTION guest
+SyntaxError Expected property name or '}' in JSON at position 1 (line 1 column 2)
+```
+
+Every failure is an `IsolaneError` with a `code` and a `kind`. The first
+evaluation was stopped by a limit: `kind` is `limit`, and `limit` names
+which one. The second threw an exception of its own: `kind` is `guest`,
+and `err.guest` describes what the guest threw, including its stack. Your
+code usually branches on `kind`: a `guest` error is the tenant's bug to
+report back to them, and a `limit` error is a sign the tenant needs a
+larger plan or has a runaway loop. [Errors](/reference/errors) lists every
+code.
+
+## Keep state in an isolate
+
+`run` throws its isolate away afterwards. `tenant.isolate()` creates one
+that you keep. Its globals survive from one `eval` to the next, and
+`call` invokes a function it defined, passing arguments as data:
+
+```js step5.js
+import { Runtime } from 'isolane';
+
+const runtime = new Runtime({ strict: false });
+const vm = runtime.tenant('acme').isolate();
+
+await vm.eval(`
+  const seen = [];
+  function remember(word) {
+    seen.push(word);
+    return seen.length;
+  }
+`);
+console.log(await vm.call('remember', ['apple']));
+console.log(await vm.call('remember', ['pear']));
+console.log(await vm.eval('seen.join(", ")'));
+
+vm.close();
+runtime.close();
+```
+
+```txt
+1
+2
+apple, pear
+```
+
+`call` compiles nothing, so it is the cheap way to invoke code that an
+earlier `eval` loaded. With Node.js 24, `using vm = ...` closes the isolate
+when the block ends.
+
+## See what a limit does to state
+
+An isolate stopped part-way is not used again. The code was interrupted at
+an arbitrary point, perhaps half-way through updating its state, so isolane
+retires the isolate rather than let later evaluations see that state:
+
+```js step6.js
+import { Runtime } from 'isolane';
+
+const runtime = new Runtime({ strict: false });
+let vm = runtime.tenant('acme').isolate({ limits: { timeoutMs: 100 } });
+
+await vm.eval('globalThis.count = 0');
+try {
+  await vm.eval('count++; while (true) {}');
+} catch (err) {
+  console.log(err.code);
+}
+try {
+  await vm.eval('count');
+} catch (err) {
+  console.log(err.code, err.retryable);
+}
+
+vm.close();
+vm = runtime.tenant('acme').isolate();
+console.log(await vm.eval('typeof count'));
+
+vm.close();
+runtime.close();
+```
+
+```txt
+ERR_LIMIT
+ERR_ISOLATE_RETIRED true
+undefined
+```
+
+The evaluation after the timeout fails with `ERR_ISOLATE_RETIRED`, and
+`retryable` is `true`: the same work can succeed on a new isolate. The new
+isolate starts empty. An exception thrown by the guest does not retire an
+isolate; only being stopped from outside does, by a time or CPU limit, an
+abort signal, or running out of memory.
+
+## Next steps
+
+The next tutorial, [Build a serverless platform](/tutorials/serverless-platform),
+loads a multi-file TypeScript program and serves HTTP requests from it.
+
+To understand why each tenant gets a process and what the worker's
+lockdown prevents, read [Architecture](/concepts/architecture) and
+[Security model](/concepts/security-model).

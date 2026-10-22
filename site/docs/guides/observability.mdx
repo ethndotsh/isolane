@@ -1,0 +1,135 @@
+---
+title: Log and monitor tenants
+description: Forward guest logs, record limits and policy denials, alert on security events, and refuse operations with hooks.
+---
+
+This guide connects isolane's hooks to your logging, metrics, and alerting,
+and uses interceptors to refuse operations a tenant's quota does not cover.
+
+## Forward guest output
+
+```js
+import { Runtime } from 'isolane';
+
+const runtime = new Runtime({
+  hooks: {
+    onLog: ({ tenant, program, level, message, source }) => {
+      logger.log({ level, tenant, program, source, message });
+    },
+  },
+});
+```
+
+`onLog` receives the guest's `console` output (`source: 'guest'`) and
+messages your host functions write with `ctx.log` (`source: 'host'`).
+`level` is `log`, `info`, `debug`, `warn`, or `error`. The worker cuts each
+line to `limits.logLineBytes` (16 KiB) and each eval's output to
+`limits.logBytes` (1 MiB), so a guest cannot flood your logs.
+
+Uncaught errors in the guest's timers and promises are logged too, as
+`Uncaught Error: ...` at level `error`, and reported to `onGuestError`.
+
+## Record what went wrong
+
+```js
+const runtime = new Runtime({
+  hooks: {
+    onLimit: ({ tenant, program, limit }) => metrics.increment('isolane_limit', { tenant, limit }),
+    onGuestError: ({ tenant, kind, error }) => tenantLogs.write(tenant, `${kind}: ${error.stack ?? error.message}`),
+    onPolicyDenial: ({ tenant, api, target, reason }) => audit.write({ tenant, api, target, reason }),
+    onProgramLoad: ({ tenant, program, durationMs, modules, error }) =>
+      metrics.histogram('isolane_load_ms', durationMs, { tenant, ok: !error, cached: modules?.cached }),
+  },
+});
+```
+
+| Hook | Fires when |
+|---|---|
+| `onLimit` | Any limit is reached, including those that only cut output or fail one guest operation |
+| `onGuestError` | A timer or task threw, or a promise was rejected with no handler; neither fails an eval |
+| `onPolicyDenial` | A `fetch`, `connect`, or `fs` request was refused by its policy |
+| `onProgramLoad` | A program instance finished loading, or failed to |
+| `onWorker` | A tenant's worker started, began recycling, or exited |
+| `onSecurityEvent` | A worker crashed, broke the protocol, or stopped responding |
+
+`onPolicyDenial` reports refused targets, such as a host not on the list,
+a private address, or a path outside the root. Running out of a policy's
+own limits, such as `fetch.limits.requests`, is reported to `onLimit`.
+
+## Alert on security events
+
+```js
+const runtime = new Runtime({
+  hooks: {
+    onSecurityEvent: ({ tenant, kind, detail, quarantinedUntil }) => {
+      pager.alert(`isolane ${kind} for tenant ${tenant}: ${detail}`);
+      accounts.flagForReview(tenant, { until: quarantinedUntil });
+    },
+  },
+});
+```
+
+A crash can be an exploit attempt that failed, such as a V8 sandbox
+violation or a seccomp kill, so treat each one as worth a look. The tenant
+is quarantined until `quarantinedUntil`, and `detail` has the signal or exit
+code and the end of the worker's stderr. `onSecurityEvent` and `onWorker`
+can be set on the runtime, in `defaults`, and in `tenants(name)`, but not
+per call.
+
+## Measure every call
+
+`runtime.on(event, listener)` receives the same events as the `on*` hooks,
+plus the outcome of every eval, call, and host call. It returns a function
+that removes the listener.
+
+```js
+const off = runtime.on('call', ({ tenant, program, name, durationMs, error }) => {
+  metrics.histogram('isolane_call_ms', durationMs, { tenant, name, code: error?.code ?? 'ok' });
+});
+```
+
+The events are `eval`, `call`, `hostCall`, `log`, `guestError`, `limit`,
+`policyDenial`, `programLoad`, `securityEvent`, and `worker`. Events from a
+program's instances carry its `program` id, the same number as
+`program.id`.
+
+## Refuse operations with interceptors
+
+`before*` hooks can refuse an operation with `deny(reason)`, or replace
+what it is given. `after*` hooks can replace the result.
+
+```js
+import { deny } from 'isolane';
+
+const runtime = new Runtime({
+  hooks: {
+    beforeHostCall: ({ tenant }) => {
+      if (!quota.take(tenant)) return deny('quota used up');
+    },
+    beforeCall: ({ tenant, name }) => (maintenance.has(tenant) ? deny('maintenance') : undefined),
+  },
+});
+```
+
+| Interceptor | A `deny()` means |
+|---|---|
+| `beforeHostCall` | The guest's call rejects with an `Error` whose `code` is `ERR_DENIED`; the eval continues |
+| `beforeEval` | The eval rejects with `ERR_DENIED` and `err.reason` |
+| `beforeCall` | The call rejects with `ERR_DENIED` and `err.reason` |
+
+The guest sees the reason in the error's message, so write it for the
+tenant to read. Interceptors may be async; the operation waits for them.
+
+Hooks at every level run: the runtime's, `defaults`', the tenant's, and the
+call's. `before*` hooks run from the outermost level in, and `after*` hooks
+from the innermost level out.
+
+## If a hook seems not to fire
+
+An event hook that throws is reported as a Node.js process warning
+(`isolane: an event listener threw: ...`) and otherwise ignored, so look
+for warnings in your process's stderr. Event hooks run synchronously and
+their return value is ignored; to refuse an operation, return `deny()` from
+an interceptor. An unknown hook name, for example a misspelt `onlog`,
+throws `ERR_INVALID_CONFIG` when the configuration is validated, and the
+message lists the valid names.

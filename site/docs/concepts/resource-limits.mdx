@@ -1,0 +1,161 @@
+---
+title: Resource limits
+description: How each kind of limit is measured and enforced, which side enforces it, and why a stopped eval retires its isolate.
+---
+
+## Where limits are enforced
+
+Every resource guest code can consume has a limit with a default, and the
+[limits reference](/reference/limits) lists them. This page explains how
+they are enforced, because the mechanism decides what a limit can promise.
+
+Limits on one isolate's execution, such as time, CPU, heap, timers, and
+host calls, are enforced inside the worker, close to the code they bound,
+since only the worker can stop V8 mid-instruction. Limits on a tenant as a
+whole, such as how many isolates and evals it has in flight, are enforced
+by the supervisor in the host process. For the limits that protect the
+host process itself, the supervisor checks the worker's work as well, so
+that a compromised worker cannot simply ignore them.
+
+## Wall-clock time
+
+Each isolate has a watchdog thread. When an eval or call starts, the
+watchdog is armed with a deadline `timeoutMs` away, and when the deadline
+passes it calls V8's `TerminateExecution`. Termination is thread-safe and
+stops JIT-compiled code as well as the interpreter, so a tight loop that
+never yields is stopped like any other code. The eval fails with
+`ERR_LIMIT`, `err.limit` set to `timeoutMs`.
+
+The supervisor keeps its own deadline as a backstop. If a worker has not
+answered an eval by `timeoutMs` plus the larger of one second and
+`timeoutMs`, the supervisor kills it as unresponsive and treats that as a
+security event, since a worker whose watchdog did not fire is either
+compromised or broken.
+
+## CPU time
+
+On Linux, `cpuMs` bounds the CPU time of the isolate's thread, read from
+the thread's own CPU clock, which the watchdog samples every 2 ms. CPU
+time differs from wall time when the isolate waits: a handler that spends
+900 ms waiting for a host function uses almost no CPU. A program's setup
+uses `startupCpuMs` in place of `cpuMs`. isolane reads that clock only on Linux,
+so CPU budgets are not enforced on macOS, which is one reason macOS is for
+development only.
+
+Some native work cannot be interrupted. RSA key generation runs to
+completion once started, so RSA keys are capped at 4,096 bits; URLPattern
+parsing is bounded by input size. Such work can overrun a time or CPU
+limit by its bounded cost.
+
+## Heap
+
+`heapBytes` sets the isolate's V8 heap limit. When the heap approaches it,
+V8 calls isolane's near-heap-limit callback, which terminates the isolate
+and grants V8 enough headroom to unwind. Without the callback, V8 would
+abort the whole worker, taking every other isolate of the tenant with it.
+
+The same callback runs when the operating system refuses V8 more memory
+because the worker hit its own cap. isolane tells the two apart by how
+much the isolate holds: at least half its heap limit means the heap limit
+was the cause, and much less means the worker ran out. The error names
+`heapBytes` or `workerMemoryBytes` accordingly.
+
+## Worker memory
+
+The heap limit does not cover memory outside the V8 heap: ArrayBuffer
+contents, WebAssembly memories, JIT code, and thread stacks. On Linux,
+`workerMemoryBytes` caps all of it with `RLIMIT_DATA`, which limits a
+process's private writable memory. The V8 sandbox reserves a large
+address range at startup, but reserved and untouched memory does not
+count against `RLIMIT_DATA`, so the cap applies to what the worker
+actually uses. V8's JIT code range is mapped writable up front, so the
+worker adds the limit to the memory it uses after V8 has started.
+
+Past the cap, allocations fail. A guest `new ArrayBuffer(n)` throws a
+`RangeError`, which the guest can catch. If V8 itself cannot get memory,
+it cannot continue, and the worker exits with a code that the supervisor
+reports as `ERR_LIMIT` for `workerMemoryBytes`, marked `retryable`. That
+exit is an expected end, not a security event. macOS ignores
+`RLIMIT_DATA`, so the cap does not apply there.
+
+In release builds, which use pointer compression, all of a tenant's
+isolates share one pointer cage of about 4 GiB in its worker, whatever
+`heapBytes` times the number of isolates adds up to.
+
+## Host calls
+
+Host calls cost the host process memory and time, so they are bounded
+three ways: `pendingHostCalls` (async calls waiting for a reply at once),
+`hostCalls` (calls per eval), and `pendingHostCallBytes` (the bytes of
+pending calls' arguments, held in the host process). The worker enforces
+them: a call past a limit throws a `RangeError` in the guest before it
+leaves the worker, and the eval fails with `ERR_LIMIT` even if the guest
+catches the error. The supervisor counts the same things itself, and a
+worker that sends more calls or bytes than the limits allow is killed as a
+protocol violation. A compromised worker can therefore stop enforcing the
+limits, but it cannot make the host process hold more than they allow.
+
+A host call stays pending until its function settles, for at most one
+second past the isolate's `timeoutMs`. Then the guest's promise rejects,
+the function's `ctx.signal` aborts, and the slot is free again, so a host
+function that hangs cannot exhaust `pendingHostCalls`.
+
+## Work between evals
+
+A stateful isolate or a program instance can keep running after an eval
+returns: timers it set, message-port tasks, and continuations of host
+calls it did not await. That work runs in batches, each under `timeoutMs`
+and `cpuMs` like an eval, and all of it draws on `backgroundMs`, a budget
+per minute that starts full and refills continuously. It is CPU time on
+Linux and wall time elsewhere, and each host-call continuation is charged
+at least 0.25 ms for the host's side of the call. When the budget runs
+out, the isolate is stopped and retired. Timers run in slices of 10 ms, so
+a timer storm does not hold up the isolate's own evals and host replies.
+
+`workerBackgroundMs` is the same kind of budget for all of a tenant's
+isolates together, so a hundred isolates do not get a hundred budgets.
+Running it out retires nothing: background work in every isolate waits
+until the budget refills, and evals still run.
+
+Both budgets are enforced inside the worker, so a compromised worker
+escapes them. Recycling, and the supervisor's own measurement of the
+worker's CPU time (`usage().workerCpuMs`), are what still hold in that
+case.
+
+## Output
+
+Console output and error text are cut to size inside the worker, before
+the string is copied out of V8: each line to `logLineBytes`, each eval's
+output to `logBytes`, and an exception's message and stack to 64 KiB
+each. Cutting there keeps a guest from making the worker copy gigabytes of
+text into a frame. The supervisor cuts log lines again on arrival, because
+it does not trust the worker to have done so.
+
+## Why a stopped eval retires its isolate
+
+When a limit or an abort signal stops an eval part-way, the isolate is
+retired: later evals and calls fail with `ERR_ISOLATE_RETIRED`, and the
+worker frees it. The reason is that termination lands wherever the code
+happened to be. A guest may have been half-way through updating a data
+structure, holding a lock it implemented itself, or between writing two
+fields that must agree. After termination, its state is no longer what
+its own code guarantees, and running more of its code against that state
+would produce errors that are hard to attribute.
+
+An eval whose code throws is different. The exception unwinds through the
+guest's own code, which can catch it, clean up in `finally` blocks, and
+leave its state consistent. So a thrown exception leaves the isolate in
+service, and only an interruption from outside retires it. For a program,
+the pool replaces a retired instance automatically, and a stateful isolate
+should be recreated; its `ERR_ISOLATE_RETIRED` is `retryable` on a new
+isolate.
+
+## What a limit does when it is reached
+
+Every limit reached emits `onLimit`. Beyond that, a limit has one of three
+effects. Most fail the eval with `ERR_LIMIT`, with `err.limit` naming the
+limit. Limits on individual guest operations, such as `timers`,
+`decompressedBytes`, and the `fetch`, `connect`, and `fs` policies' own
+limits, fail that operation in the guest and let the eval continue, so
+the guest can handle them. The output limits cut the output and fail
+nothing.

@@ -1,0 +1,245 @@
+---
+title: Capabilities
+description: "The configuration fields that decide what guest code can reach: host functions, globals, the web platform, network, files, code generation, WebAssembly, time, randomness, and a program's modules."
+---
+
+## Defaults
+
+With no configuration, guest code gets ECMAScript, the web platform, a frozen clock, and the operating system's randomness. It has no network, no files, no `eval`, no WebAssembly, and no shared memory.
+
+Every field on this page is part of the isolate configuration, so it can be set in the runtime's `defaults`, in `tenants(name)`, or for one call. Later levels win field by field; [configuration](/reference/configuration) gives the merge rules. A field set to something other than the types listed here fails with `ERR_INVALID_CONFIG`, naming the field.
+
+| Field | Type | Default | Guest gets |
+|---|---|---|---|
+| [`host`](#host) | object of functions and namespaces | none | Functions that run in the host process |
+| [`globals`](#globals) | object of JSON values | none | New global variables |
+| [`web`](#web) | `boolean` or `{ baseUrl }` | `true` | The WinterTC Minimum Common API |
+| [`fetch`](#fetch) | policy or `false` | none | Network access through `fetch` |
+| [`connect`](#connect) | policy or `false` | none | TCP and TLS sockets through `connect()` |
+| [`fs`](#fs) | policy or `false` | none | An `fs` object over one host directory |
+| [`eval`](#eval) | `boolean` | `false` | `eval` and `new Function` |
+| [`wasm`](#wasm) | `boolean` | `false` | `WebAssembly` |
+| [`time`](#time) | `'frozen'`, `'real'`, or `{ fixedMs }` | `'frozen'` | The wall clock |
+| [`random`](#random) | `{ seed }` | none | Seeded randomness |
+
+Programs loaded with `tenant.load` also take [`env`](#env) and [`modules`](#modules).
+
+## `host`
+
+Functions guest code can call, by name. A nested object becomes a frozen namespace: `{ db: { getUser } }` is `db.getUser(42)` in the guest. Namespaces nest at most 8 levels.
+
+| Value | In the guest | Arguments | Context |
+|---|---|---|---|
+| A function | Returns a promise | Unchecked | `this` |
+| `hostFunction({ handler, args, returns, sync })` | A promise, or the value itself with `sync: true` | Checked against `args` | `this`, and the handler's last parameter when `args` is a list |
+
+Names contain letters, digits, `_`, and `$`, and must not start with `__isolane_`. A name can't be both a function and a namespace across configuration levels. A name taken by a policy's global (`fetch`, `Headers`, `Response`, `connect`, or `fs`) is refused when that policy is set.
+
+`hostFunction` fields:
+
+| Field | Type | Meaning |
+|---|---|---|
+| `handler` | function | Does the work. Receives the validated arguments, then the context when `args` is a list. |
+| `args` | Standard Schema, or a list of them | One schema per positional argument, or one for the whole argument list. The handler gets each schema's output, so defaults and transforms apply. |
+| `returns` | Standard Schema | Checked before the guest sees the value. |
+| `sync` | `boolean` | The guest gets the value directly instead of a promise, and its isolate waits for the reply within `timeoutMs`. Default `false`. |
+
+The context has `tenant`, `isolate` (the calling isolate's id), `signal`, and `log(level, ...args)`. The `signal` aborts when nobody is waiting for the result any more: the eval reached a time or CPU limit, the isolate closed, or the worker exited. `log` reports through `onLog` with `source: 'host'`.
+
+What crosses between guest and host:
+
+| Direction | Crosses as JSON | Crosses as bytes |
+|---|---|---|
+| Guest arguments to the handler | Every value, with `undefined` as `null` | `ArrayBuffer` and its views at the top level, which arrive as `Buffer` |
+| Handler result to the guest | Every value | `Buffer` and typed arrays, which arrive as `Uint8Array` |
+
+Failures the guest sees:
+
+| Cause | Guest error |
+|---|---|
+| An argument fails `args` | `TypeError` with `code: 'ERR_INVALID_ARGUMENTS'` and a message listing each issue |
+| The result fails `returns` | `Error` with `code: 'ERR_INVALID_RETURN'` |
+| The handler throws | An error with the thrown error's `name`, `message`, and `code`, without its stack |
+| `beforeHostCall` denies the call | An error with `code: 'ERR_DENIED'` |
+| More than `limits.hostCalls` calls in one eval | `RangeError`, and the eval fails with `ERR_LIMIT` |
+| More than `limits.pendingHostCalls` calls waiting at once | `RangeError`, and the eval fails with `ERR_LIMIT` |
+
+Host functions count against [`hostCalls`, `pendingHostCalls`, and `pendingHostCallBytes`](/reference/limits). In a program, the `host` functions are mounted in `env` instead of on the global, and they throw `ERR_SETUP_IO` during setup.
+
+## `globals`
+
+JSON values the guest starts with, each as a new writable global. Use them to pass inputs as data instead of building code from strings.
+
+```js
+await tenant.run('order.items.length', { globals: { order: { items: [1, 2] } } }); // 2
+```
+
+The object must be JSON-serializable. Names that would replace a built-in global are refused: ECMAScript's names and `console` when the configuration is checked (`ERR_INVALID_CONFIG`), and web platform names such as `URL` when the isolate starts. `__proto__` and names starting with `__isolane_` are reserved. A name used by a host function, a namespace, or a policy's global is refused. `globals` merge by name across levels.
+
+## `web`
+
+| Value | Meaning |
+|---|---|
+| `true` (default) | The web platform globals listed in [guest environment](/reference/guest-environment#web-platform) |
+| `false` | Plain ECMAScript and `console`. Rules out `fetch`, `connect`, `fs`, and `program.fetch`, whose guest APIs are part of the web platform. |
+| `{ baseUrl }` | The web platform, with relative URLs (`fetch('/x')`, `new Request('/x')`) resolved against `baseUrl`, and a read-only `location`. `baseUrl` is an absolute `http:` or `https:` URL. |
+
+A web isolate starts from a snapshot embedded in the worker binary, and takes about 0.9 ms longer to create than one with `web: false`. A worker built without the embedded snapshot makes one the first time it needs it, which takes about 30 ms once.
+
+## `fetch`
+
+Gives the guest network access through `fetch`. The worker can't open sockets; the host process checks each request against the policy and performs it. Without a policy, `fetch` still exists and reads `data:` and `blob:` URLs, and any other URL rejects with `TypeError: fetch is not available: this isolate has no fetch policy`.
+
+```js
+fetch: {
+  hosts: ['api.example.com', '*.example.org', 'internal.example:8443'],
+  methods: ['GET', 'POST'],
+  privateNetworks: false,
+  limits: { requests: 1_000, timeoutMs: 30_000 },
+}
+```
+
+| Field | Type | Default | Meaning |
+|---|---|---|---|
+| `hosts` | list of patterns, or `(url, method) => boolean \| Promise<boolean>` | required | Which requests are allowed. The function is called for each request and each redirect hop, and only `true` allows it. |
+| `methods` | list of method names | `GET`, `HEAD`, `POST`, `PUT`, `PATCH`, `DELETE` | Allowed methods, compared in upper case |
+| `privateNetworks` | `boolean` | `false` | Allow addresses that aren't on the public internet |
+| `limits` | object | see below | |
+
+`fetch: true` is refused, because there is no safe default list of hosts.
+
+Host patterns:
+
+| Pattern | Allows |
+|---|---|
+| `api.example.com` | That host on the scheme's default port (443 for `https:`, 80 for `http:`) |
+| `*.example.com` | Any subdomain of `example.com` on the default port, but not `example.com` itself |
+| `api.example.com:8443` | That host on port 8443 only |
+| `api.example.com:*` | That host on any port |
+| `[2001:db8::1]:8080` | An IPv6 address, with a port |
+
+Matching ignores case. Only `http:` and `https:` URLs reach the network.
+
+Limits:
+
+| Limit | Default | Counts |
+|---|---|---|
+| `requests` | 1,000 | Fetches over the isolate's life |
+| `transferBytes` | 1 GiB | Request and response body bytes together, over the isolate's life |
+| `requestBytes` | 10 MiB | One request body, streamed or not |
+| `responseBytes` | 10 MiB | One response body |
+| `redirects` | 5 | Redirects followed by one fetch |
+| `timeoutMs` | 30 s | One fetch, across its redirects, body included |
+
+Each limit is an integer of at least 1. A fetch past a limit rejects with a `TypeError` whose message names the limit (`fetch.limits.requests`), and `onLimit` fires. An isolate has at most 64 fetches in flight at once.
+
+What is refused, whatever `hosts` says:
+
+- Addresses outside the public internet, unless `privateNetworks: true`: loopback, private ranges, link-local (including cloud metadata at 169.254.169.254), CGNAT (100.64.0.0/10), multicast, documentation and benchmarking ranges, and IPv6 addresses that embed or translate to IPv4 addresses (IPv4-mapped and translated, NAT64, 6to4, Teredo). The check applies to the addresses DNS returns, and the connection is pinned to an address that passed, so a name can't be pointed at a private address after the check.
+- A redirect hop that the policy refuses. Each hop is checked like the first request. With `redirect: 'error'` a redirect fails the fetch; a streamed request body can't follow a redirect.
+- The headers `host`, `connection`, `content-length`, `transfer-encoding`, `keep-alive`, `upgrade`, `proxy-authorization`, `proxy-connection`, `te`, and `trailer`. The broker drops the guest's values and sets its own.
+
+A refused request rejects with a `TypeError` in the guest, such as `fetch to https://api.other.example is not allowed by the fetch policy`, and emits `onPolicyDenial` with the URL, without any `user:password@` part, and the reason.
+
+## `connect`
+
+Gives the guest TCP and TLS sockets through `connect()`, the [Sockets API](https://developers.cloudflare.com/workers/runtime-apis/tcp-sockets/) of Cloudflare Workers. A program can also import it from `cloudflare:sockets`. The [guest environment](/reference/guest-environment#sockets) describes the API.
+
+```js
+connect: {
+  hosts: ['db.example.com:5432', '*.cache.example:*'],
+  privateNetworks: false,
+  ca: undefined,
+  limits: { connections: 8, connectMs: 10_000, idleMs: 60_000, transferBytes: 1 << 30 },
+}
+```
+
+| Field | Type | Default | Meaning |
+|---|---|---|---|
+| `hosts` | list of `host:port` patterns, or `(hostname, port) => boolean \| Promise<boolean>` | required | Which connections are allowed. Patterns work as for `fetch`, except that a pattern must name a port or `*`: there is no default port. |
+| `privateNetworks` | `boolean` | `false` | As for `fetch` |
+| `ca` | PEM text, or a list of them | Node.js's default roots | The certificate authorities TLS connections trust, for a private CA such as a cloud database's. Replaces the default roots. |
+| `limits` | object | see below | |
+
+| Limit | Default | Counts |
+|---|---|---|
+| `connections` | 8 | Sockets open at once in one isolate |
+| `connectMs` | 10 s | Connecting, and each TLS handshake |
+| `idleMs` | 60 s | Time without traffic before a socket is closed |
+| `transferBytes` | 1 GiB | Bytes read and written over the isolate's life, all sockets together. Past it, the socket in use errors. |
+
+The address rules of `fetch` apply to every connection. TLS checks the server's certificate against `ca` or the default roots, and its name against the hostname connected to, or `expectedServerHostname` when `startTls()` is given one. A refused connection rejects `socket.opened` and `socket.closed` with an error such as `connect to db.example.com:5432 is not allowed by the connect policy`, and emits `onPolicyDenial`.
+
+## `fs`
+
+Gives the guest an `fs` object over one host directory.
+
+```js
+fs: { root: '/srv/tenants/acme', write: false, limits: { fileBytes: 10 << 20, writtenBytes: 100 << 20, pendingOperations: 16 } }
+```
+
+| Field | Type | Default | Meaning |
+|---|---|---|---|
+| `root` | directory path | required | The host directory the guest sees as `/` |
+| `write` | `boolean` | `false` | Allow `writeFile`, `mkdir`, and `rm` |
+| `limits` | object | see below | |
+
+| Limit | Default | Error code past it | Counts |
+|---|---|---|---|
+| `fileBytes` | 10 MiB | `EFBIG` | One file read or written |
+| `writtenBytes` | 100 MiB | `EDQUOT` | Bytes written over the isolate's life. Deletions don't reduce it, so it isn't a disk quota. |
+| `pendingOperations` | 16 | `EMFILE` | Operations running at once, each holding a file handle in the host process |
+
+Guest paths are absolute and resolved inside `root`: `/../../etc/passwd` names `etc/passwd` under the root. Symlinks are followed only while they stay inside the root, at most 40 per path. A symlink where a file is written or removed is refused, never written through. The root itself can't be removed or replaced (`EPERM`). Writes without `write: true` fail with `EROFS`, and a path whose symlinks lead outside the root fails with `EACCES`.
+
+On Linux, each operation walks its path one directory at a time from descriptors it holds open, so a symlink swapped into the root while an operation runs can't redirect it outside. On macOS, paths are resolved and then used, which a process writing symlinks into the root at the same moment can race. Use macOS for development only.
+
+Errors carry Node.js-style codes (`ENOENT`, `EEXIST`, `ENOTDIR`, `EISDIR`, `ENOTEMPTY`, `ELOOP`, `EACCES`, `EROFS`) and name guest paths only, never host paths. A refusal emits `onPolicyDenial`. The [guest environment](/reference/guest-environment#fs) lists the `fs` methods.
+
+## `eval`
+
+`eval: true` allows `eval` and `new Function`. With the default `false`, both throw `EvalError: Code generation from strings disallowed for this context`. [Shims](/reference/configuration#shims) are compiled by isolane and work either way.
+
+## `wasm`
+
+`wasm: true` keeps the `WebAssembly` global. It is off by default because WebAssembly's compilers are a large share of V8's attack surface. Shared memories stay off with `wasm: true`: `new WebAssembly.Memory({ shared: true })`, and instantiating a module that exports one, throw `TypeError: isolane: WebAssembly shared memories are disabled`. WebAssembly memory counts against the worker's `workerMemoryBytes` on Linux.
+
+## `time`
+
+| Value | `Date.now()`, `new Date()`, `performance.now()`, and `Intl`'s default time |
+|---|---|
+| `'frozen'` (default) | Real time, moved forward only when an eval or call starts and when a host call, fetch, or other I/O returns. Busy code can't time itself. |
+| `'real'` | The real clock |
+| `{ fixedMs }` | The fixed instant `fixedMs` (milliseconds since the epoch), for reproducible runs |
+
+The time zone is always UTC. Development builds of the worker (built against rusty_v8's prebuilt V8) don't have the clock patch, so they ignore this field and use the real clock.
+
+## `random`
+
+`random: { seed }` seeds `Math.random`, `crypto.getRandomValues`, `crypto.randomUUID`, keys and nonces from `crypto.subtle`, and V8's hash seeds, so a run with the same seed and inputs repeats. `seed` is an integer from 0 to 2^53 − 1. Without it, each isolate draws its randomness from the operating system. A seeded isolate's hash seeds are predictable to its own code, which can use them to slow its own hash tables within its limits. Seeded isolates never come from the worker's spare isolates.
+
+## `env`
+
+A `tenant.load` option. A JSON object that the program imports as `import { env } from 'isolane:env'`, and that `program.fetch` passes to the fetch handler. The program's `host` functions are mounted in it (`env.db.getUser`) instead of on the global. Default `{}`.
+
+## `modules`
+
+A `tenant.load` option that resolves specifiers to something other than the program's files. Each key is a bare specifier or a scheme (`pg`, `node:fs`, `isolane:kv`), not a path.
+
+| Value | Meaning |
+|---|---|
+| A path, `'./shims/fs.js'` | The specifier imports that file of the program. The file must exist. |
+| Another specifier, `'postgres'` | The specifier is resolved as that one |
+| An object of host functions | A module whose named exports are those functions, and whose default export is all of them together |
+
+```js
+await tenant.load(source, {
+  modules: {
+    'node:events': './shims/events.js',
+    pg: 'postgres',
+    'isolane:kv': { get: (key) => store.get(key), put: (key, value) => store.set(key, value) },
+  },
+});
+```
+
+A host module's functions are host functions in every other way: hooks see them, `hostFunction` schemas apply, and they count against the host call limits and throw `ERR_SETUP_IO` during setup. `isolane:env` and names starting with `isolane:runtime/` are reserved. [Modules](/reference/modules) describes resolution.

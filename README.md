@@ -139,8 +139,10 @@ engine 98.8% of the applicable test262 runs. See
 
 ```js
 await acme.run(
-  `const r = await fetch('https://api.example.com/plans');
-   await fs.writeFile('/plans.json', await r.text());`,
+  `(async () => {
+     const r = await fetch('https://api.example.com/plans');
+     await fs.writeFile('/plans.json', await r.text());
+   })()`,
   {
     fetch: { hosts: ['api.example.com'], limits: { requests: 10 } },
     fs: { root: '/srv/tenants/acme', write: true },

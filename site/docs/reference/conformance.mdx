@@ -1,0 +1,65 @@
+---
+title: Conformance
+description: How isolane's web platform is checked against the web-platform-tests and its engine against test262, the results, and what each excluded failure means.
+---
+
+Both suites run in CI as gates, against the sandboxed release worker in strict mode, after the end-to-end tests. Each lists every test that doesn't pass in an expectations file, with a reason. A run fails on a test that newly fails or newly passes, a worker crash that isn't listed, a changed harness status, or a listed entry that is stale or has no reason.
+
+## Web platform tests
+
+The [web platform](/reference/guest-environment#web-platform) is checked against a pinned subset of the [web-platform-tests](https://web-platform-tests.org) (WPT), at commit `c47791d69da6`, about 54,600 subtests in all.
+
+| Directories | Area |
+|---|---|
+| `url`, `urlpattern` | URLs and URL Pattern |
+| `encoding`, `encoding/streams` | Text encoding |
+| `dom/events`, `dom/abort` | Events and cancellation |
+| `html/webappapis/structured-clone`, `atob`, `microtask-queuing`, `timers` | Structured clone, base64, microtasks, timers |
+| `hr-time` | `performance` |
+| `streams`, `compression` | Streams and compression |
+| `FileAPI/blob`, `file`, `reading-data-section`, `url` | Files |
+| `WebCryptoAPI` | Web Crypto |
+| `fetch/api/*`, `fetch/data-urls`, `xhr/formdata` | Fetch, its classes, and `FormData` |
+
+99.6% of the subtests that apply pass, and 85.2% of all of them. A subtest that doesn't pass is in one of five categories:
+
+| Category | Subtests | Meaning | Counts against the rate |
+|---|---|---|---|
+| by-design | 97 | isolane's choices: no `SharedArrayBuffer`, no WebAssembly unless allowed, a global object that isn't a `WorkerGlobalScope` | No |
+| draft | 7,304 | APIs from drafts that aren't standards yet: tentative owning streams, `URLPattern.compareComponent()` and `generate()`, and Web Crypto algorithms from WICG drafts such as ML-KEM, ML-DSA, ChaCha20-Poly1305, and Ed448 | No |
+| browser-only | 487 | Rules that server runtimes such as Deno and workerd don't apply either: CORS and origins, forbidden headers, referrers, the HTTP cache, `XMLHttpRequest`, the Cache API, canvas, secure contexts | No |
+| environment | 49 | The test setup or Node.js's HTTP client: no TLS or HTTP/2 in the test server, no WPT proxy, header bytes Node.js refuses | Yes |
+| bug | 133 | Gaps to fix, each on the roadmap. 112 are the `url` crate lagging the newest URL standard and 8 are `URLPattern` regular expression groups that use the `v` flag's set operations. | Yes |
+
+Each test runs in a fresh isolate with `web: { baseUrl }` set to the test's URL and a `fetch` policy for localhost. WPT's own server, wptserve, serves the tests over HTTP on localhost, so the run needs Python 3.
+
+```sh
+node test/wpt/run.mjs              # clone WPT at the pinned commit, run, gate
+node test/wpt/run.mjs --update     # rewrite the expectations, keeping reasons
+node test/wpt/run.mjs --static     # serve plain files without Python; report only
+```
+
+`--filter <substring>` runs only the matching files. `--report` writes JSON and `--summary` Markdown. `ISOLANE_WPT_DIR` sets where the checkout is cached. Entries added by `--update` are unclassified until someone gives them a reason, and the gate fails until then.
+
+## test262
+
+The engine, as isolane configures it, is checked against [test262](https://github.com/tc39/test262) at commit `9e61c12835c5`, the commit V8's own sources pin, so V8's list of its known failures applies unchanged. The run covers `built-ins`, `language`, `annexB`, and `intl402`: about 50,000 tests. Each runs in both non-strict and strict mode unless its flags say otherwise, for about 99,600 runs. A module test runs once, as a program made of the test, the fixtures it imports, and the harness as a setup shim.
+
+97.5% of the runs that apply pass, and 81.5% of all of them. A run that doesn't pass is listed with a reason or covered by a skip rule, by feature, by flag, or, in development builds only, by path:
+
+| Category | Runs | Meaning | Counts against the rate |
+|---|---|---|---|
+| by-design | 14,588 | No `Temporal` until it has been audited (13,378), and no `SharedArrayBuffer` or `Atomics` (1,210) | No |
+| draft | 1,662 | Stage 3 proposals, from test262's own list | No |
+| v8 | 455 | V8's own failures: those V8's test262 status lists for d8 (291), and `Iterator.zip`, which V8 15.2 ships only behind a flag (164) | Yes |
+| environment | about 1,620 | Host hooks a guest doesn't get: `$262.createRealm`, `$262.evalScript`, `$262.IsHTMLDDA`; `import()` from a classic script (1,134 runs), since scripts have no module graph; and, in development builds only, 8 runs whose very large `ArrayBuffer` lengths stop a worker that has no V8 sandbox | Yes |
+| bug | 0 | | Yes |
+
+Each run is a fresh isolate with `eval: true`, since test262 uses `eval` throughout, and every other field at its default, including the frozen clock. `$262.detachArrayBuffer` is `ArrayBuffer.prototype.transfer`.
+
+```sh
+node test/test262/run.mjs            # clone test262 at the pinned commit, run, gate
+node test/test262/run.mjs --update   # rewrite the expectations, keeping reasons
+```
+
+`--filter <substring>`, `--report`, and `--summary` work as for WPT, and `ISOLANE_TEST262_DIR` sets where the checkout is cached. A full run takes about 15 s on 8 cores.

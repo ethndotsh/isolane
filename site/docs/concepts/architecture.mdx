@@ -1,0 +1,167 @@
+---
+title: Architecture
+description: How the host process, the supervisor, and each tenant's worker process divide the work of running guest code.
+---
+
+## Two kinds of process
+
+isolane splits the work between the Node.js process that imports it, the
+host process, and one worker process for each tenant. The host process
+holds everything you trust: your application, its secrets, the host
+functions you register, and the isolane library. Guest code never runs
+there. It runs in workers, which are a separate Rust binary,
+`isolane-worker`, built with its own copy of V8.
+
+```text
+ host process (Node.js)                         worker processes (Rust + V8)
+┌─────────────────────────────────┐  pipes  ┌──────────────────────────────┐
+│ your application                │◀──────▶│ worker: tenant "acme"         │
+│ isolane                         │         │  one thread per isolate       │
+│  Runtime, Tenant, Program       │         │  one watchdog per isolate     │
+│  supervisor: spawn, route,      │  pipes  │  seccomp + Landlock           │
+│    limits, recycle, quarantine  │◀──────▶├──────────────────────────────┤
+│  host functions and brokers     │         │ worker: tenant "globex"       │
+└─────────────────────────────────┘         └──────────────────────────────┘
+```
+
+The reason for the split is that code in the same address space can read
+anything in it. A V8 bug, or a Spectre-style side channel, would give
+guest code running inside Node.js access to the host's memory. A separate
+process puts the kernel's process boundary between the two, and lets the
+worker drop privileges the host process needs to keep.
+
+## The supervisor
+
+The supervisor is the part of the library that manages workers. It starts
+a tenant's worker on the tenant's first request, routes that tenant's
+evals and calls to it, runs the host functions guest code calls, and
+enforces the limits that a worker cannot be trusted to enforce on itself:
+how many isolates and evals a tenant may have in flight, how long a worker
+may go without answering, how many host calls and bytes may be pending.
+
+Everything a worker sends is treated as hostile. Once a worker has run
+guest code it may be compromised, so the supervisor parses its messages as
+untrusted input, checks their shapes before use, cuts log lines to size
+again, and counts host calls itself. A worker that breaks the protocol is
+killed. Figures a worker reports about itself, such as CPU time and peak
+memory, are taken as advisory; the one usage figure the supervisor
+measures independently is the worker's CPU time, read from the kernel on
+Linux (see [usage](/reference/usage)).
+
+## Workers, tenants, and isolates
+
+Each tenant has its own worker by default. The worker holds one V8 isolate
+for each stateful isolate (`tenant.isolate()`), each program instance, and
+each one-shot `run`, and runs each isolate on its own thread with its own
+watchdog thread. Isolates are never reused for another VM.
+
+The tenant, not the isolate, is the security boundary. A tenant's isolates
+share one process, so guest code that compromised the worker could reach
+every isolate in it and call every host function registered for any of
+them. Two pieces of code that must not see each other's data belong to
+two tenants. The [security model](/concepts/security-model) explains what
+each layer is expected to stop.
+
+A worker locks itself down before it reads any guest code. It starts with
+an empty environment and only its three standard descriptors, closes
+anything else it inherited, applies Landlock while it still has one
+thread, initializes V8, and then installs a seccomp filter on every
+thread. From then on it cannot open a file, create a socket, or start a
+process. That ordering matters: Landlock restricts only the calling thread
+and the threads it later creates, so it has to be in place before V8
+starts its own threads.
+
+Workers can be started ahead of need. The runtime's `spares` option keeps
+that many workers started, locked down, and ready, so a tenant without a
+worker gets one without waiting for V8 to start. A spare has never run
+guest code, and once a tenant claims one it serves only that tenant.
+
+## The protocol
+
+The supervisor and a worker talk over the worker's standard input and
+output. Each message is a frame: a 32-bit little-endian length, then the
+body. A body is UTF-8 JSON, or JSON followed by raw bytes, marked by a
+leading zero byte and the JSON's length, so that byte arrays in host-call
+arguments, results, and broker traffic cross without base64. Both sides
+refuse a frame larger than 64 MiB rather than allocate for it.
+
+JSON was chosen over V8's own serializer on purpose. The supervisor would
+otherwise parse a possibly compromised worker's output with a deserializer
+that Chrome never exposes across a trust boundary, and `JSON.parse` is a
+much smaller parser to trust. The cost is that values cross as JSON: a
+`Map` or a `Date` in a result arrives as what `JSON.stringify` makes of it.
+
+The worker reports a protocol version when it starts, and the library
+refuses a worker that speaks another one, with `ERR_WORKER_INCOMPATIBLE`.
+The library and the worker binary are released together, so this happens
+only when an override such as `ISOLANE_WORKER` points at a mismatched
+build.
+
+## Brokers
+
+A worker cannot reach the network or the filesystem, so `fetch`,
+`connect`, and `fs` are host calls. The guest's `fetch` sends the request
+to the supervisor, the supervisor checks it against the isolate's `fetch`
+policy, and if the policy allows it, the host process makes the request
+and streams the response back. The same holds for sockets and files. The
+host-process code that does this is called a broker.
+
+Brokering puts every policy decision in the trusted process. A
+compromised worker can send any request it likes, but the check runs in
+the host process, against the address actually connected to, so a guest
+cannot bypass a host allowlist or reach a private address by corrupting
+the worker. The price is a round trip over the pipe for each operation.
+See [capabilities](/reference/capabilities) for the policies.
+
+## A request, end to end
+
+When your application calls `tenant.run(code)`:
+
+1. The supervisor finds the tenant's worker, or starts one, and sends the
+   code with the isolate's configuration.
+2. The worker creates an isolate, from a spare if one of the right shape
+   is waiting, compiles the code, and runs it on the isolate's thread
+   while the watchdog tracks its time.
+3. When the guest calls a host function, the worker sends a frame up. The
+   supervisor runs the hooks, validates the arguments against the
+   function's schemas, runs your function, and sends the result back. In
+   the guest the call is a promise, settled by the isolate's event loop.
+4. When the code's value settles, the worker sends it as JSON, and the
+   supervisor resolves the `run` promise with it, or rejects it with an
+   [`IsolaneError`](/reference/errors).
+
+A program call follows the same path, except that the module was loaded
+and evaluated earlier and the call names one of its exports. See
+[programs](/concepts/programs).
+
+## Recycling and quarantine
+
+A worker does not live forever. After `workerLifetimeMs` (one hour by
+default) or `workerEvals` (100,000) it is recycled: new isolates start on a
+fresh worker, and the old one finishes what it is running and exits.
+Stateful isolates still open on the old worker keep working for up to a
+minute, then are retired. The point of recycling is to bound how long a
+worker that was quietly compromised can keep running. Everything a worker
+kept, including its [caches](/concepts/caches), goes with it.
+
+A worker that crashes, breaks the protocol, stops answering, or exits on
+its own is treated as a possible exploit attempt. The supervisor counts a
+security event, emits `onSecurityEvent`, and quarantines the tenant for
+`quarantineMs` (60 seconds by default), during which new isolates for it
+fail with `ERR_TENANT_QUARANTINED`. Quarantine stops a tenant that is
+probing for an exploit from retrying in a tight loop, and the event gives
+your application the chance to alert or suspend the account. A worker the
+supervisor stopped on purpose, one refused by strict mode, and one that
+ran out of memory under its limit are expected ends and are not security
+events.
+
+## Configuration flows down
+
+Configuration lives entirely in the host process. The runtime's
+`defaults`, the tenant's settings from `tenants(name)`, and the options of
+each call are merged into one resolved configuration per isolate, and the
+supervisor sends the worker only what the worker needs: the limits it
+enforces, the guest capabilities to install, and the names of host
+functions, never the functions themselves. Host functions, policies, and
+hooks stay in the host process. See
+[configuration](/reference/configuration).

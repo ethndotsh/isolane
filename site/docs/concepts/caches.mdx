@@ -1,0 +1,138 @@
+---
+title: Caches
+description: What a tenant's worker keeps so that a program's later instances start quickly, and why nothing is kept outside the worker.
+---
+
+## Why a worker keeps anything
+
+Every instance of a program is its own V8 isolate, and V8's compiled
+module records belong to one isolate. Without caching, each new instance
+would be sent the program's files, parse them, resolve the imports,
+compile every module, and evaluate it, exactly as the first instance did.
+A warm pool hides that cost for steady traffic, but the pool creates
+instances whenever traffic grows, after an instance is retired, and for
+every call when `reuse` is off. So the worker keeps what the first
+instance produced, and later instances reuse it.
+
+Measured on a macOS development build, with zod bundled by esbuild (747
+KB) as the program and `reuse: false` (`bench/program-load.mjs`), the
+first instance loads in about 16 ms. A later instance loads in 12.8 ms
+with nothing kept, 9.3 ms with only the files kept, 8.0 ms with only the
+code cache, and 2.9 to 3.3 ms with both. Most of the 12.8 ms is not
+compiling: sending and parsing 747 KB of source for each instance takes
+about 5 ms.
+
+## What is kept
+
+A worker keeps four things, each in the tenant's own worker process.
+
+The program's files are sent with the first load on each worker, under a
+hash of their contents, and later loads of the same program name the hash
+instead of sending the files again. The worker keeps up to
+`caches.fileBytes` (64 MiB by default) of programs' files and drops the
+least recently loaded first. A load that names a hash the worker no
+longer has is answered by sending the files again. `load` copies byte
+files when it is called, so a loaded program cannot change underneath its
+instances.
+
+A V8 code cache of each module is made once the first instance has
+evaluated the program, after `load` has returned. Making it after
+evaluation, rather than right after compiling, means it holds the
+functions setup ran as well as the top-level code, so later instances
+deserialize bytecode for them instead of compiling lazily. The cache is
+keyed by the module's path, the hash of its file, and the transform's
+options, holds up to `caches.codeBytes` (64 MiB), and is dropped whole
+when it is full. V8 checks a cache against its own version, flags, and the
+source before using it; a cache it rejects is counted in the
+`programLoad` event's `modules.rejected` and made again.
+
+Compiled WebAssembly is kept by the module's bytes. V8 already shares a
+compiled module between isolates in one process that compile the same
+bytes, but only while one of them still holds it, so the sharing ends when
+the last isolate using it goes away. The worker keeps the modules guests
+compiled most recently, up to `caches.wasmBytes` (32 MiB of wire bytes;
+the compiled code is a few times larger), so the next isolate that
+compiles the same bytes reuses the compiled and tiered-up code. A 1.1 MB
+module, compiled and run hot in each fresh instance, takes about 2 ms less
+with the module kept.
+
+TypeScript and JSX that the worker transformed are kept by content hash,
+so a program's later instances do not transform its files again. That
+cache has a fixed budget of 64 MiB.
+
+## Spare isolates
+
+Creating a web isolate, mostly deserializing the web platform's startup
+snapshot, takes about 1.5 ms on a development build. The runtime's
+`spareIsolates` option (0 to 8, off by default) has each tenant's worker
+make that many isolates and their contexts ahead of need. A new VM takes a
+spare when a spare could have been made for it: it uses the web platform
+and has no `random.seed`, because V8 draws an isolate's entropy as it
+creates it, before the seed is known.
+
+Spares are kept by shape, and the shape is the VM's `limits.heapBytes`,
+since a heap limit is fixed when an isolate is created. The worker keeps
+up to `spareIsolates` spares for each of the four shapes its web VMs used
+most recently, makes spares of a shape after its first VM of that shape,
+and drops the least recently used shape's spares when a fifth shape comes.
+The count is per shape rather than a total shared between shapes because
+a shared total, refilled for whichever shape was just used, would take
+the other shapes' spares, and a tenant alternating between two heap
+limits would gain nothing. A worker therefore holds at most
+`spareIsolates` times four spares.
+
+With one spare ready, a fresh web run takes about 0.25 ms instead of
+1.5 ms, and a later program instance about 2.4 ms instead of 3.3 ms. Each
+spare holds about 3 MB of the worker's memory while idle, measured on a
+development build. That memory is paid in every tenant's worker, which is
+why spares are off by default.
+
+## Budgets
+
+The three budgets are the runtime's `caches` option, in bytes, each from 0
+to 1 GiB:
+
+```js
+const runtime = new Runtime({
+  caches: { fileBytes: 128 << 20, codeBytes: 128 << 20, wasmBytes: 64 << 20 },
+  spareIsolates: 1,
+});
+```
+
+Everything a worker keeps counts against its `workerMemoryBytes`. A
+platform with large programs or many WebAssembly modules can raise the
+budgets together with that limit, and one with tight workers can lower
+them. A budget of 0 keeps nothing of that kind: with `fileBytes: 0` every
+load sends the files, with `codeBytes: 0` no code caches are made, and
+with `wasmBytes: 0` each isolate compiles its WebAssembly again unless
+another isolate still holds the module. The budgets are runtime-wide
+rather than per tenant, because a worker receives its code and WebAssembly
+budgets when it starts, before any tenant configuration is resolved;
+`workerMemoryBytes` is the per-tenant control.
+
+## Invalidation
+
+Nothing needs to be invalidated by hand. Every entry is keyed by content,
+so a changed program has new hashes and misses the cache. A new worker
+binary means a new V8, which rejects the old code caches, and in any case
+a new binary means new workers with empty caches.
+
+## Why the supervisor keeps no copies
+
+Caches live only in the worker, and go with it when it is recycled or
+crashes. The supervisor could keep a copy of each code cache and hand it
+to the tenant's next worker, which would let a recycled worker start
+warm. It does not, for a security reason.
+
+A code cache is deserialized into V8's trusted space, where bytecode lives
+outside the V8 sandbox, and V8's checks on a cache guard against
+staleness, not against crafted input. A worker that guest code had
+compromised could hand the supervisor a crafted cache, and the tenant's
+next worker would load it. The compromise would then outlive the
+recycling and the quarantine that are meant to end it. Keeping a copy
+would save one compile per program per worker lifetime, which by default
+is an hour or 100,000 evals. That is not worth the risk.
+
+For the same reason, nothing a worker keeps is shared with another
+tenant. Each tenant has its own worker, and its caches are made from its
+own code by its own worker.

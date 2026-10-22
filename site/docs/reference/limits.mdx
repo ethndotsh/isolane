@@ -1,0 +1,104 @@
+---
+title: Limits
+description: "Every isolate, tenant, and runtime limit: its default, its unit, its range, and what happens when it is reached."
+---
+
+## Setting limits
+
+Limits are set in the `limits` field of an `IsolateConfig`, at the levels shown on the [Configuration](/reference/configuration#where-limits-can-be-set) page. Each is an integer of at least 1, except where the tables say otherwise. A limit marked nullable takes `null` to turn it off. Durations are in milliseconds and at most 2^31 - 1. Sizes are in bytes. An out-of-range value throws `ERR_INVALID_CONFIG`.
+
+`DEFAULT_LIMITS` exports the defaults as a frozen object.
+
+## Isolate limits
+
+These apply to each isolate, and can be set at every level.
+
+| Limit | Default | Nullable | Applies to | When reached |
+|---|---|---|---|---|
+| `timeoutMs` | 30,000 | yes | Wall-clock time of each eval or call, and of each batch of work between evals | `ERR_LIMIT`; the isolate is retired |
+| `cpuMs` | `null` | yes | CPU time of each eval or call. Linux only. | `ERR_LIMIT`; the isolate is retired |
+| `startupCpuMs` | 1,000 | yes | CPU time of a program's setup, in place of `cpuMs`. Linux only. | `ERR_LIMIT`; the load fails |
+| `heapBytes` | 128 MiB | yes | The isolate's V8 heap. At least 1 MiB, at most 4 GiB. `null` uses V8's default. | `ERR_LIMIT`; the isolate is retired |
+| `timers` | 10,000 | no | Live timers. At most 2^32 - 1. | `setTimeout` throws a `RangeError` in the guest; the eval continues |
+| `backgroundMs` | 1,000 per minute | yes | Work a stateful isolate does between evals. See [Work between evals](#work-between-evals). | The isolate is stopped; its next eval fails with `ERR_LIMIT`, later ones with `ERR_ISOLATE_RETIRED` |
+| `logBytes` | 1 MiB | no | Console output per eval | Output is cut, with one notice |
+| `logLineBytes` | 16 KiB | no | One console line | The line is cut, with `…` |
+| `codeBytes` | 16 MiB | no | Source code per eval, as UTF-8 | `ERR_LIMIT` |
+| `modules` | 1,000 | no | Files in a program | `ERR_LIMIT`; the load fails |
+| `moduleBytes` | 32 MiB | no | A program's files and their paths together. At most 64 MiB minus 64 KiB. | `ERR_LIMIT`; the load fails |
+| `resultBytes` | 16 MiB | no | An eval's completion value, as JSON | `ERR_LIMIT` |
+| `bodyBytes` | 16 MiB | no | A `program.fetch` request body, and its response body. At most 63 MiB. | `ERR_LIMIT`; the instance stays in service |
+| `decompressedBytes` | 128 MiB | no | Output of one `DecompressionStream` | The stream errors; the eval continues |
+| `pendingHostCalls` | 1,000 | no | Async host calls waiting for a reply at once. At most 2^32 - 1. | A `RangeError` in the guest, and the eval fails with `ERR_LIMIT` |
+| `hostCalls` | 10,000 | no | Host calls per eval, not counting isolane's own `fetch`, `connect`, and `fs` calls. At most 2^32 - 1. | A `RangeError` in the guest, and the eval fails with `ERR_LIMIT` |
+| `pendingHostCallBytes` | 16 MiB | no | Arguments of host calls waiting for replies at once, held in the host process | A `RangeError` in the guest, and the eval fails with `ERR_LIMIT` |
+
+A guest exception's message and stack are each cut to 64 KiB in the worker, whatever the log limits are.
+
+## Tenant limits
+
+These apply to a tenant's worker process, and can be set in `defaults` and `tenants(name)` only.
+
+| Limit | Default | Nullable | Applies to | When reached |
+|---|---|---|---|---|
+| `isolates` | 100 | no | Live isolates, including program instances | `ERR_LIMIT` |
+| `pendingEvals` | 1,000 | no | Evals in flight, running or queued, across the tenant's isolates | `ERR_LIMIT` |
+| `workerMemoryBytes` | 2 GiB | yes | The worker's memory beyond V8's baseline: every heap, `ArrayBuffer`, and WebAssembly memory together. At least 64 MiB. Linux only, enforced with `RLIMIT_DATA`. | `ERR_LIMIT`, `retryable`; the worker restarts on the next call |
+| `idleMs` | 30,000 | no | Time with no isolates and nothing running | The worker exits |
+| `workerBackgroundMs` | 10,000 per minute | yes | `backgroundMs` for all the tenant's isolates together | Background work pauses until the budget refills; nothing is retired |
+| `workerLifetimeMs` | 3,600,000 | yes | The worker's age | The worker is recycled. See [Recycling](#recycling). |
+| `workerEvals` | 100,000 | yes | Evals the worker has run | The worker is recycled |
+
+## Runtime limits
+
+Set in `new Runtime({ limits })` only.
+
+| Limit | Default | Applies to | When reached |
+|---|---|---|---|
+| `tenants` | 1,000 | Tenants with a live worker process, counting workers that are draining after a recycle | The least recently used idle tenant's worker is stopped to make room. If no tenant is idle, the new tenant fails with `ERR_LIMIT`. |
+
+## Program pool limits
+
+A program's `instances.queue` and `instances.queueMs` fail calls with `ERR_LIMIT`, and `err.limit` is `'instances.queue'` or `'instances.queueMs'`. They are options of `tenant.load`, not `limits` fields. See [Program](/reference/program#instances).
+
+## Policy limits
+
+The `fetch`, `connect`, and `fs` policies have their own `limits`, listed on the [Capabilities](/reference/capabilities) page and exported as `DEFAULT_POLICY_LIMITS`. Reaching one fails the guest's operation, not the eval, and `onLimit` names it by its path, such as `fetch.limits.requests`.
+
+## What every limit does
+
+Every limit reached emits `onLimit` with the limit's name. Reaching it has one of three effects:
+
+| Effect | Limits |
+|---|---|
+| The eval or call fails with `ERR_LIMIT`, and `err.limit` names the limit | `timeoutMs`, `cpuMs`, `startupCpuMs`, `heapBytes`, `backgroundMs`, `codeBytes`, `modules`, `moduleBytes`, `resultBytes`, `bodyBytes`, `pendingHostCalls`, `hostCalls`, `pendingHostCallBytes`, `isolates`, `pendingEvals`, `workerMemoryBytes`, `tenants`, `instances.queue`, `instances.queueMs` |
+| The guest's operation fails, and the eval continues | `timers`, `decompressedBytes`, and the policy limits |
+| Output is cut | `logBytes`, `logLineBytes` |
+
+After `timeoutMs`, `cpuMs`, `heapBytes`, or `backgroundMs`, the isolate is retired, and its later evals and calls fail with `ERR_ISOLATE_RETIRED`. After `workerMemoryBytes`, the tenant's worker is replaced on the next call. After the other limits, the isolate stays usable.
+
+## Work between evals
+
+After an eval returns, a stateful isolate can keep running: timers, `MessagePort` tasks, and continuations of host calls the eval did not await. Each batch of this work runs under `timeoutMs` and `cpuMs`, as an eval does. All of it shares `backgroundMs`, a budget per minute that starts full and refills continuously. It is measured as CPU time on Linux and wall time elsewhere. Each host-call continuation is charged at least 0.25 ms. The work counts in the tenant's `usage().cpuMs`.
+
+When `backgroundMs` runs out, the isolate stops and its timers never fire again. `onLimit` fires with `limit: 'backgroundMs'`, its next eval fails with `ERR_LIMIT`, and later evals fail with `ERR_ISOLATE_RETIRED`.
+
+`workerBackgroundMs` is the same kind of budget for all of a tenant's isolates together. When it runs out, every isolate's background work waits until the budget refills. Evals still run, and `onLimit` fires once per isolate with `limit: 'workerBackgroundMs'`. Isolates in the middle of a batch finish it, at most a 10 ms slice each, and what they overdraw is paid back before background work runs again.
+
+Timers run in slices of 10 ms, so an isolate's evals and host-call replies are not held up behind its timers.
+
+## Host calls
+
+A call past `pendingHostCalls`, `hostCalls`, or `pendingHostCallBytes` throws a `RangeError` in the guest, with `code: 'ERR_LIMIT'` and `limit` naming it, before the call reaches the host process. The eval it was made in fails with `ERR_LIMIT` even if the guest catches the error. The worker enforces these limits, and the supervisor kills a worker that sends more calls or bytes than they allow, as a protocol violation.
+
+A host call stays pending until its function settles, for at most one second past the isolate's `timeoutMs`, even after the eval that made it has returned. Then the guest's promise rejects with a `RangeError` with `code: 'ERR_LIMIT'`, `ctx.signal` aborts, and the slot is free. An eval that fails with `ERR_LIMIT` or `ERR_ISOLATE_RETIRED` abandons every pending call of its isolate: their signals abort and their promises never settle.
+
+`hostCalls` counts the calls an eval makes while it runs. Continuations after it returns count against `backgroundMs` instead.
+
+## Recycling
+
+A tenant's worker is replaced after `workerLifetimeMs` or `workerEvals`. `onWorker` fires with `kind: 'recycle'`, and new isolates start on a fresh worker. The old worker finishes what it is running and exits. Stateful isolates still open on it keep working for up to a minute, or `workerLifetimeMs` if that is shorter. Then they are retired, and their evals fail with `ERR_ISOLATE_RETIRED`, `retryable`. If a worker is recycled again before the previous one has drained, the previous one's isolates are retired at once.
+
+## Memory in release builds
+
+Release workers use the V8 sandbox, which requires pointer compression. All of a tenant's isolates share one pointer cage of about 4 GiB in the worker, whatever `heapBytes` times `isolates` adds up to. `ArrayBuffer` and WebAssembly memory live outside the cage, inside the sandbox, and only `workerMemoryBytes` bounds them. Development builds have neither the sandbox nor pointer compression, so memory measured on them overstates what a release worker uses.

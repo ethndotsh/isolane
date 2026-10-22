@@ -1,0 +1,140 @@
+---
+title: Build from source
+description: Build the isolane worker with V8 compiled from source and its sandbox enabled, or a development worker against prebuilt V8.
+---
+
+This guide builds `isolane-worker`, the binary each tenant's worker process
+runs, and the TypeScript library, then runs the tests against them. A
+release build compiles V8 from source with the V8 sandbox enabled; a
+development build links a prebuilt V8 in minutes, without the sandbox.
+
+## Requirements
+
+| Host | Needs |
+|---|---|
+| Linux x64 | Rust (stable), Python 3, git, libclang 21 (`libclang-21-dev` from apt.llvm.org) |
+| macOS | Rust (stable), Python 3, git, full Xcode (not only the Command Line Tools) |
+| Both | Node.js 22 or later, for the library and the tests |
+
+Linux arm64 workers are cross-compiled on an x64 host, because Chromium's
+clang and Rust toolchains, which V8's build uses, exist for x64 Linux only.
+Building on an arm64 Linux host directly is not supported.
+
+## Development build
+
+Use this to work on the library or the worker without compiling V8:
+
+```sh
+scripts/build-worker.sh fast --no-default-features --features dev-prebuilt
+npm install && npx tsc
+ISOLANE_DEV_INSECURE=1 ISOLANE_WORKER=$PWD/target/fast/isolane-worker npm test
+```
+
+`dev-prebuilt` links rusty_v8's published V8, which is built without the
+V8 sandbox. The worker reports `sandboxSecure: false`, and the library
+refuses it unless strict mode is off (`new Runtime({ strict: false })`) and
+`ISOLANE_DEV_INSECURE=1` is set. Tests that need the release worker are
+skipped. Never deploy this build.
+
+## Release build
+
+```sh
+scripts/fetch-rusty-v8.sh   # rusty_v8, V8, and their dependencies, into build/
+scripts/build-v8.sh         # target/release/isolane-worker
+npm install && npx tsc
+ISOLANE_WORKER=$PWD/target/release/isolane-worker npm test
+```
+
+<Steps>
+<Step title="Fetch the sources">
+
+`scripts/fetch-rusty-v8.sh` shallow-clones rusty_v8 at the pinned tag with
+its V8 checkout, moves V8 to the pinned upstream patch release, and applies
+the patches in `patches/`. It checks both commits against the pins in the
+script and fails if a tag has moved. It retries Chromium's git host, which
+often returns transient errors. A second run reuses `build/rusty_v8` and
+only checks the pins.
+
+</Step>
+<Step title="Build V8 and the worker">
+
+`scripts/build-v8.sh` builds V8 with the GN arguments in `scripts/v8.gn`
+and the sandbox enabled, then the worker, logging to
+`build/logs/<os>-<arch>.log`. A clean build compiles all of V8: the arm64
+cross build takes about 95 minutes on 4 cores. Later builds that change
+only the worker's Rust code take minutes.
+
+</Step>
+<Step title="Embed the web snapshot">
+
+`build-v8.sh` runs `scripts/build-worker.sh release`, which builds the
+worker twice. The first binary writes a V8 startup snapshot of the web
+platform (`--make-web-snapshot`), and the second embeds it. The script
+ends by running `isolane-worker --self-check` and fails unless it reports
+`"webSnapshot":"embedded"`. A worker without the snapshot works, but builds
+it at startup, about 30 ms before its first web isolate.
+
+</Step>
+</Steps>
+
+Every cargo command that builds V8 must see the same `GN_ARGS`, or
+rusty_v8's build script regenerates V8's build and recompiles all of it.
+`build-v8.sh` sets it from `scripts/gn-args.sh`; set it the same way in your
+shell if you run cargo directly.
+
+## Cross-compile for Linux arm64
+
+The arm64 build runs in two passes, because the first binary must run on
+arm64 to make the snapshot:
+
+```sh
+# On x64: build without a snapshot.
+CARGO_BUILD_TARGET=aarch64-unknown-linux-gnu scripts/build-worker.sh release
+
+# On arm64: make the snapshot with that binary.
+isolane-worker --make-web-snapshot=web-snapshot.bin
+
+# On x64 again: rebuild with it embedded (only the worker crate relinks).
+ISOLANE_WEB_SNAPSHOT=web-snapshot.bin CARGO_BUILD_TARGET=aarch64-unknown-linux-gnu \
+  scripts/build-worker.sh release
+```
+
+The arm64 worker links with clang and lld against the Debian bullseye
+arm64 sysroot that V8's build installs, so it runs on glibc 2.31 or later.
+`.github/actions/build-worker/action.yml` has the full environment CI
+uses: the linker and `RUSTFLAGS`, the sysroot installation, and the
+`BINDGEN_EXTRA_CLANG_ARGS` that keep bindgen off the host's headers.
+
+## Check the result
+
+```sh
+target/release/isolane-worker --self-check
+```
+
+```text
+{"v8":"15.2.124.45","sandboxEnabled":true,"sandboxSecure":true,"webSnapshot":"embedded", ...}
+```
+
+Before sending a change, run the checks CI runs on the Rust code:
+
+```sh
+cargo fmt --check
+cargo clippy --all-targets -- -D warnings
+```
+
+The worker follows Google's Rust style guide, as `CONTRIBUTING.md`
+describes, and the workspace's lints enforce the parts Clippy can check.
+CI also runs the web-platform-tests and test262 gates
+(`node test/wpt/run.mjs`, `node test/test262/run.mjs`) against the release
+worker in strict mode.
+
+## If the build fails in bindgen
+
+`build-v8.sh` on Linux stops with `building V8 on Linux needs libclang 21`
+when `/usr/lib/llvm-21/lib` is missing. rusty_v8 runs bindgen against V8's
+bundled libc++, which needs libclang 21 or later, and distribution packages
+are usually older. Install it from apt.llvm.org (`./llvm.sh 21`, then
+`apt-get install libclang-21-dev`), or set `LIBCLANG_PATH` and
+`CLANG_PATH` to another libclang 21 installation. On macOS, the
+equivalent failure names Xcode: install it and run
+`sudo xcode-select -s /Applications/Xcode.app`.

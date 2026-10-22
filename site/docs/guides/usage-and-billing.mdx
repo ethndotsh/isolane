@@ -1,0 +1,117 @@
+---
+title: Meter usage per tenant
+description: Read each tenant's evals, CPU time, host calls, and memory, reset the counters each period, and choose which figures to bill on.
+---
+
+This guide reads the usage figures isolane keeps for each tenant and each
+program, and records them once per billing period.
+
+## Read a tenant's usage
+
+```js
+const usage = runtime.tenant('acme').usage();
+// {
+//   evals: 1840,
+//   failures: 12,
+//   cpuMs: 9320,
+//   workerCpuMs: 10450,
+//   hostCalls: 5210,
+//   logBytes: 88213,
+//   peakMemoryBytes: 41943040,
+//   securityEvents: 0,
+// }
+```
+
+The figures count from when the runtime first saw the tenant, or from the
+last `resetUsage()`. `usage()` returns a copy.
+
+| Field | Counts |
+|---|---|
+| `evals` | What the worker ran: `run`, `isolate.eval`, `isolate.call`, `program.call`, `program.fetch`, and each program instance's load |
+| `failures` | Those that failed in the worker; a call a hook denied or the pool refused never reaches it and is not counted |
+| `cpuMs` | CPU time on the tenant's isolate threads: evals, calls, setup, and work between them (Linux; 0 elsewhere) |
+| `workerCpuMs` | CPU time of the tenant's worker processes, measured by your process from the kernel (Linux only; absent elsewhere) |
+| `hostCalls` | Calls to your host functions |
+| `logBytes` | Console output delivered to `onLog` |
+| `peakMemoryBytes` | The largest heap, plus external memory, any of its isolates reported |
+| `securityEvents` | Worker crashes, protocol violations, and unresponsive workers |
+
+## Reset at the start of each period
+
+```js
+function closePeriod(tenantNames) {
+  const rows = [];
+  for (const name of tenantNames) {
+    const tenant = runtime.tenant(name);
+    const { evals, workerCpuMs = 0, hostCalls } = tenant.usage();
+    tenant.resetUsage();
+    rows.push({ tenant: name, evals, cpuMs: workerCpuMs, hostCalls, at: new Date() });
+  }
+  return billing.insert(rows);
+}
+```
+
+`usage()` and `resetUsage()` are synchronous, so nothing is counted between
+the read and the reset. Usage is held in memory and is lost when your
+process exits: record it at least as often as you can afford to lose.
+
+## Choose figures that hold against a hostile tenant
+
+Every figure except `workerCpuMs` is reported by the tenant's
+[worker](/concepts/architecture). A
+guest that compromised its worker could report anything, so these figures
+suit dashboards and soft quotas, not charges a hostile tenant could
+dispute.
+
+`workerCpuMs` is measured by the supervisor in your process, which reads
+each worker's CPU time from `/proc/<pid>/stat`. It covers every thread of
+the worker, user and system time, in 10 ms steps, so it includes V8's
+compiler and garbage collector threads and is a little higher than
+`cpuMs`. It is read every 5 seconds, when `usage()` is called, and when a
+worker stops; a worker that crashes loses at most its last 5 seconds.
+Bill CPU on `workerCpuMs`, on Linux.
+
+## Per-program figures
+
+A program reports its own figures, for the calls it served:
+
+```js
+program.usage();
+// {
+//   calls: 9, failures: 5,
+//   loads: 2, loadFailures: 0,
+//   cpuMs: 41,
+//   instances: 1, busy: 0, queued: 0,
+// }
+```
+
+`calls` and `failures` include `fetch` calls. `loads` counts instances
+loaded, including replacements for retired ones, and `instances`, `busy`,
+and `queued` describe the pool at the moment you call it. Program figures
+are worker-reported, like the tenant's, and they are not reset by
+`tenant.resetUsage()`.
+
+## Count something isolane does not
+
+For units your product defines, such as requests per API key or rows
+written, count them in your host functions or in a hook:
+
+```js
+const runtime = new Runtime({
+  hooks: {
+    afterHostCall: ({ tenant, name }) => meter.increment(tenant, name),
+  },
+});
+runtime.on('call', ({ tenant, program, name, durationMs, error }) => {
+  metrics.histogram('call_ms', durationMs, { tenant, program, name, ok: !error });
+});
+```
+
+`durationMs` is wall time measured in your process, which includes queueing
+in the worker and the IPC round trip.
+
+## If `cpuMs` is always 0
+
+`cpuMs` and `program.usage().cpuMs` are measured with Linux thread CPU
+clocks and are 0 on macOS, and `workerCpuMs` is absent there. Check
+metering on a Linux host.

@@ -1,0 +1,323 @@
+---
+title: Build a serverless platform
+description: Load a multi-file TypeScript app as a program, serve HTTP requests from it, and deploy new versions of it.
+---
+
+You will build a small serverless platform: a Node.js HTTP
+server that runs each tenant's app in its own sandboxed worker. Apps are
+TypeScript, written as Workers-style fetch handlers. The platform loads
+each one as a program, keeps it warm, gives it a key-value store through a
+host function, limits it by plan, and replaces it with a new version on
+request.
+
+It builds on [Run your first guest code](/tutorials/first-sandbox). Do
+that tutorial first: this one uses the same isolane build and the same two
+environment variables.
+
+## Set up the project
+
+Create a project and install isolane from your clone, as before:
+
+```sh
+mkdir platform && cd platform
+npm init -y && npm pkg set type=module
+npm install ../isolane
+mkdir -p apps/hello
+```
+
+The platform reads each app from a directory under `apps/`. The directory
+name is the app's name, and every app is its own tenant.
+
+## Write an app
+
+An app is an ES module whose default export has a `fetch(request, env,
+ctx)` method, the shape Cloudflare Workers uses. It receives a standard
+`Request` and returns a `Response`.
+
+```ts apps/hello/index.ts
+import { greet } from './greet.ts';
+import messages from './messages.json';
+
+interface Env {
+  kv: {
+    get(key: string): Promise<number | null>;
+    put(key: string, value: number): Promise<void>;
+  };
+}
+
+export default {
+  async fetch(request: Request, env: Env, ctx: { waitUntil(promise: Promise<unknown>): void }) {
+    const name = new URL(request.url).searchParams.get('name') ?? 'world';
+    const message = greet(messages.hello, name);
+    const visits = ((await env.kv.get('visits')) ?? 0) + 1;
+    ctx.waitUntil(env.kv.put('visits', visits));
+    return Response.json({ message, visits });
+  },
+};
+```
+
+```ts apps/hello/greet.ts
+export function greet(template: string, name: string): string {
+  return template.replace('{name}', name);
+}
+```
+
+```json apps/hello/messages.json
+{ "hello": "hello, {name}" }
+```
+
+The app imports another TypeScript file and a JSON file. isolane resolves
+those imports inside the worker, over the files the platform sends, and
+strips the TypeScript types there; nothing is bundled or compiled in your
+process. `env.kv` is the store the platform provides. `ctx.waitUntil` lets
+the write finish after the response has gone out, so the client does not
+wait for it.
+
+## Write the platform
+
+The platform does four things: it reads an app's files, loads them as a
+program, turns each HTTP request into a `Request` for the program, and
+turns the program's `Response` back into an HTTP response.
+
+```js platform.js
+import { readdir, readFile } from 'node:fs/promises';
+import { createServer } from 'node:http';
+import { join, relative } from 'node:path';
+import { IsolaneError, Runtime } from 'isolane';
+
+const plans = {
+  hello: 'free',
+};
+
+const runtime = new Runtime({
+  strict: false,
+  defaults: { limits: { timeoutMs: 2_000, heapBytes: 64 << 20 } },
+  tenants: (name) =>
+    plans[name] === 'free' ? { limits: { timeoutMs: 500, isolates: 10 } } : undefined,
+});
+
+// Each app's key-value store, kept in this process.
+const stores = new Map();
+function kvFor(app) {
+  if (!stores.has(app)) stores.set(app, new Map());
+  const store = stores.get(app);
+  return {
+    get: async (key) => store.get(key) ?? null,
+    put: async (key, value) => void store.set(key, value),
+  };
+}
+
+// Every file under apps/<app>/, by its path relative to that directory.
+async function readApp(app) {
+  const dir = join('apps', app);
+  const files = {};
+  for (const entry of await readdir(dir, { recursive: true, withFileTypes: true })) {
+    if (!entry.isFile()) continue;
+    const path = join(entry.parentPath, entry.name);
+    files[relative(dir, path)] = await readFile(path, 'utf8');
+  }
+  return { main: 'index.ts', files };
+}
+
+const programs = new Map();
+
+async function deploy(app) {
+  const program = await runtime.tenant(app).load(await readApp(app), {
+    host: { kv: kvFor(app) },
+    instances: { max: 2, concurrency: 4 },
+    limits: { bodyBytes: 1 << 20 },
+  });
+  const previous = programs.get(app);
+  programs.set(app, program);
+  await previous?.close();
+}
+
+function toRequest(req, url) {
+  const body = req.method === 'GET' || req.method === 'HEAD' ? null : req;
+  return new Request(url, { method: req.method, headers: req.headers, body, duplex: 'half' });
+}
+
+const server = createServer(async (req, res) => {
+  const url = new URL(req.url, `http://${req.headers.host}`);
+  const [, app, action] = url.pathname.split('/');
+
+  if (req.method === 'POST' && action === '_deploy') {
+    try {
+      await deploy(app);
+      return res.writeHead(200).end(`deployed ${app}\n`);
+    } catch (err) {
+      return res.writeHead(400).end(`${err.code}: ${err.guest?.stack ?? err.message}\n`);
+    }
+  }
+
+  const program = programs.get(app);
+  if (!program) return res.writeHead(404).end(`no app named ${app}\n`);
+  try {
+    const response = await program.fetch(toRequest(req, url));
+    res.writeHead(response.status, Object.fromEntries(response.headers));
+    res.end(Buffer.from(await response.arrayBuffer()));
+  } catch (err) {
+    if (!(err instanceof IsolaneError)) throw err;
+    const status = err.kind === 'guest' ? 500 : err.kind === 'limit' ? 503 : 502;
+    res.writeHead(status, { 'content-type': 'application/json' });
+    res.end(JSON.stringify({ error: err.code, message: err.guest?.message ?? err.message }));
+  }
+});
+
+await deploy('hello');
+const port = Number(process.env.PORT ?? 3000);
+server.listen(port, () => console.log(`listening on http://localhost:${port}`));
+```
+
+The parts that matter:
+
+`tenant.load({ main, files })` loads the app. It resolves once the app's
+first instance has evaluated its modules, so an app that does not compile,
+or throws at the top level, fails here and not on its first request.
+
+`host: { kv: ... }` gives the app its store. In a program, host functions
+appear in the handler's `env` argument rather than as globals. The store
+lives in the platform's process, so it outlives every instance and every
+version of the app. It is a demonstration: with several requests in flight,
+two can read the same count before either writes it back.
+
+`instances` controls the warm pool. Each instance evaluates the app's
+modules once and then serves request after request. `concurrency: 4` lets
+one instance work on four requests at a time, which suits an app that
+spends most of its time waiting on host functions, and `max: 2` caps the
+app at two instances.
+
+`tenants` sets limits by plan. The `hello` app is on the free plan, so it
+gets 500 ms per request instead of the default 2 seconds, and at most 10
+isolates. The function is called with the tenant's name, so the plan
+lookup stays in your code.
+
+`program.fetch(request)` sends a `Request` to the app's fetch handler and
+resolves to its `Response`. Request and response bodies are buffered, up
+to `limits.bodyBytes` each, here 1 MiB.
+
+The error handler maps isolane's error kinds to HTTP statuses. An app that
+throws is the app's fault, a 500. One stopped by a limit gets a 503. Any
+other failure is the platform's, a 502.
+
+## Run it
+
+Start the platform in one terminal:
+
+```sh
+node platform.js
+```
+
+```txt
+listening on http://localhost:3000
+```
+
+In another, send it requests:
+
+```sh
+curl 'http://localhost:3000/hello/?name=Ada'
+curl 'http://localhost:3000/hello/?name=Grace'
+curl 'http://localhost:3000/nope/'
+```
+
+```txt
+{"message":"hello, Ada","visits":1}
+{"message":"hello, Grace","visits":2}
+no app named nope
+```
+
+The second request went to the instance the first one warmed up, so it
+compiled nothing.
+
+## Deploy a broken version
+
+Edit `greet.ts` so that its top-level code throws, as a typo in a real
+deploy might:
+
+```ts apps/hello/greet.ts
+export function greet(template: string, name: string): string {
+  return template.replace('{name}', name);
+}
+
+throw new Error('not ready yet');
+```
+
+Ask the platform to deploy it, then send a request:
+
+```sh
+curl -X POST 'http://localhost:3000/hello/_deploy'
+curl 'http://localhost:3000/hello/?name=Ada'
+```
+
+```txt
+ERR_GUEST_EXCEPTION: Error: not ready yet
+    at greet.ts:5:7
+{"message":"hello, Ada","visits":3}
+```
+
+The load failed, so `deploy` threw before it replaced anything, and the
+previous version kept serving. The stack names `greet.ts` and the line in
+it, because the worker reports positions in the files you sent.
+
+## Deploy a working version
+
+Replace `greet.ts` with a version that upper-cases names, rejects long
+ones, and hangs on one particular name:
+
+```ts apps/hello/greet.ts
+export function greet(template: string, name: string): string {
+  if (name.length > 20) throw new RangeError('names are at most 20 characters');
+  if (name === 'loop') while (true) {}
+  return template.replace('{name}', name.toUpperCase());
+}
+```
+
+Deploy it and try each case:
+
+```sh
+curl -X POST 'http://localhost:3000/hello/_deploy'
+curl 'http://localhost:3000/hello/?name=Ada'
+curl 'http://localhost:3000/hello/?name=xxxxxxxxxxxxxxxxxxxxxxxxx'
+curl 'http://localhost:3000/hello/?name=loop'
+curl 'http://localhost:3000/hello/?name=Ada'
+```
+
+```txt
+deployed hello
+{"message":"hello, ADA","visits":4}
+{"error":"ERR_GUEST_EXCEPTION","message":"names are at most 20 characters"}
+{"error":"ERR_LIMIT","message":"execution timed out after 500ms (limits.timeoutMs)"}
+{"message":"hello, ADA","visits":5}
+```
+
+`deploy` loaded the new version before it closed the old one, and
+`close()` lets requests already running on the old version finish. Requests
+still queued for an instance of the old version when it closes fail with
+`ERR_PROGRAM_CLOSED`; under load, a platform retries those on the new
+version.
+
+The long name threw a `RangeError` in the app, which came back as a 500
+with the app's message. The instance that threw stays in service.
+
+The `loop` request ran into the free plan's 500 ms limit and got a 503. A
+request stopped part-way retires its instance, since its module state may
+be half-updated. The program loaded a replacement, and the last request
+was served by it. The visit count survived because it lives in the
+platform, not in the instance.
+
+## Next steps
+
+Where to go from here:
+
+- [Load a program](/guides/load-programs) covers npm packages, bundles,
+  JSX, and the TypeScript options.
+- [Serve HTTP](/guides/serve-http) covers request bodies, `waitUntil`, and
+  aborting requests.
+- [Set limits per plan](/guides/tenant-plans) covers which limits to set
+  for each tier.
+- [Programs](/concepts/programs) explains setup, instances, and retirement
+  in full.
+- The repository's
+  [serverless example](https://github.com/ethndotsh/isolane/tree/main/examples/serverless)
+  is a larger version of this platform, in which deployers connect over a
+  WebSocket and serve their app's host functions from their own process.

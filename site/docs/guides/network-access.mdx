@@ -1,0 +1,90 @@
+---
+title: Allow network access
+description: Let guest code call HTTP APIs with fetch, limited to the hosts, methods, and amounts you choose.
+---
+
+Guest code gets network access only through a `fetch` policy. The worker can't open sockets; your process checks each request against the policy and makes it.
+
+## Allow a list of hosts
+
+```js
+const plans = await acme.run(
+  `fetch('https://api.example.com/plans').then((res) => res.json())`,
+  { fetch: { hosts: ['api.example.com'] } },
+);
+```
+
+A bare host allows only the scheme's default port, 443 for `https:` and 80 for `http:`. Name other ports explicitly:
+
+```js
+fetch: { hosts: ['api.example.com', '*.cdn.example.com', 'internal.example.com:8443', 'files.example.com:*'] }
+```
+
+`*.cdn.example.com` matches every subdomain of `cdn.example.com`, but not `cdn.example.com` itself; list both if you need both.
+
+## Restrict methods and amounts
+
+```js
+fetch: {
+  hosts: ['api.example.com'],
+  methods: ['GET'],
+  limits: { requests: 100, responseBytes: 1 << 20, timeoutMs: 5_000 },
+}
+```
+
+`requests` and `transferBytes` count over the isolate's life, so a stateful isolate or a warm program instance uses one budget across many evals or calls. [Capabilities](/reference/capabilities#fetch) lists every limit and its default.
+
+## Decide per request
+
+Pass a function as `hosts` to decide with your own data, such as a tenant's configured webhooks. It is called for the first request and for every redirect hop, and only `true` allows the request.
+
+```js
+const allowed = await webhooks.urlsFor('acme'); // a Set of origins
+const policy = {
+  hosts: (url, method) => method === 'POST' && allowed.has(url.origin),
+};
+await acme.run(`fetch(target, { method: 'POST', body: JSON.stringify(event) })`, {
+  fetch: policy,
+  globals: { target: 'https://hooks.acme.example/events', event },
+});
+```
+
+## Reach a private address
+
+Addresses outside the public internet are refused even when `hosts` allows the name: loopback, private ranges, link-local addresses such as the cloud metadata service at 169.254.169.254, and IPv6 forms of all of these. The check runs on the address DNS returns, so a public name pointed at a private address is refused too.
+
+To call a service on your own network, allow it explicitly:
+
+```js
+fetch: { hosts: ['billing.internal:8080'], privateNetworks: true }
+```
+
+`privateNetworks: true` applies to every host in the policy. Give it only to the isolates that need it, with a narrow `hosts` list.
+
+## See refusals
+
+A refused request rejects in the guest with a `TypeError`, and `onPolicyDenial` fires with the target and the reason:
+
+```js
+const runtime = new Runtime({
+  hooks: {
+    onPolicyDenial: ({ tenant, api, target, reason }) => log.warn({ tenant, api, target, reason }),
+  },
+});
+```
+
+```
+{ tenant: 'acme', api: 'fetch', target: 'https://api.other.example/', reason: 'not allowed by the fetch policy' }
+```
+
+The target never contains a `user:password@` part from the guest's URL. A request past a policy limit fires `onLimit` instead, with the limit's path, such as `fetch.limits.requests`.
+
+## Common failures
+
+| Guest error | Cause |
+|---|---|
+| `fetch is not available: this isolate has no fetch policy` | No `fetch` policy is set. `data:` and `blob:` URLs work without one. |
+| `fetch to http://127.0.0.1:3000 is not allowed: not a public address` | The address is private or loopback, and `privateNetworks` is off. Local development servers hit this. |
+| `fetch to https://api.example.com:8443 is not allowed by the fetch policy` | A bare host pattern allows only the default port. Add `api.example.com:8443`. |
+| `fetch: method DELETE is not allowed` | The method isn't in `methods` |
+| `ERR_INVALID_CONFIG`, `fetch needs the web platform, which web: false turns off` | Thrown in your process, not the guest: `fetch` is part of the web platform |

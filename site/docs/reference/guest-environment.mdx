@@ -1,0 +1,131 @@
+---
+title: Guest environment
+description: The globals, built-in modules, console, and clock that guest code sees, and what it lacks compared with browsers, Node.js, and Cloudflare Workers.
+---
+
+## ECMAScript
+
+Guest code runs on V8 15.2 with the ECMAScript built-ins that V8 ships, `Intl` included, with these changes:
+
+| Global | State |
+|---|---|
+| `SharedArrayBuffer`, `Atomics` | Removed, always |
+| `Temporal` | Removed until it has been audited |
+| `WebAssembly` | Removed unless [`wasm: true`](/reference/capabilities#wasm) |
+| `eval`, `new Function` | Throw `EvalError` unless [`eval: true`](/reference/capabilities#eval) |
+| `Date`, `Intl` | UTC, on the isolate's [clock](#clock) |
+
+Scripts run with `run`, `isolate.eval`, and `isolate.call` are classic scripts: they can't use `import` or `import()`. Programs loaded with `tenant.load` are ES modules; [modules](/reference/modules) describes what they can import.
+
+## Web platform
+
+With `web` on, the default, the global object also has the [WinterTC](https://wintertc.org) Minimum Common API. It is built from Deno's web platform JavaScript, vendored under the MIT license, over isolane's own native code.
+
+| Area | Globals |
+|---|---|
+| Fetch | `fetch`, `Request`, `Response`, `Headers`, `FormData` |
+| URLs | `URL`, `URLSearchParams`, `URLPattern` |
+| Encoding | `TextEncoder`, `TextDecoder`, `TextEncoderStream`, `TextDecoderStream`, `atob`, `btoa` |
+| Events and cancellation | `Event`, `EventTarget`, `CustomEvent`, `ErrorEvent`, `ProgressEvent`, `PromiseRejectionEvent`, `MessageEvent`, `AbortController`, `AbortSignal`, `DOMException`, `QuotaExceededError` |
+| Streams | `ReadableStream`, `WritableStream`, `TransformStream`, their readers, writers, and controllers, `ByteLengthQueuingStrategy`, `CountQueuingStrategy`, `CompressionStream`, `DecompressionStream` |
+| Files | `Blob`, `File`, `FileReader` |
+| Messaging | `structuredClone`, `MessageChannel`, `MessagePort` |
+| Crypto | `crypto`, `Crypto`, `SubtleCrypto`, `CryptoKey` |
+| Scheduling | `setTimeout`, `setInterval`, `clearTimeout`, `clearInterval`, `queueMicrotask` |
+| Performance | `performance`, `Performance`, `PerformanceEntry`, `PerformanceMark`, `PerformanceMeasure` |
+| Global scope | `self`, `navigator` (with `userAgent: 'isolane'` only), `reportError`, `onerror`, `onunhandledrejection` |
+
+The global object is an `EventTarget`: an uncaught exception in a timer or task dispatches an `error` event on it, and a promise rejected with no handler dispatches `unhandledrejection`. [Errors](/reference/errors) describes how these are then reported to the host.
+
+Details that differ from a browser:
+
+- `fetch` reads `data:` and `blob:` URLs without a policy. Any other URL needs a [`fetch` policy](/reference/capabilities#fetch) and is performed by the host process. Response bodies stream, and so do `ReadableStream` request bodies, which need `duplex: 'half'`. `integrity` is checked for SHA-256, SHA-384, and SHA-512.
+- `crypto.subtle` supports SHA-1, SHA-2, and SHA-3 digests; HMAC; AES-GCM, AES-CBC, AES-CTR, and AES-KW; RSA-OAEP, RSA-PSS, and RSASSA-PKCS1-v1_5; ECDSA and ECDH on P-256, P-384, and P-521; Ed25519, X25519, and X448; PBKDF2 and HKDF. RSA keys are limited to 4,096 bits, generated or imported, because RSA key generation can't be interrupted. PBKDF2 derives at most 1 MiB and HKDF at most 255 hash lengths.
+- `structuredClone` and `MessagePort` stay inside the isolate. Each message is delivered as its own task, and a transferred buffer is detached where it was.
+- `location` exists only with [`web: { baseUrl }`](/reference/capabilities#web), and is read-only.
+- `URLPattern` refuses patterns over 64 KiB or with more than 1,024 groups in one component, with a `RangeError`.
+
+With `web: false`, the global object has the ECMAScript built-ins and `console` only: no timers, no `queueMicrotask`, no `TextEncoder`.
+
+## What is missing
+
+| Missing | Present in |
+|---|---|
+| `process`, `Buffer`, `require`, `node:` modules | Node.js. A program can alias a `node:` specifier to its own file with the [`modules` option](/reference/capabilities#modules). |
+| `WebSocket`, `EventSource`, `BroadcastChannel` | Browsers, Deno, Workers |
+| The Cache API (`caches`) | Browsers, Workers |
+| `XMLHttpRequest`, the DOM | Browsers |
+| `SharedArrayBuffer`, `Atomics` | Everywhere, with cross-origin isolation in browsers |
+| `Temporal` | V8 itself; isolane turns it off |
+| `Deno` | Deno |
+| `HTMLRewriter`, `scheduler`, Durable Objects, and other Workers bindings | Cloudflare Workers |
+
+## `fs`
+
+With an [`fs` policy](/reference/capabilities#fs), the global `fs` is a frozen object of promise-returning methods. Paths are guest paths, with `/` as the policy's root.
+
+| Method | Resolves to |
+|---|---|
+| `readFile(path)` | A `Uint8Array` |
+| `readFile(path, 'utf8')` or `readFile(path, { encoding: 'utf8' })` | A string. `utf8` and `utf-8` are the only encodings. |
+| `writeFile(path, data)` | `undefined`. `data` is a string (written as UTF-8), an `ArrayBuffer`, or a view. Needs `write: true`. |
+| `readdir(path)` | The entry names, sorted |
+| `stat(path)` | `{ size, isFile, isDirectory, mtimeMs }` |
+| `exists(path)` | `true` or `false` |
+| `mkdir(path, { recursive })` | `undefined`. Needs `write: true`. |
+| `rm(path, { recursive })` | `undefined`. A directory needs `recursive: true`. Needs `write: true`. |
+
+A failure rejects with an `Error` whose `code` is a Node.js-style code, such as `ENOENT`, and whose message names the guest path.
+
+## Sockets
+
+With a [`connect` policy](/reference/capabilities#connect), the global `connect(address, options)` opens a socket and returns a `Socket` at once. Programs can also import it: `import { connect } from 'cloudflare:sockets'`. Without a policy, the global doesn't exist, and the module's `connect` throws a `TypeError`.
+
+| Argument | Values |
+|---|---|
+| `address` | `'host:port'`, `'[v6]:port'`, or `{ hostname, port }`. A malformed address throws a `TypeError`. |
+| `options.secureTransport` | `'off'` (default), `'on'` for TLS from the start, or `'starttls'` for plain until `startTls()` |
+| `options.allowHalfOpen` | `true` keeps the writable side open after the peer ends its side. Default `false`. |
+
+| `Socket` member | Meaning |
+|---|---|
+| `readable` | A byte stream of what the peer sends. BYOB readers work. |
+| `writable` | Takes bytes: a `Uint8Array`, another view, or an `ArrayBuffer` |
+| `opened` | Resolves with `{ remoteAddress }`, or rejects if the policy refuses the connection or it fails |
+| `closed` | Settles when the connection closes, whether or not the guest is reading, and rejects if it failed |
+| `close()` | Closes both directions and resolves with `closed` |
+| `startTls({ expectedServerHostname })` | For a `'starttls'` socket: upgrades the connection and returns the new `Socket`. The old one is done. |
+| `upgraded`, `secureTransport` | The socket's state |
+
+`startTls()` refuses to upgrade if the server sent bytes that the guest hasn't read, since they could have been injected before the handshake. Bytes that arrived before the peer hung up stay readable afterwards. An open socket counts as I/O in flight, so an eval that awaits it keeps waiting.
+
+## Built-in modules
+
+Programs can import two modules that are not files:
+
+| Specifier | Exports |
+|---|---|
+| `isolane:env` | `env`: the program's [`env` option](/reference/capabilities#env), with its `host` functions mounted in it. An empty object when the program has none. |
+| `cloudflare:sockets` | `connect`: the Sockets API's, as the program started with it, whatever its code later does to the global |
+
+The [`modules` option](/reference/capabilities#modules) adds host modules, such as `isolane:kv`.
+
+## Console
+
+`console.log`, `info`, `debug`, `warn`, `error`, and `trace` reach the host through the `onLog` event, at the levels `log`, `info`, `debug`, `warn`, and `error`; `trace` reports at `debug`. Arguments are joined with spaces, and objects are written as JSON, so an `Error` object logs as `{}`; log `err.stack` or `err.message` instead. Output counts against [`logBytes`](/reference/limits) per eval, and each line is cut at `logLineBytes`, before it leaves V8. What doesn't fit is dropped. `console` exists with `web: false` too.
+
+## Clock
+
+The [`time` field](/reference/capabilities#time) decides what `Date.now()`, `new Date()`, `performance.now()`, and `Intl`'s default time return. With the default `'frozen'`, the clock moves forward only when an eval or call starts and when I/O returns, so a busy loop sees no time pass:
+
+```js
+await tenant.run('const t0 = Date.now(); for (let i = 0; i < 3e7; i++); Date.now() - t0'); // 0
+```
+
+Timers advance the frozen clock when they fire. A one-shot `run` drops timers still pending when it returns; a stateful isolate keeps them and runs them between evals under [`backgroundMs`](/reference/limits).
+
+The time zone is always UTC. Guest code can format a date for another zone with `Intl.DateTimeFormat`'s `timeZone` option, but can't change the default or learn the host's.
+
+:::note
+Development builds of the worker, linked against rusty_v8's prebuilt V8, have no clock patch: their clock is always real, and `time` has no effect.
+:::

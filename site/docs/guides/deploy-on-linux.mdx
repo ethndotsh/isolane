@@ -1,0 +1,138 @@
+---
+title: Deploy on Linux
+description: Run isolane in strict mode on a Linux host or container, check the host's isolation before serving, and size memory for its workers.
+---
+
+This guide prepares a Linux host, VM, or container for isolane in strict
+mode, the only configuration meant for untrusted code (see the
+[security model](/concepts/security-model)), and checks it before
+your service accepts traffic.
+
+## Check the host at startup
+
+```js
+import { Runtime } from 'isolane';
+
+const runtime = new Runtime(); // strict: true is the default
+
+const report = await runtime.isolationReport();
+if (!report.meetsStrict) {
+  console.error('isolane: this host cannot run untrusted code', report);
+  process.exit(1);
+}
+```
+
+On a host that meets strict mode, the report reads:
+
+```js
+{
+  v8: '15.2.124.45',
+  sandboxSecure: true,
+  lockdown: { landlock: 'full', seccomp: 'full' },
+  meetsStrict: true,
+}
+```
+
+Strict mode requires `sandboxSecure: true` (a release worker, built with
+the V8 sandbox), `seccomp: 'full'`, and `landlock` of `'full'` or
+`'partial'`. Without them, every eval fails with
+`ERR_ISOLATION_UNAVAILABLE` and a message naming what is missing.
+`isolationReport()` starts a worker to find out, and does not fail in
+strict mode, so it is safe to call before anything else.
+
+## Install the worker for the target platform
+
+`npm install isolane` installs the worker binary as an optional dependency
+for the platform npm runs on: `@isolane/worker-linux-x64-gnu` or
+`@isolane/worker-linux-arm64-gnu`. Linux workers need glibc; there is no
+musl build, so Alpine images are not supported.
+
+Run `npm install` (or `npm ci`) inside the image or on the target machine,
+not on a Mac whose `node_modules` you then copy, since that installs the
+macOS worker. Installing with `--omit=optional` or `--no-optional` skips the
+worker, and `new Runtime()` throws `ERR_INVALID_CONFIG` with a message
+saying so.
+
+To use a worker from another location, such as one you built, set
+`ISOLANE_WORKER=/path/to/isolane-worker` in the environment, or pass
+`workerPath` to `new Runtime()`. `isolane-worker --self-check` prints the
+binary's V8 version, whether its V8 sandbox is enabled, and whether its web
+snapshot is embedded.
+
+## Kernel requirements
+
+| Layer | Needs | Reported as |
+|---|---|---|
+| seccomp | `CONFIG_SECCOMP_FILTER`, present in every mainstream distribution kernel | `seccomp: 'full'` |
+| Landlock, filesystem and TCP rules | Linux 6.10 or later (Landlock ABI 5) | `landlock: 'full'` |
+| Landlock, part of the rules | Linux 5.13 to 6.9; kernels before 6.7 lack the TCP rules | `landlock: 'partial'` (accepted by strict mode) |
+| Landlock missing | Earlier kernels, or Landlock not enabled | `landlock: 'none'` (refused) |
+
+Landlock must also be enabled at boot. `cat /sys/kernel/security/lsm`
+lists the active security modules; if `landlock` is absent, add it to the
+`lsm=` kernel parameter. Strict mode accepts `partial` because seccomp
+already refuses every file open and `socket()` call, so Landlock is a
+second layer, and requiring its newest ABI would refuse most long-term
+support kernels.
+
+The worker needs no privileges, capabilities, or user namespaces. It sets
+`PR_SET_NO_NEW_PRIVS` and installs its own seccomp filter and Landlock
+ruleset, which an unprivileged process may do.
+
+## Containers
+
+The worker installs its seccomp filter inside whatever filter the container
+runtime applies, and the kernel enforces both. The container's profile
+must allow the system calls the worker uses to lock itself down:
+`seccomp`, `prctl`, `landlock_create_ruleset`, `landlock_add_rule`, and
+`landlock_restrict_self`. If the profile refuses the Landlock calls, the
+worker reports `landlock: 'none'`, and strict mode refuses the host even
+though the kernel supports Landlock.
+
+Run `isolationReport()` in the container you deploy, with the same seccomp
+profile, before relying on it. In Kubernetes, set the pod's
+`securityContext.seccompProfile`, and if `RuntimeDefault` refuses
+Landlock, use a `Localhost` profile that adds the three `landlock_*` calls.
+Do not run the container privileged to make the report pass: the worker's
+own lockdown does not need it, and privilege weakens the layers around it.
+
+## Memory
+
+Each tenant has its own worker process. An idle worker uses about 15 MB
+(measured on a development build), and each worker's writable memory is capped by the tenant limit
+`workerMemoryBytes`, 2 GiB by default, which covers its isolates' heaps,
+ArrayBuffers, and WebAssembly memory. The runtime keeps at most
+`limits.tenants` workers, 1,000 by default, and stops the least recently
+used idle one to make room.
+
+Size the container's memory limit, or lower these limits, so that the
+workers you expect to be busy at once fit. For example, 50 busy tenants at
+`workerMemoryBytes: 256 << 20` can use up to 12.5 GiB. When a worker
+reaches its cap, its allocations fail: a guest's `new ArrayBuffer` throws a
+`RangeError`, and if V8 itself runs out, the worker exits and the evals in
+it fail with `ERR_LIMIT` (`workerMemoryBytes`), which is retryable on a
+fresh worker. This cap is Linux only. If the
+container's limit is reached first, the kernel's out-of-memory killer may
+kill any process in it, including yours.
+
+Do not set `ulimit -v` (`RLIMIT_AS`) on the process. The V8 sandbox
+reserves a large range of virtual address space for each worker, which
+uses no memory until it is touched, and an address-space limit makes
+workers fail to start.
+
+## Platforms
+
+| Platform | Status |
+|---|---|
+| Linux x64, glibc | Supported; CI runs every test and conformance gate in strict mode |
+| Linux arm64, glibc | Supported; built against glibc 2.31 and tested on native arm64 runners |
+| macOS | Development only: no seccomp, Landlock, or memory cap, so strict mode refuses it |
+| Linux musl, Windows | Not supported |
+
+## If the report shows `sandboxSecure: false`
+
+The worker in use was built without the V8 sandbox, which is the case for
+development builds made with `--features dev-prebuilt`. Check
+`ISOLANE_WORKER` and `workerPath`: on a production host, neither should
+point at a development build, and the installed `@isolane/worker-*`
+package is a release build.

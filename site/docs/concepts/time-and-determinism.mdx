@@ -1,0 +1,120 @@
+---
+title: Time and determinism
+description: Why guest code sees a clock that stops while it runs, when that clock moves, and how to make runs reproducible.
+---
+
+## The frozen clock
+
+By default, the clock guest code sees does not move while guest code
+runs. `Date.now()`, `new Date()`, the current time that `Intl` formats by
+default, and `performance.now()` all return the same value from the start
+of an eval until the eval does I/O. This is the `time: 'frozen'` setting,
+and it is the rule Cloudflare Workers uses.
+
+The clock moves forward to the real time, in whole milliseconds, at these
+points:
+
+- when an eval, a call, or a program's setup starts;
+- when a host function's reply arrives, which includes the replies to the
+  guest's `fetch`, `connect`, and `fs` operations, since those are host
+  calls;
+- when a timer fires.
+
+Between those points, a guest can run for any length of time and see no
+time pass.
+
+## Why the clock is frozen
+
+A guest that can time its own code precisely can measure things it should
+not see. Spectre-style attacks read memory by timing how long accesses
+take, and finer clocks make them easier. Removing `SharedArrayBuffer` and
+`Atomics.wait` takes away the usual way to build a high-resolution timer
+from a counter thread, and freezing the clock takes away the obvious one.
+With both gone, guest code has no clock that ticks while it computes.
+
+## How it is built
+
+`Date` and `Intl` read the time through V8's platform clock. isolane's V8
+build carries a small patch (`patches/rusty_v8-clock-platform.patch`) that
+lets the worker supply that clock, and the worker answers with a time held
+per isolate thread, which it moves only at the points above.
+`performance.now()` is isolane's own code and reads the same per-thread
+state: time since the isolate started, as of the last advance. V8's own
+background threads, which never set a clock, see real time.
+
+Development builds that link rusty_v8's prebuilt V8 do not have the patch.
+On those, `Date` returns the real time while `performance.now()` stays
+frozen, so code that behaves one way in development can behave
+differently on a release worker. The most common case is a loop that
+waits on the clock:
+
+```js
+const end = Date.now() + 50;
+while (Date.now() < end) {} // a busy wait
+```
+
+On a development build this ends after 50 ms. On a release worker the
+clock never moves inside the loop, so it runs until `timeoutMs` or
+`cpuMs` stops it and the isolate is retired. Guest code that needs to
+wait should use `setTimeout`, which advances the clock when it fires.
+
+## Where it leaks
+
+The freeze stops a guest from timing code between I/O events. It does not
+stop it from timing I/O. Every host call moves the clock to the real time,
+so a guest that makes many calls can still measure coarse durations: the
+time between two replies includes the time it spent computing in between.
+The resolution is whole milliseconds and each sample costs a round trip,
+which makes this much weaker than a free-running clock, but it is not
+nothing. The [security model](/concepts/security-model) lists it with the
+other accepted risks.
+
+With concurrency on in a program, the clock advances when each call
+starts, so one call can see time move when another call begins in the
+same instance.
+
+## The other settings
+
+`time: 'real'` gives guest code the real clock. It suits trusted code, or
+code whose behaviour depends on elapsed time within a computation, and it
+gives up the side-channel protection.
+
+`time: { fixedMs }` pins the clock to one instant for the life of the
+isolate. `Date.now()` returns `fixedMs` forever, and `performance.now()`
+returns 0. That makes a run reproducible: the same code with the same
+inputs sees the same time on every run.
+
+The worker also runs with its time zone set to UTC, so `Date` methods such
+as `getTimezoneOffset()` report the same thing on every host and do not
+reveal where the host runs. Temporal is turned off until it has been
+audited, partly because it reads the host's time zone through another
+path.
+
+## Randomness
+
+Each isolate draws its randomness from the operating system by default:
+`Math.random()`, `crypto.getRandomValues()`, `crypto.randomUUID()`, the
+keys and nonces `crypto.subtle` generates, and V8's hash seeds. The worker
+seeds V8 from `getrandom`, with no fallback to the clock.
+
+`random: { seed }` replaces all of that with a deterministic sequence from
+the seed. Two isolates with the same seed, running the same code, draw the
+same numbers, generate the same keys, and order their hash tables the
+same way. Two things follow from that. Keys a seeded isolate generates are
+predictable to anyone who knows the seed, so a seed is for tests and
+replays, never for production cryptography. And a seeded isolate's code
+can predict its own hash seeds, which lets it slow its own hash tables
+down; that hurts only itself, within its own time limits.
+
+A seeded isolate cannot use a [spare isolate](/concepts/caches), because
+V8 draws an isolate's entropy as it creates it, before the seed is known.
+
+## Reproducible runs
+
+Fixed time and a seed together make guest code deterministic up to its
+inputs. What remains is what comes from outside the isolate: the results
+of host functions and of `fetch`, `connect`, and `fs`, and the order in
+which their replies arrive. Garbage-collection timing, which `WeakRef` and
+`FinalizationRegistry` can observe, also varies between runs. A test or a
+replay that controls its host functions' answers and avoids observing
+garbage collection gets the same result every time.

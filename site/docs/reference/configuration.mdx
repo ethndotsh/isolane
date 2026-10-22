@@ -1,0 +1,135 @@
+---
+title: Configuration
+description: "Runtime options, the IsolateConfig shape, how the three levels merge, shims, and environment variables."
+---
+
+## Levels
+
+An isolate's configuration is an `IsolateConfig`, set at three levels:
+
+| Level | Where | Called or read |
+|---|---|---|
+| defaults | `new Runtime({ defaults })` | Once, when the runtime is made. |
+| tenant | `new Runtime({ tenants: (name) => config })` | When the tenant's worker starts, and for each new isolate. It may return `undefined`. |
+| call | `tenant.run(code, config)`, `tenant.isolate(config)`, `tenant.load(source, options)`, `runtime.run(code, config)` | Each call. |
+
+The runtime's own `hooks` option is an outer level before `defaults`. Each level is validated on its own, and an invalid one throws `ERR_INVALID_CONFIG` with the path of the field, such as `tenants("acme").limits.timeoutMs must be an integer from 1 to 2147483647, or null`. `tenant.isolate()` and the `Runtime` constructor throw synchronously; `run` and `load` reject.
+
+### Merge rules
+
+Later levels win, field by field:
+
+| Field | How levels combine |
+|---|---|
+| `host` | Merged by function name. A later level's function replaces an earlier one of the same name. |
+| `globals` | Merged by name. |
+| `limits` | Merged by limit. An `undefined` value leaves the earlier level's in place. |
+| `hooks` | Accumulated. Every level's hooks run, in the order given on the [Hooks](/reference/hooks#order) page. |
+| `shims` | Accumulated. See [Shims](#shims). |
+| `random.seed` | The last level that sets a seed wins. |
+| Every other field | Replaced whole by the last level that sets it. A `fetch` policy at the call level replaces the tenant's policy; it is not merged with it. |
+
+## IsolateConfig
+
+| Field | Type | Default | Description |
+|---|---|---|---|
+| `host` | `HostTree` | none | Functions guest code can call. See [hostFunction](/reference/runtime#hostfunction). |
+| `globals` | object | none | JSON values the guest starts with as globals. |
+| `eval` | `boolean` | `false` | Allow `eval` and `new Function`. |
+| `wasm` | `boolean` | `false` | Keep `WebAssembly`. |
+| `web` | `boolean` or `{ baseUrl }` | `true` | The web platform globals. See [Capabilities](/reference/capabilities#web). |
+| `fetch` | `FetchPolicy` or `false` | none | Outbound HTTP. See [Capabilities](/reference/capabilities#fetch). |
+| `connect` | `ConnectPolicy` or `false` | none | TCP and TLS sockets. See [Capabilities](/reference/capabilities#connect). |
+| `fs` | `FsPolicy` or `false` | none | A host directory. See [Capabilities](/reference/capabilities#fs). |
+| `time` | `'frozen'`, `'real'`, or `{ fixedMs }` | `'frozen'` | The guest's clock. See [Capabilities](/reference/capabilities#time). |
+| `random` | `{ seed }` | none | Seeds `Math.random`, Web Crypto's randomness, and V8's hash seeds. `seed` is an integer from 0 to 2^53 - 1. |
+| `limits` | `Limits` | see [Limits](/reference/limits) | Resource limits. |
+| `hooks` | `Hooks` | none | Interceptors and events. See [Hooks](/reference/hooks). |
+| `shims` | `ShimsConfig` | none | Trusted code run around guest code. See [Shims](#shims). |
+
+`fetch`, `connect`, and `fs` need the web platform. Turning on any of them with `web: false` throws `ERR_INVALID_CONFIG`. Setting one to `true` also throws, because there is no safe default policy.
+
+`run` and `eval` also take `returns`, `filename`, and `signal`, and `runtime.run` takes `tenant`. These are options of the one call, not configuration, and are described on the [Runtime](/reference/runtime#eval-options) page.
+
+### globals
+
+Each name must be new to the guest. A name ECMAScript defines, such as `Object`, `JSON`, or `console`, is refused with `ERR_INVALID_CONFIG`. A web platform name, such as `URL`, is refused when the isolate starts. `__proto__` and names starting with `__isolane_` are reserved. The whole object must be JSON-serializable.
+
+### Where limits can be set
+
+| Limits | defaults | tenant | call | Runtime `limits` |
+|---|---|---|---|---|
+| [Isolate limits](/reference/limits#isolate-limits) | yes | yes | yes | no |
+| [Tenant limits](/reference/limits#tenant-limits) | yes | yes | no | no |
+| `tenants` | no | no | no | yes |
+
+A limit at a level that does not take it throws `ERR_INVALID_CONFIG`, naming the level that does.
+
+## Shims
+
+Shims are your own JavaScript, run inside the isolate around guest code. They are trusted, like host functions, and isolane compiles them, so they work with `eval` off.
+
+| Phase | Runs | Form |
+|---|---|---|
+| `setup` | Once, when the isolate is created, after the web platform, host functions, and globals are in place. | A classic script, not awaited. If it throws, every eval in the isolate fails with `ERR_SHIM`. |
+| `before` | Before each eval's code. | A classic script, not awaited. |
+| `after` | After each eval's value settles, but not when the eval threw. | The body of an `async function (result)`. A return value other than `undefined` replaces the result. |
+
+Each phase takes one shim or an array. A shim is a string of code, or `{ code, filename }`. Its name in stack traces is `filename`, or `shim:<level>.<phase>.<n>` by default, where `level` is `defaults`, `tenant`, or `call`. Each shim runs as its own script, so guest line numbers do not change.
+
+Levels concatenate. `setup` and `before` shims run in level order, defaults first. `after` shims run innermost level first, each level's in order. A shim that throws, or an `after` shim that rejects or never settles, fails the eval with `ERR_SHIM`, and `err.shim` gives its `phase`, `index`, and `filename`.
+
+```ts
+await tenant.run(code, {
+  globals: { request },
+  shims: { after: { code: 'return { status: 200, body: await handle(request) }', filename: 'platform:invoke.js' } },
+});
+```
+
+## Runtime options
+
+These options exist only on `new Runtime(options)`. An unknown option throws `ERR_INVALID_CONFIG`.
+
+| Option | Type | Default | Description |
+|---|---|---|---|
+| `workerPath` | `string` | see below | Path to the `isolane-worker` binary. A relative path is resolved against the current directory. |
+| `strict` | `boolean` | `true` | Refuse to run guest code unless the worker reports a secure V8 sandbox, full seccomp, and Landlock. A refused host fails with `ERR_ISOLATION_UNAVAILABLE`. |
+| `defaults` | `IsolateConfig` | `{}` | The configuration every isolate starts from. |
+| `tenants` | `(name) => IsolateConfig \| undefined` | none | Each tenant's configuration, over `defaults`. |
+| `hooks` | `Hooks` | none | Hooks for every tenant and isolate, outside `defaults`. |
+| `limits` | `{ tenants }` | `{ tenants: 1000 }` | Runtime-wide limits. See [Limits](/reference/limits#runtime-limits). |
+| `quarantineMs` | integer or `null` | 60,000 | After a security event, refuse the tenant for this long. New isolates throw `ERR_TENANT_QUARANTINED`. `null` turns quarantine off. |
+| `spares` | integer, at least 0 | 0 | Worker processes kept started and ready, so a tenant without a worker does not wait for V8 to start. Each spare is a process of about 15 MB when idle. |
+| `spareIsolates` | 0 to 8 | 0 | Web isolates each worker makes ahead of their VMs, for each of up to four heap shapes. See [spareIsolates](#spareisolates). |
+| `caches` | object | see below | What each tenant's worker keeps for programs' later instances. See [caches](#caches). |
+
+Spare workers start with the `workerMemoryBytes` of `defaults`, and a tenant gets a spare only if its own `workerMemoryBytes` is the same. After three spares in a row exit before they are used, the runtime stops starting them.
+
+### workerPath
+
+Without `workerPath`, the runtime uses `$ISOLANE_WORKER`, then the binary in the platform package npm installed with isolane: `@isolane/worker-linux-x64-gnu`, `@isolane/worker-linux-arm64-gnu`, `@isolane/worker-darwin-x64`, or `@isolane/worker-darwin-arm64`. With none of these, the constructor throws `ERR_INVALID_CONFIG` and says which package is missing. There is no package for musl Linux or Windows.
+
+### spareIsolates
+
+A spare isolate is a web isolate and its context, made from the web platform's snapshot before a VM asks for it. A VM takes a spare when it uses the web platform and has no `random.seed`, and the spare's shape, its `limits.heapBytes`, matches. The worker keeps up to `spareIsolates` spares for each of the four heap limits its web VMs used most recently, and drops the spares of the least recently used shape when a fifth appears. A worker therefore holds at most `spareIsolates` × 4 spares, each about 3 MB of memory while idle on a development build.
+
+### caches
+
+| Field | Default | Description |
+|---|---|---|
+| `fileBytes` | 64 MiB | Programs' files, kept so later instances are not sent them again. |
+| `codeBytes` | 64 MiB | V8 code caches of programs' modules. |
+| `wasmBytes` | 32 MiB | Compiled WebAssembly, counted by the modules' wire bytes. The compiled code is a few times larger. |
+
+Each budget is an integer from 0 to 1 GiB, and 0 keeps nothing of that kind. The budgets apply to every tenant's worker, count against its `workerMemoryBytes`, and are lost when the worker is recycled. [Caches](/concepts/caches) explains what each one saves.
+
+## Environment variables
+
+| Variable | Effect |
+|---|---|
+| `ISOLANE_WORKER` | The worker binary to use when `workerPath` is not set. |
+| `ISOLANE_DEV_INSECURE` | With the value `1` and `strict: false`, the runtime accepts a worker without the V8 sandbox, such as a `dev-prebuilt` development build. Without it, such a worker is refused with `ERR_ISOLATION_UNAVAILABLE`. |
+
+:::warning
+`ISOLANE_DEV_INSECURE=1` runs guest code with no V8 sandbox. Use it only for local development with code you trust.
+:::

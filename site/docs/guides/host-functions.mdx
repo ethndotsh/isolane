@@ -1,0 +1,119 @@
+---
+title: Expose host functions
+description: Give guest code functions that run in your process, with validated arguments and results, cancellation, and errors that don't leak your internals.
+---
+
+Guest code reaches your data and services only through the host functions you pass in `host`. This guide defines one with schemas, uses its call context, and keeps its errors safe to show a tenant.
+
+## Pass a function
+
+A plain function is enough for trusted, simple values. Nested objects become namespaces.
+
+```js
+import { Runtime } from 'isolane';
+
+const runtime = new Runtime();
+const acme = runtime.tenant('acme');
+
+const plan = await acme.run('billing.planOf("acme")', {
+  host: { billing: { planOf: async (name) => plans.get(name) } },
+});
+```
+
+In the guest, `billing.planOf` returns a promise, and `billing` is frozen. The arguments are whatever the guest sent, unchecked: treat them as untrusted input.
+
+## Validate arguments and results
+
+`hostFunction` checks arguments and results with any [Standard Schema](https://standardschema.dev) library, such as Zod, Valibot, or ArkType, and infers the handler's parameter types from the schemas.
+
+```js
+import { Runtime, hostFunction } from 'isolane';
+import { z } from 'zod';
+
+const User = z.object({ id: z.number(), name: z.string(), plan: z.enum(['free', 'pro']) });
+
+const getUser = hostFunction({
+  args: [z.number().int().positive()],
+  returns: User,
+  handler: async (id, ctx) => {
+    const user = await users.find(id, { signal: ctx.signal });
+    if (!user) throw Object.assign(new Error(`no user ${id}`), { code: 'NOT_FOUND' });
+    return user;
+  },
+});
+
+await acme.run('db.getUser(42)', { host: { db: { getUser } } });
+// { id: 42, name: 'Ada', plan: 'pro' }
+```
+
+`returns` runs before the guest sees the value, and the handler gets the schemas' output. Here Zod's object schema drops fields it doesn't name, so a `passwordHash` column on the stored user never reaches the guest.
+
+A call with bad arguments never reaches the handler. The guest gets a `TypeError` that lists the issues:
+
+```js
+await acme.run('db.getUser(-1).catch((e) => [e.code, e.message])', { host: { db: { getUser } } });
+// ['ERR_INVALID_ARGUMENTS', 'db.getUser: invalid arguments: args.0: Too small: expected number to be >0']
+```
+
+## Use the call context
+
+With `args` as a list, the handler's last parameter is the context; with a plain function or a single `args` schema, the context is `this`.
+
+| Field | Use |
+|---|---|
+| `ctx.tenant` | Scope the work to the calling tenant, such as `repo(ctx.tenant)` |
+| `ctx.isolate` | The calling isolate's id, for logs |
+| `ctx.signal` | Pass to `fetch`, database drivers, and timers. It aborts when the eval times out, reaches its CPU limit, or its isolate closes. |
+| `ctx.log(level, ...args)` | Log through `onLog` with `source: 'host'` |
+
+Host functions keep running after the guest stops waiting unless they watch `ctx.signal`, so pass it to anything slow.
+
+## Keep errors safe
+
+When a handler throws, the guest's promise rejects with the error's `name`, `message`, and `code`, but not its stack. A database driver's message can contain a connection string, a host path, or part of a query, so catch errors from such libraries inside the handler and throw what the tenant may see:
+
+```js
+const getOrders = hostFunction({
+  args: [z.string().uuid()],
+  handler: async (customerId, ctx) => {
+    try {
+      return await db.query('select id, total from orders where customer = $1', [customerId]);
+    } catch (err) {
+      ctx.log('error', 'orders query failed', String(err));
+      throw Object.assign(new Error('orders are unavailable'), { code: 'UNAVAILABLE' });
+    }
+  },
+});
+```
+
+## Return values without a promise
+
+`sync: true` makes the guest receive the value directly. The guest's isolate waits for the reply, within `timeoutMs`, so use it only for fast lookups that a library expects to be synchronous.
+
+```js
+const flag = hostFunction({ args: [z.string()], sync: true, handler: (name) => flags.has(name) });
+await acme.run('features.flag("beta") ? "on" : "off"', { host: { features: { flag } } });
+```
+
+## Give a program its functions
+
+In a program loaded with `tenant.load`, `host` functions are mounted in `env` instead of on the global:
+
+```js
+const program = await acme.load(
+  `import { env } from 'isolane:env';
+   export const handle = (id) => env.db.getUser(id);`,
+  { host: { db: { getUser } } },
+);
+await program.call('handle', [42]);
+```
+
+To offer them as an importable module instead, use the [`modules` option](/reference/capabilities#modules): `modules: { 'isolane:db': { getUser } }` lets the program `import { getUser } from 'isolane:db'`.
+
+A program can't call host functions during setup, its top-level code. A call there throws an error with code `ERR_SETUP_IO`, and the load fails. Call them from handlers.
+
+## Bytes
+
+`ArrayBuffer`s and typed arrays at the top level of the arguments cross as bytes and arrive as `Buffer`s. A `Buffer` or typed array returned by the handler arrives as a `Uint8Array`. Bytes nested inside objects cross as JSON, so return them at the top level.
+
+Every host call counts against the eval's [`hostCalls` limit](/reference/limits), 10,000 by default. A guest past it gets a `RangeError`, and the eval fails with `ERR_LIMIT`. [Capabilities](/reference/capabilities#host) lists every rule.

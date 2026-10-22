@@ -82,6 +82,9 @@ Agreed October 2026:
 | Opportunistic cgroups v2 and namespaces | planned | |
 | macOS: Seatbelt profile (sandbox_init) | planned | |
 | `isolane doctor` (explain what this host provides and why) | planned | |
+| Evaluate V8's `--memory-protection-keys` (write-protects JIT code on CPUs with PKU) for the worker | idea | from `docs/design.md` L1; not used today |
+| `RLIMIT_CPU` on workers as a backstop to the watchdog | idea | from `docs/design.md` L2's original list; CPU is bounded today by the watchdog, recycling, and `workerCpuMs` |
+| Publish a patch release within 72 hours of a V8 security fix (merge the V8 update PR, tag, `release.yml`) | planned | the target in `docs/design.md` L4; the daily bump and PR are built, no release yet |
 | External security review; written threat-model sign-off (P5 gate) | planned | the README says "not ready for untrusted code" until then |
 | Known limits documented (README) | done | |
 
@@ -557,6 +560,7 @@ Measured against isolated-vm (Linux x64 under Rosetta; superseded by the CI comp
 | First real release: the owner adds a short-lived npm token as a repo secret for the first publish of each `@isolane/worker-*` package and the real `isolane`, then configures each package's trusted publisher (repo `ethndotsh/isolane`, workflow `release.yml`) and deletes the token; every release after is tokenless | to do (owner, at first release) |
 | Stripped binaries; the staleness warning reads the worker's V8 version against the newest patch release | planned |
 | Staleness warning when the installed worker's V8 is behind the patch pipeline | planned |
+| Strict mode option to refuse a stale worker | planned |
 | Dev build against prebuilt V8 (`--features dev-prebuilt`, `ISOLANE_DEV_INSECURE=1`) for local iteration | done |
 | Build speed, round 1: `fast` Cargo profile for local work (an edit rebuilds in 1.3 s vs 12.3 s with fat-LTO `release`); `release` gets `panic = "abort"` and stripped debug info; CI links with lld, caches the Cargo registry, sets `CARGO_INCREMENTAL=0`, frees disk in the background; V8 built with `symbol_level=0` (GN args in `scripts/v8.gn`, part of the cache key) | done |
 | Measured: a V8 patch bump (15.2.124.1 → .45) is close to a full rebuild on a 2-core runner — patch releases touch widely included headers, so most objects really are stale | done |

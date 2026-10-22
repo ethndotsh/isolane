@@ -1,0 +1,193 @@
+---
+title: Security model
+description: Who isolane defends against, the layers between guest code and your systems, and what is not yet in place.
+---
+
+:::warning[Not yet cleared for untrusted code]
+isolane has not met its own release gate: an external security review, a
+fuzzing program against its V8 configuration, and a written acceptance of
+the residual risks. Until `SECURITY.md` says otherwise, do not run code
+from untrusted parties in production with it.
+:::
+
+## The attacker
+
+isolane assumes the person submitting guest code is hostile. In the
+deployments it is designed for, tenants are authenticated customers, which
+gives accountability but not safety: a customer can be malicious, or their
+account can be taken over. So the model assumes an attacker who can submit
+any JavaScript, who may hold a working V8 exploit that corrupts memory
+inside the isolate, and who will try Spectre-style side channels.
+
+The goal is that no single bug, whether in V8, in isolane, or in the
+kernel interface the worker can reach, is enough for that attacker to read
+or change another tenant's data, read the host application's secrets, or
+reach the machine. Cloudflare Workers' posture is the bar. isolane differs
+from it in giving each tenant its own process by default, which a small,
+known tenant population makes affordable.
+
+## What is trusted
+
+The host process is trusted: your application, the isolane library, and
+the host functions you register. The kernel is trusted, with the system
+calls a worker may make kept to a short list. Everything inside a worker
+is untrusted from the moment it runs the first line of guest code, and the
+supervisor treats the worker's messages accordingly (see
+[architecture](/concepts/architecture)).
+
+The tenant is the unit of isolation. A tenant's isolates share its worker,
+so an exploit in one of them reaches the others and every host function
+registered for any of them. Code that must be kept apart belongs to
+separate tenants.
+
+## The layers
+
+The defences are layered so that each one assumes the one inside it has
+failed.
+
+### The guest API
+
+Guest code starts with ECMAScript, the host functions and globals you
+give it, and the web platform unless `web: false`. Everything that can
+reach outside the isolate is off until you turn it on: there is no
+network, no filesystem, no `eval` or `new Function`, and no WebAssembly by
+default. `SharedArrayBuffer`, `Atomics.wait`, and guest threads are not
+available at all. The less code an attacker can reach, the fewer bugs they
+can use, which is also why WebAssembly is opt-in: its compilers are a
+large share of V8's attack surface.
+
+The clock is frozen while guest code runs, and `performance.now()`
+follows it. A guest that cannot time its own code has no high-resolution
+timer for side channels. [Time and determinism](/concepts/time-and-determinism)
+describes the rule and where it leaks.
+
+### V8's configuration
+
+Release workers are built from source with the V8 sandbox enabled, which
+no published rusty_v8 build provides. The sandbox confines the heap and
+the memory V8 hands out to a reserved region and replaces raw pointers
+into it with offsets and table indices, so that a memory-corruption bug
+inside the heap does not by itself give arbitrary read and write over the
+process. The sandbox requires pointer compression, which release workers
+therefore also use. A worker checks at startup that the sandbox is
+enabled and configured securely, and reports the result; strict mode
+refuses a worker without it.
+
+Each isolate has a heap limit, enforced through V8's near-heap-limit
+callback so that running out terminates the isolate instead of the
+worker. A watchdog thread per isolate enforces wall-clock and, on Linux,
+CPU budgets with `TerminateExecution`, which stops JIT-compiled code as
+well as the interpreter. See [resource limits](/concepts/resource-limits).
+
+The V8 team does not yet treat its sandbox as a complete security
+boundary. That is the reason the layers below exist.
+
+### Process lockdown (Linux)
+
+Each worker locks itself down before it reads guest code, in this order:
+
+1. It closes every inherited file descriptor except standard input,
+   output, and error, and sets `RLIMIT_CORE` and `RLIMIT_FSIZE` to zero,
+   so a crash writes no core dump containing tenant data.
+2. While it still has one thread, it applies Landlock: no filesystem
+   access, and on kernels that support it, no TCP bind or connect.
+3. It initializes V8.
+4. It installs a seccomp filter on every thread. The filter allows pipe
+   reads and writes, memory management, futexes, clocks, signal handling,
+   `getrandom`, thread creation, and exit. Opening, `stat`ing, and
+   reading links of files fails with `EACCES`. Everything else, including
+   `socket`, `connect`, `execve`, `fork`, `ptrace`, and `clone` for
+   anything but a thread in the same namespaces, kills the process.
+   `prctl` accepts only naming threads and memory mappings; other options
+   fail with `EPERM`, and the ones only an attacker would use
+   (`PR_SET_DUMPABLE`, `PR_SET_PTRACER`, `PR_SET_MM`) kill it.
+
+The worker also starts with an empty environment, so it inherits no
+credentials, and with `TZ=UTC`, so `Date` does not reveal the host's time
+zone. A compromised worker can still allocate memory, mark it executable
+(V8's JIT needs to), spin the CPU, and write to its pipes. It cannot open
+anything new.
+
+seccomp is the layer isolane requires. Landlock is a second wall under it
+for files and sockets. On kernels before 6.7, Landlock enforces its
+filesystem rules but not its TCP rules, and isolane accepts that level,
+since seccomp already refuses every file open and `socket` call.
+
+A worker's private writable memory is capped with `RLIMIT_DATA`
+(`workerMemoryBytes`), which covers ArrayBuffer and WebAssembly memory
+that a heap limit does not.
+
+### Strict mode
+
+Strict mode is on by default. A runtime in strict mode refuses to run
+guest code unless the worker reports a securely configured V8 sandbox,
+seccomp fully applied, and Landlock in force at least partially. Refusal
+is a setup error, `ERR_ISOLATION_UNAVAILABLE`, not a security event.
+`runtime.isolationReport()` starts a probe worker, ignoring strict mode,
+and reports what the host provides. `strict: false` turns the check off for local development.
+
+macOS has none of the Linux layers: no seccomp, no Landlock, and no
+enforcement of `RLIMIT_DATA` or of CPU budgets. Strict mode refuses it by
+design. Windows is not supported.
+
+### Tenancy, recycling, and quarantine
+
+Each tenant has its own worker process, so a compromised worker holds only
+that tenant's data and host functions. Workers are recycled after
+`workerLifetimeMs` (one hour) or `workerEvals` (100,000), which bounds how
+long a compromised worker can keep running unnoticed. A crash, a protocol
+violation, an unresponsive worker, or a worker exiting on its own is
+treated as a possible exploit attempt: the tenant is quarantined for
+`quarantineMs` and `onSecurityEvent` fires, so your application can alert
+or suspend the account.
+
+### Shipping V8 fixes
+
+isolane builds its own V8, so it can take V8's security fixes as soon as
+they land on the release branch it builds from. A scheduled workflow
+checks every day for a new V8 patch release on that branch, rebuilds,
+runs the full test suite and the escape probes, and opens a pull request
+when they pass; it opens an issue when the branch leaves Chrome's support
+window and needs a manual upgrade. Each V8 patch bump is meant to ship as
+an isolane patch release. An installed package cannot be patched from
+outside, so applications have to take those releases.
+
+## What is out of scope
+
+isolane is not a defence against the kernel. There is no gVisor or
+microVM layer under the worker, so a kernel bug reachable through the
+system calls seccomp allows remains a way out. Keeping that list short is
+what bounds the risk.
+
+Several figures the worker reports are only as trustworthy as the worker.
+Background-work budgets (`backgroundMs`, `workerBackgroundMs`) are
+enforced inside the worker, so a compromised worker escapes them, and
+every `usage()` figure other than `workerCpuMs` comes from the worker's
+own report. Billing that must hold against a hostile tenant should use
+`workerCpuMs`.
+
+Some protections described in the design are not built yet: unprivileged
+namespaces and cgroup limits where the host allows them, a Seatbelt
+profile on macOS, a JIT-less worker for quarantined tenants, a staleness
+warning for an old installed worker, and continuous fuzzing with Fuzzilli.
+The [roadmap](https://github.com/ethndotsh/isolane/blob/main/docs/roadmap.md)
+tracks them.
+
+## Accepted risks
+
+These are recorded so that a review can sign them off.
+
+RSA in `crypto.subtle` is not constant-time, so a guest that can time many
+private-key operations with one key could learn it. The frozen clock makes
+that harder but not impossible. Native work that V8 cannot interrupt, such
+as RSA key generation (capped at 4,096 bits) and URLPattern parsing, runs
+on the isolate's thread and can overrun a time limit by its bounded cost.
+seccomp allows `uname`, which V8 needs on arm64, so a compromised worker
+can read the kernel release and the host name.
+
+## Reporting a vulnerability
+
+Report privately through GitHub's "Report a vulnerability" form on the
+repository, as `SECURITY.md` describes. Escapes from the lockdown, the V8
+sandbox as isolane configures it, cross-tenant access, policy bypasses,
+and the supervisor trusting worker output are all in scope.

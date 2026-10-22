@@ -1,0 +1,152 @@
+---
+title: Errors
+description: "IsolaneError, every error code with its kind and retryability, and the shape of a guest error."
+---
+
+## IsolaneError
+
+Every failure isolane reports to the host is an `IsolaneError`, a subclass of `Error` with `name` `'IsolaneError'`.
+
+| Field | Type | Description |
+|---|---|---|
+| `code` | `IsolaneErrorCode` | What failed. See [Codes](#codes). |
+| `kind` | `IsolaneErrorKind` | Whose problem it is: `guest`, `limit`, `usage`, `security`, or `infrastructure`. |
+| `retryable` | `boolean` | Running the same code again, unchanged, may succeed. |
+| `message` | `string` | A description of the failure. Most start with `isolane:`. |
+| `tenant` | `string`, optional | The tenant the failure happened in. |
+| `guest` | `GuestErrorInfo`, optional | For `ERR_GUEST_EXCEPTION` and `ERR_SETUP_IO`: what the guest threw. |
+| `limit` | `string`, optional | For `ERR_LIMIT`: the limit's name. |
+| `issues` | `SchemaIssue[]`, optional | For `ERR_INVALID_RETURN`: the schema's issues, each `{ message, path? }`. |
+| `reason` | `string`, optional | For `ERR_DENIED`: the hook's reason. For `ERR_ABORTED`: the signal's reason. |
+| `shim` | `ShimErrorInfo`, optional | For `ERR_SHIM`: `{ phase, index, filename }` of the shim that failed. |
+| `cause` | `unknown`, optional | For `ERR_ABORTED`: the signal's reason. |
+
+## Codes
+
+| Code | Kind | Retryable | Meaning |
+|---|---|---|---|
+| `ERR_GUEST_EXCEPTION` | guest | no | The guest's code threw, or its result promise rejected. See `err.guest`. |
+| `ERR_HANDLER_NOT_FOUND` | guest | no | `isolate.call` named no function the isolate defined, or `program.call` named no export and no method of the default export. |
+| `ERR_SETUP_IO` | guest | no | A program's setup failed after trying `fetch`, `connect()`, `fs`, or a host function, none of which setup can use. |
+| `ERR_UNSETTLED` | guest | no | The result is a promise that can never settle: nothing is left that could settle it. |
+| `ERR_NOT_SERIALIZABLE` | guest | no | The completion value cannot be encoded as JSON. |
+| `ERR_INVALID_RETURN` | guest | no | The completion value does not match the `returns` schema. See `err.issues`. |
+| `ERR_LIMIT` | limit | no, except for `workerMemoryBytes` | A limit was reached. `err.limit` names it. See [Limits](/reference/limits#what-every-limit-does). |
+| `ERR_ISOLATE_RETIRED` | limit | yes, on a new isolate, with one exception | An earlier eval or call stopped part-way, ran out of memory, or ran out of `backgroundMs`, or a worker recycle retired the isolate. |
+| `ERR_INVALID_CONFIG` | usage | no | The configuration or an argument is malformed. The message names the field. |
+| `ERR_ISOLATE_CLOSED` | usage | no | The isolate was closed, or its tenant's worker was stopped. |
+| `ERR_RUNTIME_CLOSED` | usage | no | The runtime was closed. |
+| `ERR_PROGRAM_CLOSED` | usage | no | The program was closed. |
+| `ERR_ABORTED` | usage | no | The eval's or call's `signal` was aborted. `err.reason` has the reason. |
+| `ERR_SHIM` | usage | no | One of the embedder's shims threw, or an `after` shim rejected or never settled. See `err.shim`. |
+| `ERR_DENIED` | usage | no | A `beforeEval` or `beforeCall` hook returned `deny()`. `err.reason` has the reason. |
+| `ERR_TENANT_QUARANTINED` | security | no | The tenant's worker had a security event within `quarantineMs`, so the runtime refuses it for now. |
+| `ERR_WORKER_CRASHED` | infrastructure | yes | The tenant's worker process died. It may be an exploit attempt; see `onSecurityEvent`. |
+| `ERR_WORKER_UNRESPONSIVE` | infrastructure | yes | The worker stopped answering and was killed. |
+| `ERR_WORKER_INCOMPATIBLE` | infrastructure | no | The worker binary speaks a different protocol version from this library. |
+| `ERR_ISOLATION_UNAVAILABLE` | infrastructure | no | Strict mode refused this host's isolation, or the worker has no secure V8 sandbox. |
+| `ERR_INTERNAL` | infrastructure | no | A bug in isolane. |
+
+`ERR_ISOLATE_RETIRED` is not retryable for a call that was running in a program instance alongside another call that was stopped part-way, under `instances.concurrency` above 1. That call may have done part of its work, so running it again is not the same as running it once.
+
+A `beforeHostCall` denial does not produce an `IsolaneError`. The guest's call rejects with an `Error` whose `code` is `ERR_DENIED`, and the eval continues.
+
+## What guest code sees
+
+Inside the isolate, failures are ordinary JavaScript errors, with a `code` where isolane adds one.
+
+| Cause | Class | Fields |
+|---|---|---|
+| A host function's arguments fail its `args` schema | `TypeError` | `code: 'ERR_INVALID_ARGUMENTS'` |
+| A host function's result fails its `returns` schema | `Error` | `code: 'ERR_INVALID_RETURN'` |
+| A host function threw | `TypeError`, `RangeError`, or `SyntaxError` if it was one, else `Error` | Its `message`, and its `code` if that is a string. Never its stack. |
+| A `beforeHostCall` hook denied the call | `Error` | `code: 'ERR_DENIED'` |
+| A host call past `pendingHostCalls`, `hostCalls`, or `pendingHostCallBytes`, or still pending one second past `timeoutMs` | `RangeError` | `code: 'ERR_LIMIT'`, and `limit` |
+| More live timers than `timers` | `RangeError` | |
+| A program's setup used `fetch`, `connect()`, `fs`, or a host function | an error | `code: 'ERR_SETUP_IO'` |
+| `fetch` refused by its policy or past a policy limit | `TypeError` | |
+| `connect` refused by its policy or past a policy limit | `Error` | The socket's `opened` and `closed` reject with it. |
+| An `fs` operation | `Error` | Node.js codes: `ENOENT`, `EEXIST`, `ENOTDIR`, `EISDIR`, `ENOTEMPTY`, `ELOOP`, `EACCES`, `EROFS`, `EFBIG` for `fileBytes`, `EDQUOT` for `writtenBytes`, `EMFILE` for `pendingOperations` |
+
+## GuestErrorInfo
+
+`err.guest`, and the `error` of a `GuestErrorEvent`, describe the value the guest threw.
+
+| Field | Type | Description |
+|---|---|---|
+| `name` | `string`, optional | `error.name`, when the thrown value has one. |
+| `message` | `string` | `error.message`, or the thrown value converted to a string. |
+| `stack` | `string`, optional | `error.stack`, without isolane's own frames. For code that did not compile: the place, the source line, a caret under the column, then the error, as Node.js prints it. |
+| `frames` | `GuestStackFrame[]` | The stack's frames, innermost first, at most 64. Empty when there are none. |
+| `location` | `GuestErrorLocation`, optional | Where code failed to compile, for a `SyntaxError` in the code itself. |
+| `cause` | `GuestErrorInfo`, optional | `error.cause`, described the same way. At most 8 deep. |
+| `errors` | `GuestErrorInfo[]`, optional | An `AggregateError`'s `errors`, at most 16. |
+| `properties` | object, optional | The error's own enumerable properties whose values are JSON, such as `code`. At most 16, 4 KiB each. |
+
+Each text is cut to 64 KiB, or 8 KiB inside `cause` and `errors`, with `…` marking the cut. At most 32 errors are described in all. Reading the error runs guest code, such as getters and Proxy traps, under the eval's limits; a property whose getter throws is skipped.
+
+isolane's own frames are the web platform's scripts, named `ext:…`, and isolane's, named `isolane:…`. They are removed from `stack` and `frames`. The guest's own `error.stack` keeps them, and `Error.prepareStackTrace` and `Error.captureStackTrace` work as in V8. A custom `prepareStackTrace` that returns a string is reported as is.
+
+For a program, frames in `stack` and `frames`, and the `location` of a syntax error, point at the original source files, through the source maps of transformed modules and of bundles that carry one.
+
+### GuestStackFrame
+
+| Field | Type | Description |
+|---|---|---|
+| `function` | `string` or `null` | The function, such as `handler`, `Foo.bar`, or `new Foo`. `null` at the top level. |
+| `file` | `string` or `null` | The script's name: an eval's `filename`, a program's module path, `<host>` for a host function, `<anonymous>`, or `native`. |
+| `line` | `number` or `null` | 1-based. `null` when the frame has no position, as for a host function. |
+| `column` | `number` or `null` | 1-based. |
+| `async` | `true`, optional | An `await` resumed this frame. |
+
+A failed host call has a frame for the host function, `at db.getOrder (<host>)`, above the guest's line that made the call.
+
+### GuestErrorLocation
+
+| Field | Type | Description |
+|---|---|---|
+| `file` | `string` | |
+| `line` | `number` | 1-based. |
+| `column` | `number` | 1-based. |
+| `sourceLine` | `string`, optional | The line, or a window around the column for a long line, and a caret under the column. |
+
+## Example
+
+```ts
+try {
+  await tenant.run(code, { filename: 'src/orders.js', host: { db } });
+} catch (err) {
+  if (!(err instanceof IsolaneError)) throw err;
+  if (err.kind === 'guest') console.log(err.guest?.frames[0]);
+  if (err.code === 'ERR_LIMIT') console.log('limit reached:', err.limit);
+  if (err.retryable) await retry();
+}
+```
+
+For this guest code, run with `filename: 'src/orders.js'`:
+
+```js src/orders.js lineNumbers
+function load(id) {
+  const order = orders.get(id);
+  if (!order)
+    throw new Error(`order ${id} not found`);
+  return order;
+}
+
+const orders = new Map();
+load(7);
+```
+
+`err.guest` is:
+
+```js
+{
+  name: 'Error',
+  message: 'order 7 not found',
+  stack: 'Error: order 7 not found\n    at load (src/orders.js:4:11)\n    at src/orders.js:9:1',
+  frames: [
+    { function: 'load', file: 'src/orders.js', line: 4, column: 11 },
+    { function: null, file: 'src/orders.js', line: 9, column: 1 },
+  ],
+}
+```

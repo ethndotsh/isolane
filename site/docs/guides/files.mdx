@@ -1,0 +1,77 @@
+---
+title: Give a tenant a directory
+description: Let guest code read, and optionally write, files under one host directory with an fs policy.
+---
+
+An `fs` policy gives guest code an `fs` object over one host directory, which it sees as `/`. Your process performs each operation after confining its path to that directory. Nothing outside it is reachable.
+
+## Read files
+
+```js
+const settings = await acme.run(
+  `fs.readFile('/settings.json', 'utf8').then(JSON.parse)`,
+  { fs: { root: '/srv/tenants/acme' } },
+);
+```
+
+`readFile` without an encoding resolves to a `Uint8Array`. The policy is read-only unless it sets `write: true`.
+
+## Allow writes
+
+```js
+await acme.run(
+  `(async () => {
+     await fs.mkdir('/reports', { recursive: true });
+     await fs.writeFile('/reports/today.csv', rows.join('\\n'));
+     return fs.readdir('/reports');
+   })()`,
+  { fs: { root: '/srv/tenants/acme', write: true }, globals: { rows: ['a,b', '1,2'] } },
+);
+// ['today.csv']
+```
+
+`writeFile` takes a string, which it writes as UTF-8, or bytes. It replaces an existing file and doesn't create parent directories. The guest can't remove or replace the root itself.
+
+## Choose the root
+
+Give each tenant its own directory, owned by the user your process runs as, and pass its absolute path. The guest's paths are resolved inside it: `/../../etc/passwd` names `etc/passwd` under the root. Symlinks inside the root are followed only while they point inside it.
+
+On Linux, each operation walks its path one directory at a time from descriptors it holds open, so another process swapping a symlink into the root during an operation can't redirect it outside. On macOS, the path is resolved first and then used, which such a process can race; don't give a macOS root to anything that another user or tenant can write.
+
+## Bound what a tenant can write
+
+```js
+fs: {
+  root: '/srv/tenants/acme',
+  write: true,
+  limits: { fileBytes: 1 << 20, writtenBytes: 50 << 20, pendingOperations: 4 },
+}
+```
+
+`writtenBytes` counts what one isolate writes over its life, and deletions don't give any of it back. It stops a runaway loop, but it isn't a disk quota: two isolates of the same tenant each get the full amount, and files stay after the isolate ends. Put each tenant's root on its own volume, or use filesystem quotas, when disk space matters.
+
+## Handle errors
+
+Errors carry a Node.js-style `code` and name only guest paths:
+
+| `code` | Cause |
+|---|---|
+| `ENOENT` | The path doesn't exist, or a parent directory is missing for `writeFile` |
+| `EROFS` | A write without `write: true` |
+| `EACCES` | A symlink leads outside the root |
+| `EPERM` | An attempt to remove or replace the root |
+| `EISDIR` | `readFile` of a directory, or `rm` of a directory without `recursive: true` |
+| `EFBIG` | A file over `limits.fileBytes` |
+| `EDQUOT` | The isolate has written `limits.writtenBytes` |
+| `EMFILE` | More than `limits.pendingOperations` operations at once |
+
+```js
+await acme.run(
+  `fs.readFile('/missing.txt').catch((err) => [err.code, err.message])`,
+  { fs: { root: '/srv/tenants/acme' } },
+);
+// ['ENOENT', 'fs.readFile "/missing.txt": no such file or directory']
+```
+
+Refusals, such as writes to a read-only root and paths that leave it, also fire `onPolicyDenial`. [Guest environment](/reference/guest-environment#fs) lists the `fs` methods and [capabilities](/reference/capabilities#fs) the policy's fields.
+

@@ -56,9 +56,9 @@ to attempt Spectre-style side channels.
 |---|---|---|
 | Read/modify another tenant's data or code | Process per tenant (default) | Isolate per VM; V8 sandbox |
 | Read the host app's secrets (DB credentials, tokens) | Guest never runs in the app process | Workers inherit no env vars or fds; IPC carries only framed JSON |
-| Escape to the machine (files, network, other processes) | seccomp allowlist in every worker | Landlock (no filesystem); namespaces where the host allows them (planned) |
+| Escape to the machine (files, network, other processes) | seccomp allowlist in every worker | Landlock (no filesystem, no TCP); namespaces and cgroups where the host allows them (planned) |
 | Side-channel reads (Spectre) | Separate processes per tenant; frozen clocks; no shared memory or threads | Quarantine on crashes |
-| Denial of service | Per-isolate heap limit; CPU and wall-clock budgets via `TerminateExecution` | Per-worker rlimits; worker count caps; cgroups where available (planned) |
+| Denial of service | Per-isolate heap limit; CPU and wall-clock budgets via `TerminateExecution` | Per-worker memory cap (`RLIMIT_DATA`); worker count caps; cgroups where available (planned) |
 | Persist after compromise | Workers recycled after `workerLifetimeMs` (1 hour) or `workerEvals` (100,000) | Crash = quarantine the tenant + replace the worker |
 
 **Trusted:** the isolane library running in the application's Node process,
@@ -93,7 +93,7 @@ code, the worker is treated as potentially compromised.
 ┌──────────────────────────────────────┐   pipe  ┌───────────────────────────────────────┐
 │ isolane library                      │◀───────▶│ worker: tenant A                      │
 │  - Runtime-shaped API               │         │  isolate per VM, watchdog thread      │
-│  - supervisor: spawn, lock down,     │   pipe  │  seccomp + Landlock (+ namespaces)    │
+│  - supervisor: spawn, lock down,     │   pipe  │  seccomp + Landlock                   │
 │    route by tenant, quotas,          │◀───────▶├───────────────────────────────────────┤
 │    quarantine                        │         │ worker: tenant B                      │
 │  - runs host functions (app secrets  │         │                                       │
@@ -164,29 +164,65 @@ code, the worker is treated as potentially compromised.
 - A watchdog thread enforces CPU and wall-clock budgets with
   `TerminateExecution`, which works inside JIT-compiled code.
 - An explicit stack limit per thread.
-- To evaluate: `--memory-protection-keys` (write-protects JIT code on CPUs
-  with PKU), and `--jitless` workers for quarantined tenants.
+- Not used yet: V8's `--memory-protection-keys` (write-protects JIT code
+  on CPUs with PKU) is to be evaluated, and a `--jitless` worker for
+  quarantined tenants is planned. Both are rows in `docs/roadmap.md`.
 
 ### L2: Worker process lockdown
 
-Every worker starts with an empty environment and only its pipe fds open.
-After V8 initializes, it applies:
+Every worker starts with an empty environment (apart from `TZ=UTC`, so
+`Date` doesn't reveal the host's time zone) and closes every inherited file
+descriptor except standard input, output, and error. It then locks itself
+down in this order (`crates/worker/src/lockdown.rs`):
 
-- **seccomp-bpf allowlist** (Linux): roughly `read`/`write` on its pipes,
-  `mmap`/`munmap`/`mprotect`/`madvise` (JIT), `futex`, `clock_gettime`,
-  `sched_yield`, signal return, and `exit`. Everything else (`open`,
-  `socket`, `connect`, `execve`, `ptrace`, namespace creation) kills the
-  process. This needs no privileges: `PR_SET_NO_NEW_PRIVS` plus a filter.
-- **Landlock** (Linux 5.13+, unprivileged): no filesystem access at all, as
-  a second layer under seccomp.
-- **Namespaces where the host allows unprivileged user namespaces:** PID,
-  network, mount, IPC. Many hosts block them (see below), so they are
-  opportunistic, never relied on.
-- **rlimits** on CPU time, file size, and process count, plus cgroup v2
-  limits when the application's cgroup is delegated. `RLIMIT_AS` is unusable
-  because the V8 sandbox reserves a very large virtual address range.
-- **macOS** (development and Mac hosts): the Seatbelt sandbox
-  (`sandbox_init` with a deny-by-default profile), as Chrome does.
+1. rlimits (Linux): `RLIMIT_CORE` and `RLIMIT_FSIZE` are set to 0, so a
+   crash writes no core dump holding tenant data and no file can be
+   written. `RLIMIT_DATA` caps the worker's private writable memory at
+   `limits.workerMemoryBytes` (macOS ignores it). No CPU-time or
+   process-count rlimit is set: `RLIMIT_NPROC` is per user, so it would cap
+   other workers' threads, and seccomp already forbids creating processes;
+   CPU is bounded by the watchdog, recycling, and `usage().workerCpuMs`.
+   `RLIMIT_AS` is unusable because the V8 sandbox reserves a very large
+   virtual address range.
+2. Landlock (Linux 5.13+, unprivileged), while the process is still
+   single-threaded, since Landlock restricts only the calling thread and its
+   future children: no filesystem access, and no TCP bind or connect on
+   kernels whose Landlock ABI has network rules (6.7 and later). It is a
+   second layer under seccomp.
+3. V8 initializes.
+4. seccomp-bpf on every thread (TSYNC), with no privileges needed
+   (`PR_SET_NO_NEW_PRIVS` plus a filter). The allowlist: `read`, `write`,
+   `close`; `mmap`, `munmap`, `mprotect`, `mremap`, `madvise`, `brk`,
+   `pkey_mprotect` (V8's heap, JIT, and sandbox; `PROT_EXEC` stays allowed,
+   since the JIT flips code pages at run time); `futex`, `membarrier`,
+   `sched_yield`, `sched_getaffinity`, `sched_getparam`,
+   `sched_getscheduler`, `set_robust_list`, `rseq`, `gettid`, `getpid`;
+   `clock_gettime`, `clock_nanosleep`, `nanosleep`; `rt_sigreturn`,
+   `rt_sigprocmask`, `rt_sigaction`, `sigaltstack`; `getrandom`; `uname`
+   (an accepted risk, above); `exit` and `exit_group`. `clone` is allowed
+   only for a thread: the memory, files, filesystem context, and signal
+   handlers shared, and no new namespace. `clone3` fails with `ENOSYS`, so
+   libc falls back to `clone`, whose flags the filter can inspect. File
+   calls (`open`, `openat`, `openat2`, `stat` and its variants,
+   `readlink`, `access`) fail with `EACCES`, as Landlock would answer them,
+   because V8, ICU, and abseil probe files lazily and fall back. `prctl`
+   allows only `PR_SET_NAME` and `PR_SET_VMA_ANON_NAME` (thread and
+   mapping names); other options fail with `EPERM`, and `PR_SET_DUMPABLE`,
+   `PR_SET_PTRACER`, and `PR_SET_MM` kill the process. Anything else
+   (`socket`, `connect`, `execve`, `fork`, `ptrace`, a `clone` that creates
+   a process or a namespace) kills the process.
+
+Namespaces and cgroups are planned, not built. The intent is to use
+unprivileged user, PID, network, mount, and IPC namespaces, and cgroup v2
+limits, where the host allows them, opportunistically and never relied on
+(`docs/roadmap.md`, "Opportunistic cgroups v2 and namespaces"). Today the
+worker creates none, and the seccomp filter kills a `clone` that asks for
+one, so they would have to be entered before the filter is applied.
+
+macOS has no lockdown today: no seccomp, no Landlock, and no enforcement
+of `RLIMIT_DATA` or CPU budgets, which is why strict mode refuses it. A
+Seatbelt profile (`sandbox_init` with a deny-by-default profile, as Chrome
+uses) is planned (`docs/roadmap.md`, "macOS: Seatbelt profile").
 
 ### Where the lockdown works
 
@@ -195,19 +231,26 @@ After V8 initializes, it applies:
 | Linux 5.13+ bare metal or VM | yes | yes | usually |
 | Ubuntu 24.04+ | yes | yes | blocked by AppArmor by default |
 | Docker / Kubernetes (default seccomp profile) | yes (nested filters work) | check (depends on the runtime's profile) | blocked |
-| macOS | Seatbelt instead | n/a | n/a |
+| macOS | no (Seatbelt planned) | n/a | n/a |
 | Windows | development mode only | n/a | n/a |
 
 seccomp is the baseline we require; Landlock is required where the kernel
-has it. The table's "check" entries are what P0/P3 verify.
+has it. The user-namespace column describes what a host permits, for the
+planned namespace layer; isolane uses none today. The table's "check"
+entries are what P0/P3 verify.
 
 ### Strict mode
 
-On by default when `NODE_ENV=production`. The pool refuses to start unless
-the required layers are active on this host: V8 sandbox, seccomp, and
-Landlock where the kernel supports it. `pool.isolationReport()` lists what
-is active, and `npx isolane doctor` prints the same report for a host before
-deploying. Development mode warns instead of refusing.
+On by default (`strict: true`), whatever `NODE_ENV` says. The runtime
+refuses to run guest code unless the worker reports a securely configured
+V8 sandbox, seccomp fully applied, and Landlock in force at least partially
+(`meetsStrict` in `ts/worker.ts`); a refusal is `ERR_ISOLATION_UNAVAILABLE`,
+not a security event. `runtime.isolationReport()` starts a probe worker,
+ignoring strict mode, and reports the V8 version, the sandbox, and which
+lockdown layers took effect. `strict: false` turns the check off for local
+development. A command-line report for a host before deploying,
+`npx isolane doctor`, is planned, not built (`docs/roadmap.md`, "`isolane
+doctor`").
 
 ### L3: Tenancy, recycling, quarantine
 
@@ -237,17 +280,27 @@ deploying. Development mode warns instead of refusing.
 
 ### L4: Shipping V8 fixes through npm
 
-- **Patch pipeline:** CI tracks Chrome stable security releases, rebuilds V8,
-  runs the full test and escape suites, and publishes a new npm version
-  **within 72 hours**. Owning the V8 build lets us cherry-pick an urgent fix
+- Patch pipeline (built): `.github/workflows/v8-update.yml` runs daily.
+  When upstream V8 has a newer patch release on the branch we build (where
+  security backports land), it bumps `V8_TAG` on a branch, runs CI on it,
+  and opens a pull request when CI passes. It opens an issue when the branch
+  leaves Chrome's support window (Stable and Extended Stable), which needs a
+  rusty_v8 upgrade by hand. Owning the V8 build lets us take an urgent fix
   without waiting for `rusty_v8`.
-- **Applications have to take updates.** We can't push fixes to an installed
-  package, so the worker embeds its V8 version and build date, and the pool
-  warns once the installed worker is older than a configurable age (default
-  30 days). Strict mode can be set to refuse a stale worker.
-- **Fuzzing:** Fuzzilli runs continuously against our exact embedder
-  configuration.
-- **External security review** before the first release that is
+- Releases: `release.yml` publishes from a tag, from CI only, and every
+  V8 patch bump is meant to be a patch release. No release has been made
+  yet. The target of a published release within 72 hours of a V8 security
+  fix is planned, not met (`docs/roadmap.md`).
+- Applications have to take updates. We can't push fixes to an
+  installed package. A staleness warning, comparing the installed worker's
+  V8 version with the newest patch release (and an option for strict mode
+  to refuse a stale worker), is planned, not built (`docs/roadmap.md`,
+  "Staleness warning").
+- Fuzzing: Fuzzilli against our exact embedder configuration is
+  planned, not running (`docs/roadmap.md`). What runs today is the protocol
+  fuzzer (hostile fake workers) and the V8 mjsunit corpus replayed under
+  lockdown, weekly in the soak workflow.
+- An external security review before the first release that is
   recommended for untrusted code.
 
 ## Packaging
@@ -267,9 +320,9 @@ deploying. Development mode warns instead of refusing.
 | P0 V8 build | V8 from source with the sandbox, for darwin-arm64 (this machine) and linux-x64 (OrbStack) | A test binary asserts the sandbox is active on both |
 | P1 Worker | Isolate per VM, run/eval, limits, `TerminateExecution`, frozen clocks, codegen off, Promise host calls | Port of clockwork's lane tests passes against a bare worker |
 | P2 Library | Supervisor in TS, framed IPC, process per tenant, lifecycle, `Runtime` API | Same tests pass through `npm`-style usage in Node |
-| P3 Lockdown | seccomp, Landlock, opportunistic namespaces, Seatbelt, strict mode, `isolane doctor` | Escape suite: a test-only "compromised worker" mode is refused `open` (EACCES) and killed on `socket`/`execve`/`ptrace`/`fork` every time, on each row of the host table |
+| P3 Lockdown | seccomp, Landlock, and strict mode (built); opportunistic namespaces, Seatbelt, and `isolane doctor` (planned) | Escape suite: a test-only "compromised worker" mode is refused `open` (EACCES) and killed on `socket`/`execve`/`ptrace`/`fork` every time, on each row of the host table |
 | P4 Packaging | CI matrix building V8 for six targets, per-platform npm packages, staleness checks | `npm install isolane` works on a clean machine per target |
-| P5 Security program | Patch pipeline, Fuzzilli, external review | **Gate: not recommended for untrusted code before P5 is complete** |
+| P5 Security program | Patch pipeline (built), Fuzzilli (planned), external review (planned) | **Gate: not recommended for untrusted code before P5 is complete** |
 
 ## Risks
 

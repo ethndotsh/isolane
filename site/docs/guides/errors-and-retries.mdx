@@ -1,0 +1,146 @@
+---
+title: Handle errors and retries
+description: Tell the tenant's failures from your own with err.kind, retry only what err.retryable allows, and show guest errors safely.
+---
+
+This guide sorts isolane's failures into those caused by the tenant's code,
+by a budget, by your code, and by the host, and retries only the ones where
+running again can succeed.
+
+## Branch on `kind`, then `code`
+
+Every failure is an `IsolaneError` with a `code`, a `kind`, a `retryable`
+flag, and the `tenant`:
+
+```js
+import { IsolaneError } from 'isolane';
+
+try {
+  return await program.call('handle', [input]);
+} catch (err) {
+  if (!(err instanceof IsolaneError)) throw err;
+  switch (err.kind) {
+    case 'guest': // the tenant's code threw, returned bad data, or named no handler
+      return reportToTenant(err);
+    case 'limit': // a budget ran out; err.limit says which
+      return tooBusyOrTooLarge(err);
+    case 'usage': // your code: bad config, closed objects, aborts, hook denials
+      throw err;
+    case 'security': // the tenant is quarantined after a security event
+      return refuseForNow(err);
+    case 'infrastructure': // the worker crashed, hung, or the host lacks isolation
+      return retryOrFail(err);
+  }
+}
+```
+
+The [errors reference](/reference/errors) lists every code with its kind.
+
+## Retry what is retryable
+
+`err.retryable` is `true` when running the same code again, unchanged, can
+succeed. That holds for `ERR_WORKER_CRASHED`, `ERR_WORKER_UNRESPONSIVE`,
+`ERR_ISOLATE_RETIRED`, and `ERR_LIMIT` for `workerMemoryBytes`, since a
+fresh worker has its full memory again. A guest exception or a timeout is
+not retryable: the same code with the same input fails the same way.
+
+```js
+async function withRetry(fn, attempts = 2) {
+  for (let i = 1; ; i++) {
+    try {
+      return await fn();
+    } catch (err) {
+      if (!(err instanceof IsolaneError) || !err.retryable || i >= attempts) throw err;
+    }
+  }
+}
+
+await withRetry(() => program.call('handle', [input]));
+```
+
+Retry only operations that are safe to repeat. A call that crashed its
+worker may have finished part of its work, such as a host call that wrote
+to your database, before it failed.
+
+For a program, run the retry against the program, not against an instance:
+the program replaces retired instances itself. A call that a retired
+instance refused before starting it is already retried once on another
+instance, so you do not see that case. For a stateful isolate,
+`ERR_ISOLATE_RETIRED` means "retry on a new isolate", as
+[Keep state in an isolate](/guides/stateful-isolates) shows.
+
+## Calls that ran beside a stopped call
+
+With `instances.concurrency` above 1, one call stopped part-way retires
+the whole instance, and the other calls running in it fail with
+`ERR_ISOLATE_RETIRED`. Those errors have `retryable: false`, because those
+calls may have done part of their work. Retry them only if the handler is
+idempotent.
+
+## A crash quarantines the tenant
+
+A worker that crashes, breaks the protocol, or stops responding is treated
+as a possible exploit attempt ([security model](/concepts/security-model)), and the tenant is refused for
+`quarantineMs`, 60 seconds by default. An immediate retry after
+`ERR_WORKER_CRASHED` therefore fails with `ERR_TENANT_QUARANTINED`:
+
+```text
+ERR_WORKER_CRASHED      infrastructure  retryable: true
+ERR_TENANT_QUARANTINED  security        retryable: false
+```
+
+Treat the quarantine as the answer for that period, and alert on
+`onSecurityEvent`. If you have checked the tenant and want it back early,
+call `runtime.tenant(name).release()`. Setting `quarantineMs: null` turns
+quarantine off, which lets a tenant that is probing for an exploit retry
+in a tight loop.
+
+## Show guest errors to the right person
+
+For `ERR_GUEST_EXCEPTION`, `err.guest` describes what the guest threw: its
+`name`, `message`, `stack`, parsed `frames`, `cause`, and, for a syntax
+error, a `location`. Stacks name the tenant's own files, with isolane's
+internal frames removed, and programs map them back through source maps to
+the original files.
+
+```js
+if (err.code === 'ERR_GUEST_EXCEPTION') {
+  console.log(err.guest.stack);
+  // Error: order 7 not found
+  //     at db.getOrder (<host>)
+  //     at load (src/orders.js:4:22)
+}
+```
+
+This text came from the tenant's code. Show it to the tenant who wrote the
+code, in their logs or dashboard, and escape it like any other untrusted
+string. Do not show it to that tenant's own end users, who should get a
+generic message and a request ID.
+
+Errors thrown by your host functions reach the guest with their `name`,
+`message`, and `code`, never their stack. A database driver's message can
+contain a connection string or part of a query, so catch errors inside host
+functions that wrap such libraries and throw a message the tenant may see.
+
+## Map errors to HTTP statuses
+
+When isolane runs behind an HTTP endpoint, these statuses fit the kinds:
+
+| Condition | Status |
+|---|---|
+| `kind === 'guest'` | 500, with the tenant's error in the tenant's logs |
+| `err.limit === 'bodyBytes'` | 413 |
+| `err.limit === 'instances.queueMs'` or `'instances.queue'` | 503 with `Retry-After` |
+| other `kind === 'limit'` | 503 |
+| `kind === 'security'` | 503 |
+| `kind === 'infrastructure'` or `'usage'` | 502 or 500, and an alert for you |
+
+## If every call fails with `ERR_ISOLATION_UNAVAILABLE`
+
+Strict mode, the default, refuses a host that lacks the V8 sandbox, a full
+seccomp filter, or Landlock. The message names what is missing. Check the
+host with `await runtime.isolationReport()`, and see
+[Deploy on Linux](/guides/deploy-on-linux). For local development on macOS,
+use `new Runtime({ strict: false })`; a development build of the worker,
+which has no V8 sandbox, also needs `ISOLANE_DEV_INSECURE=1` in the
+environment.
