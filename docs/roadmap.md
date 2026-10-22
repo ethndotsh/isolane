@@ -552,6 +552,8 @@ Measured against isolated-vm (Linux x64 under Rosetta; superseded by the CI comp
 | A `--jitless` worker for tenants on probation after a quarantine: it needs its own web snapshot (the embedded one is checked against V8's flags) and can't run WebAssembly, so `wasm: true` would need a clear refusal there | planned |
 | Metrics: per-tenant totals via `runtime.usage()` | done |
 | Metrics hooks: per-eval callback / OpenTelemetry export | planned |
+| Kubernetes: run the Linux tests in a kind cluster in CI, in a pod under the `restricted` Pod Security Standard with `seccompProfile: RuntimeDefault`, so that strict mode (seccomp inside the container's filter, Landlock) is known to hold there; then a "Run on Kubernetes" guide (securityContext, memory requests sized from `workerMemoryBytes` × tenants, `isolationReport()` as a startup probe) | planned |
+| A Kubernetes operator (CRDs for tenants and programs, scaling hosts on per-tenant load, rolling program versions). Deferred: isolane is a library with no server for an operator to manage, and the security gate, npm release, and container testing come first. Revisit if an `isolane serve` host is built | idea |
 
 ## 7. Packaging and platforms (P4)
 
